@@ -1,5 +1,11 @@
 # 02 — The machine language: YAML vs Fennel
 
+> **Superseded in part by [09-implementation-plan.md](09-implementation-plan.md).**
+> v1 ships **Fennel only** — there is no YAML machine loader — and in the
+> *plain-table* style, not the macro DSL sketched below. The macros remain the
+> intended v2 layer over an unchanged IR. Read this doc for the reasoning; read
+> `crates/loop-fennel/src/convert.rs` for the schema that actually loads.
+
 This is the authoring surface you'll touch every ticket, so it's the decision
 that most shapes the day-to-day feel. The machine has to express five things:
 

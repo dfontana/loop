@@ -1,9 +1,14 @@
-//! `loop` — the CLI. Wires the concrete implementations into the engine.
+//! `loop` — a local, ticket-level agent orchestrator.
 //!
-//! Wave 2 work; the command surface is fixed here so the other crates know what
-//! they must support.
+//! The CLI is the thin wiring layer: it resolves paths, loads the machine
+//! through the Fennel VM, stages the toolbox, and hands concrete
+//! implementations to the engine. Every actual decision lives in `loop-engine`.
 
 use clap::{Parser, Subcommand};
+use loop_core::Paths;
+
+mod commands;
+mod stage;
 
 #[derive(Parser)]
 #[command(
@@ -22,8 +27,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Scaffold ./.loop/ (machine.fnl, task.md, plan.md) from a template, and
-    /// ~/.config/loop/ on first use.
+    /// Scaffold ./.loop/ from a machine template, and ~/.config/loop/ on first use.
     Init {
         /// Ticket id, e.g. PROJ-1487.
         ticket: String,
@@ -31,11 +35,11 @@ enum Command {
         #[arg(long, default_value = "standard-ticket")]
         template: String,
     },
-    /// Lint the machine: graph reachability, dangling references, guard sanity.
+    /// Lint the machine: reachability, dangling references, guard sanity.
     Validate,
     /// Drive the machine to a terminal.
     Run {
-        /// Stop after this many transitions (on top of the machine's budget).
+        /// Stop after this many transitions, on top of the machine's budget.
         #[arg(long)]
         max_transitions: Option<u32>,
     },
@@ -45,12 +49,35 @@ enum Command {
         json: bool,
     },
     /// Continue an interrupted run from the folded resume point.
-    Resume,
-    /// Check the environment: pi on PATH, extensions installed, toolbox staged.
+    Resume {
+        #[arg(long)]
+        max_transitions: Option<u32>,
+    },
+    /// Check the environment: pi on PATH, toolbox staged, machine present.
     Doctor,
 }
 
-fn main() -> anyhow::Result<()> {
-    let _cli = Cli::parse();
-    todo!("wave 2")
+fn main() {
+    if let Err(e) = try_main() {
+        eprintln!("error: {e:#}");
+        std::process::exit(1);
+    }
+}
+
+fn try_main() -> anyhow::Result<()> {
+    let cli = Cli::parse();
+    let project_dir = match cli.dir {
+        Some(d) => d,
+        None => std::env::current_dir()?,
+    };
+    let paths = Paths::discover(project_dir);
+
+    match cli.command {
+        Command::Init { ticket, template } => commands::init(paths, &ticket, &template),
+        Command::Validate => commands::validate(paths),
+        Command::Run { max_transitions } => commands::run(paths, max_transitions, false),
+        Command::Resume { max_transitions } => commands::run(paths, max_transitions, true),
+        Command::Status { json } => commands::status(paths, json),
+        Command::Doctor => commands::doctor(paths),
+    }
 }

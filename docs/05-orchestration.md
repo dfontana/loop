@@ -1,5 +1,12 @@
 # 05 — Orchestration: spawning pi, and the three agent roles
 
+> **Superseded in part by [09-implementation-plan.md](09-implementation-plan.md).**
+> The harness is **Rust**, not Node/TS, and the vendored `ext/*.ts` are written
+> into `~/.config/loop/ext/` from the binary itself. **Session models are cut
+> from v1**: every stage runs fresh, and continuity is the ledger digest plus
+> artifacts. The three roles, the spawn flags, and the constrained `transition`
+> schema are all as described here.
+
 ## How a stage is spawned
 
 `loop` drives pi in **headless JSON mode**. Confirmed against the installed pi:
@@ -16,7 +23,7 @@ pi --print --mode json \
    --model     "${MODEL}:${THINKING}" \               # model + thinking in one token, e.g. claude-sonnet-5:high
    --tools     "${ALLOWLIST}" \                        # per-stage allowlist incl. injected `transition`
    -e ~/.loop/ext/transition-tool.ts \                # loop's OWN vendored ext (see below)
-   --append-system-prompt "@${RENDERED_PLAYBOOK}" \   # playbook rendered with the context namespace
+   --append-system-prompt "${RENDERED_PLAYBOOK}" \    # playbook rendered with the context namespace
    "${RENDERED_ENTRY_MESSAGE}"                         # short "you are entering STATE, cycle N" kickoff
 ```
 
@@ -45,6 +52,12 @@ Notes:
 - **`-e`** loads extensions per spawn. The harness points `scoped-tools` at the
   toolbox (`~/.loop/tools/*.yaml`) rather than a project `.pi/` — one env var
   (`PI_AGENT_DIR` or a wrapper) redirects it.
+- **`--append-system-prompt` takes a bare path, not `@path`.** pi's
+  `resolvePromptInput` does `existsSync` on the argument and reads it as a file
+  when it resolves, else treats it as literal text — so an `@` prefix silently
+  turns the whole playbook into the literal string `@/path/…`. (An earlier draft
+  of this doc got that wrong; verified against the installed pi's
+  `dist/core/resource-loader.js`.)
 - The **rendered playbook** goes in as an appended system prompt; the **entry
   message** is the short positional kickoff. Keeping the "how" in the system
   prompt and the "now do this instance" in the message mirrors how skills read.
@@ -108,13 +121,19 @@ Keeping Judge and Navigator cheap and separate matters:
 ```bash
 pi --print --mode json --no-session \
    --provider anthropic --model "claude-haiku-4-5:low" \
-   --no-builtin-tools -e ~/.loop/ext/verdict-tool.ts \   # only a `verdict(pass, rationale)` tool
+   --no-builtin-tools --no-extensions \                  # see note below
+   -e ~/.config/loop/ext/verdict-tool.ts \               # only a `verdict(pass, rationale)` tool
    --append-system-prompt "@${RENDERED_CRITERIA_PROMPT}" \
    "${WORKER_OUTPUT_DIGEST_AND_ARTIFACT_REFS}"
 ```
 
 The judge has **no code tools** — it reads artifacts (paths passed in) and
 returns a verdict. It cannot edit, deploy, or otherwise act.
+
+**`--no-builtin-tools` is not enough on its own**: without `--no-extensions`, an
+installed pi-extension (`scoped-tools`, `mcp`) still auto-discovers into the
+spawn, handing the Judge exactly the deploy-and-mutate surface its independence
+depends on not having. Both flags, on both the Judge and the Navigator.
 
 ### Navigator spawn (sketch)
 

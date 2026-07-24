@@ -38,10 +38,19 @@ is a five-minute assembly job, not a build.
 | [docs/06-example-walkthrough.md](docs/06-example-walkthrough.md) | A full Spark-pipeline ticket end to end: machine, spawns, and the ledger trace it produces |
 | [docs/07-risks.md](docs/07-risks.md) | Failure modes and the mitigations the design must carry |
 | [docs/08-prior-art.md](docs/08-prior-art.md) | LangGraph, Temporal/Restate, XState, Argo/GH Actions, StateFlow, OpenHands, autoresearch — what to steal |
+| [docs/09-implementation-plan.md](docs/09-implementation-plan.md) | **The v1 build**: crate layout, task waves, and the four decisions that supersede 01–08 |
 | [examples/](examples/) | Runnable-shaped config, split into `local/` (per-ticket) and `toolbox/` (the reusable globals) — machine, playbooks, tool YAML, machine templates, the ledger, and loop's own harness extensions |
 
 Start with **01**, then **02** (the language decision is the one I most want your
-read on), then **06** for the concrete feel.
+read on), then **06** for the concrete feel. **09** records what the v1 build
+settled and where it departs from 01–08.
+
+## Status
+
+v1 is under construction: a Rust workspace (`crates/`) driving `pi`, with the
+machine authored in Fennel and evaluated in an embedded Lua VM. The toolbox
+lives in `~/.config/loop/`; generated files go to `~/.local/state/loop/`.
+See [docs/09](docs/09-implementation-plan.md).
 
 ## Relationship to `pi-extensions`
 

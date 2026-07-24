@@ -1,5 +1,12 @@
 # 04 — The toolbox
 
+> **Superseded in part by [09-implementation-plan.md](09-implementation-plan.md).**
+> The toolbox lives at **`~/.config/loop/`**, not `~/.loop/`, and everything
+> loop *generates* (the merged `scoped-tools.yaml`, `mcp.json`, rendered
+> prompts) goes to **`~/.local/state/loop/`** — which is what `PI_AGENT_DIR`
+> points at, so nothing generated lands in the directory you hand-edit.
+> `loop.config.yaml` is now `config.fnl`. Everything else here holds.
+
 The toolbox is the portable, out-of-project library the "hack it per ticket, then
 discard" workflow draws on. A ticket's `./.loop/` directory holds only what's
 *unique* to that ticket; everything reusable lives in `~/.loop/` and is
