@@ -98,7 +98,15 @@ impl FennelVm {
             .parent()
             .map(Path::to_path_buf)
             .unwrap_or_else(|| PathBuf::from("."));
-        convert::machine_from_table(self, &table, &machine_dir, source_hash, path, config)
+        convert::machine_from_table(
+            self,
+            &table,
+            &machine_dir,
+            &source,
+            source_hash,
+            path,
+            config,
+        )
     }
 
     /// A missing/empty file compiles to Lua `nil`; treat that as an empty

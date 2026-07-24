@@ -105,3 +105,26 @@ tests driving the real binary against `mock-pi`, port `examples/local/` and
 
 Every task ends green on `cargo fmt --check`, `cargo clippy -- -D warnings`, and
 `cargo test`; wave 2 additionally requires the end-to-end run to reach `done`.
+
+## What integration cost — worth reading before the next wave
+
+All five wave-1 crates passed their own suites. Wiring them behind one binary
+still surfaced six defects, and **every one lived at a seam** no single crate's
+tests could see:
+
+| Defect | The seam |
+|---|---|
+| `when_src` was a `file:line` label; `validate` parses it for var scopes | loop-fennel wrote it, loop-engine read it, neither was wrong alone |
+| Scope extraction reported the guard's parameter `v`, not the scope `qa` | the guard's shape (`(fn [v] …)`) lives in one crate, the parser in another |
+| "can fix what it's judging" warned on `implement` | the heuristic was written against a rule, not against the template we ship |
+| A loop head re-entered only via `on_fail: route` read as never re-entered | `validate` and the engine disagreed on what re-entry means |
+| A crashed worker escalated instead of retrying | the proposal layer renders "crashed" and "stuck" identically |
+| A torn ledger line was skipped but never truncated | only shows up on the *second* read, after an append |
+
+The lesson for wave 3: parallel tasks against a fixed IR works well — the crates
+merged without a single conflict — but the IR's *doc comments* are the real
+contract, and every ambiguous one ("human-readable form of the guard") became a
+bug. Spend the extra sentence.
+
+`crates/loop-cli/tests/e2e.rs` now drives the real binary against `mock-pi` and
+is the gate that would have caught all six.

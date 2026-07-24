@@ -48,6 +48,12 @@ pub struct Engine<'a> {
     pub started_at: Option<std::time::Instant>,
 }
 
+/// How many times a stage may die mid-flight before the run escalates rather
+/// than retrying. A crash is worth retrying — a flaky spawn, an OOM, a dropped
+/// connection — but a stage that dies every time is a real fault, and spinning
+/// on it burns budget silently, which is the failure docs/07 #3 exists to stop.
+const MAX_CRASH_ATTEMPTS: u32 = 3;
+
 /// How a finished run came out.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Outcome {
@@ -445,7 +451,16 @@ impl Engine<'_> {
         _crashed: bool,
     ) -> Result<Option<Outcome>> {
         if self.machine.is_terminal(&state) {
-            return self.finish_now(rs, RunStatus::Done, Some(state));
+            // Not every terminal is a success. Landing on the escalation state
+            // is how an exhausted loop, a capped Navigator, or a stuck worker
+            // gives up — reporting that as `done` would tell a human (or a CI
+            // wrapper reading the exit status) that the ticket went through.
+            let status = if self.machine.escalation_state.as_deref() == Some(state.as_str()) {
+                RunStatus::Failed
+            } else {
+                RunStatus::Done
+            };
+            return self.finish_now(rs, status, Some(state));
         }
 
         if let Some(outcome) = self.check_budgets(rs)? {
@@ -472,12 +487,47 @@ impl Engine<'_> {
             cycle,
             attempt,
             session_id: plan.spec.session_id.clone(),
-            model: plan.spec.model.pi_model_arg(),
+            // The bare model id: `thinking` is its own field, and
+            // `pi_model_arg()` would render `claude-sonnet-5:high` here and
+            // then `high` again beside it.
+            model: plan.spec.model.model.clone(),
             thinking: plan.spec.model.thinking.to_string(),
             tools: plan.spec.tools.clone(),
         })?;
 
         let result = self.runner.run_worker(&plan.spec)?;
+
+        // A worker whose process died is a *crashed* stage, not a *stuck* one,
+        // and the two must not be conflated: a stuck worker asked to be routed
+        // and the Navigator should answer, while a crash is infrastructure
+        // failing under a worker that never got to decide anything. Escalating
+        // on a crash abandons a run that a re-entry would have finished
+        // (docs/03 "Idempotency & re-entry", docs/07 #8).
+        //
+        // No `worker_output` is written, so the ledger tail stays
+        // "state_entered with nothing after it" — exactly the shape the fold
+        // already reads as a crash, which is what makes an out-of-process
+        // `loop resume` behave identically to this in-process retry.
+        if !result.exit_ok {
+            let attempts_so_far = rs.attempts_of(&state, cycle) + 1;
+            self.ledger.append(EventPayload::Error {
+                state: Some(state.clone()),
+                kind: ErrorKind::Transient,
+                detail: format!(
+                    "worker process failed (attempt {attempts_so_far} of {MAX_CRASH_ATTEMPTS})"
+                ),
+            })?;
+            if attempts_so_far >= MAX_CRASH_ATTEMPTS {
+                self.ledger.append(EventPayload::Note {
+                    text: format!(
+                        "state `{state}` crashed {attempts_so_far} times; escalating rather than \
+                         retrying forever"
+                    ),
+                })?;
+                return self.escalate(rs, &state);
+            }
+            return Ok(None);
+        }
 
         // Capture artifacts and merge trusted vars *before* `worker_output` —
         // if a crash lands between them, re-entry redoes the stage and

@@ -218,7 +218,17 @@ pub fn run(paths: Paths, max_transitions: Option<u32>, resuming: bool) -> Result
         outcome.totals.cost_usd,
         fmt_duration(outcome.totals.wallclock_s),
     );
-    Ok(())
+
+    // A run that escalated or blew a budget must not report success: this exit
+    // status is what a CI wrapper or a `loop run && gh pr merge` gates on.
+    match outcome.status {
+        loop_core::RunStatus::Done => Ok(()),
+        loop_core::RunStatus::Failed => bail!(
+            "run ended at `{}` without completing — see `loop status`",
+            outcome.terminal_state.as_deref().unwrap_or("?")
+        ),
+        loop_core::RunStatus::Aborted => bail!("run aborted — see `loop status` for the guardrail"),
+    }
 }
 
 pub fn status(paths: Paths, json: bool) -> Result<()> {
@@ -229,7 +239,21 @@ pub fn status(paths: Paths, json: bool) -> Result<()> {
         println!("no run yet — `loop run` starts one");
         return Ok(());
     }
-    let folded = loop_core::fold(&events);
+    // Fold against the machine's real loop heads when the machine still loads,
+    // so "cycles" means cycles. The bare `fold` treats every state as a head,
+    // which would list `done#1` alongside a genuine `implement#2`. Status has
+    // to keep working when the machine is missing or mid-edit, though — that is
+    // often exactly when you want it — so a load failure just costs the line.
+    let loop_heads: Option<Vec<String>> = load(paths.clone()).ok().map(|(_vm, _cfg, m)| {
+        m.loops
+            .iter()
+            .filter_map(|l| l.head().cloned())
+            .collect::<Vec<_>>()
+    });
+    let folded = match &loop_heads {
+        Some(heads) => loop_core::fold_with_loop_heads(&events, &|s| heads.iter().any(|h| h == s)),
+        None => loop_core::fold(&events),
+    };
 
     if json {
         let out = serde_json::json!({
@@ -258,7 +282,7 @@ pub fn status(paths: Paths, json: bool) -> Result<()> {
         folded.totals.cost_usd,
         fmt_duration(folded.totals.wallclock_s)
     );
-    if !folded.cycles.is_empty() {
+    if loop_heads.is_some() && !folded.cycles.is_empty() {
         let cycles: Vec<String> = folded
             .cycles
             .iter()

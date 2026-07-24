@@ -30,13 +30,15 @@ pub struct Ledger {
 }
 
 impl Ledger {
-    /// Open or create the ledger at `path`, creating parent directories.
+    /// Open or create the ledger at `path`, creating parent directories and
+    /// repairing a torn trailing line left by a crash mid-write.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
         if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
             fs::create_dir_all(parent)
                 .io_ctx(format!("creating ledger directory {}", parent.display()))?;
         }
+        repair_torn_tail(&path)?;
         let file = OpenOptions::new()
             .create(true)
             .append(true)
@@ -105,6 +107,58 @@ impl LedgerSink for Ledger {
         };
         parse_events(&content, &self.path)
     }
+}
+
+/// Physically truncate a torn trailing line, so the file on disk is only ever
+/// whole events.
+///
+/// Skipping the torn line at read time is not enough. It is tolerated *because
+/// it is last* — so the moment the harness appends the next event, that torn
+/// line becomes interior, and every subsequent read fails as corruption. A run
+/// interrupted mid-write would resume once and then be permanently unreadable.
+///
+/// Repairing on open (docs/07-risks.md #9 says the reader "tolerates and
+/// truncates") makes the crash cost exactly what it should: the one event that
+/// was still in flight, and nothing else. Idempotent, so opening a healthy
+/// ledger does no I/O beyond the read.
+fn repair_torn_tail(path: &Path) -> Result<()> {
+    let content = match fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => {
+            return Err(CoreError::io(
+                format!("reading ledger {}", path.display()),
+                e,
+            ));
+        }
+    };
+    if content.is_empty() {
+        return Ok(());
+    }
+
+    // Byte offset just past the last line that parses as a whole event.
+    let mut good_len = 0usize;
+    let mut offset = 0usize;
+    for line in content.split_inclusive('\n') {
+        let trimmed = line.strip_suffix('\n').unwrap_or(line);
+        if trimmed.trim().is_empty() || serde_json::from_str::<Event>(trimmed).is_ok() {
+            good_len = offset + line.len();
+        }
+        offset += line.len();
+    }
+
+    if good_len == content.len() {
+        return Ok(());
+    }
+    let file = OpenOptions::new()
+        .write(true)
+        .open(path)
+        .io_ctx(format!("opening ledger {} to repair", path.display()))?;
+    file.set_len(good_len as u64)
+        .io_ctx(format!("truncating torn tail of {}", path.display()))?;
+    file.sync_all()
+        .io_ctx(format!("fsyncing repaired ledger {}", path.display()))?;
+    Ok(())
 }
 
 /// Parse newline-delimited events, tolerating an unparseable *last* line (a
@@ -467,5 +521,80 @@ mod tests {
         let ledger = Ledger::open(&missing).unwrap();
         fs::remove_file(&missing).unwrap();
         assert!(ledger.read_all().unwrap().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod repair_tests {
+    use super::*;
+
+    fn torn_ledger() -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ledger.jsonl");
+        {
+            let mut l = Ledger::open(&path).unwrap();
+            l.append(EventPayload::Note { text: "one".into() }).unwrap();
+            l.append(EventPayload::Note { text: "two".into() }).unwrap();
+        }
+        // A write that died partway through.
+        let mut f = OpenOptions::new().append(true).open(&path).unwrap();
+        f.write_all(b"{\"ts\":\"2026-07-24T00:00:00Z\",\"type\":\"worker_ou")
+            .unwrap();
+        f.sync_data().unwrap();
+        (dir, path)
+    }
+
+    /// The regression that motivated repairing on open: skipping the torn line
+    /// only works while it is *last*. Append after it and it becomes interior,
+    /// so every later read fails and the run can never be resumed again.
+    #[test]
+    fn appending_after_a_torn_tail_keeps_the_ledger_readable() {
+        let (_dir, path) = torn_ledger();
+
+        let mut ledger = Ledger::open(&path).unwrap();
+        assert_eq!(ledger.read_all().unwrap().len(), 2);
+
+        ledger
+            .append(EventPayload::Note {
+                text: "after the crash".into(),
+            })
+            .unwrap();
+
+        let events = ledger.read_all().expect("must still read after appending");
+        assert_eq!(events.len(), 3);
+
+        // And again, through a fresh handle, the way `loop resume` would.
+        let reopened = Ledger::open(&path).unwrap();
+        assert_eq!(reopened.read_all().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn repair_truncates_only_the_torn_line() {
+        let (_dir, path) = torn_ledger();
+        let before = fs::read_to_string(&path).unwrap();
+        assert!(before.contains("worker_ou"));
+
+        let _ledger = Ledger::open(&path).unwrap();
+
+        let after = fs::read_to_string(&path).unwrap();
+        assert!(
+            !after.contains("worker_ou"),
+            "torn line survived: {after:?}"
+        );
+        assert_eq!(after.lines().count(), 2);
+        assert!(after.ends_with('\n'));
+    }
+
+    #[test]
+    fn repair_is_a_no_op_on_a_healthy_ledger() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ledger.jsonl");
+        {
+            let mut l = Ledger::open(&path).unwrap();
+            l.append(EventPayload::Note { text: "one".into() }).unwrap();
+        }
+        let before = fs::read_to_string(&path).unwrap();
+        let _ledger = Ledger::open(&path).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), before);
     }
 }

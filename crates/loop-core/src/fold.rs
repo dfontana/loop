@@ -134,6 +134,17 @@ pub fn fold_with_loop_heads(events: &[Event], is_loop_head: &dyn Fn(&str) -> boo
             EventPayload::StateEntered { state, cycle, .. } => {
                 *rs.attempts.entry((state.clone(), *cycle)).or_insert(0) += 1;
                 rs.current = Some(state.clone());
+                // A loop head reached by an edge got its cycle bumped by the
+                // `transition_committed` below. A loop head that is also the
+                // machine's *entry* is never committed into, so its first
+                // entry has to seed the counter here — otherwise it sits at 0
+                // through cycle one and every later cycle is off by one, which
+                // silently buys the loop an extra `max_cycles` iteration.
+                // Guarded on `== 0`, so a retry (a new attempt, not a new
+                // cycle) never bumps it.
+                if is_loop_head(state) && rs.cycles.get(state).copied().unwrap_or(0) == 0 {
+                    rs.cycles.insert(state.clone(), 1);
+                }
                 tail = Tail::EnteredWithoutOutput {
                     state: state.clone(),
                 };
@@ -559,5 +570,92 @@ mod tests {
             rs.artifacts.get("diff").map(String::as_str),
             Some(".loop/artifacts/debug-1-diff.patch")
         );
+    }
+}
+
+#[cfg(test)]
+mod entry_head_tests {
+    use super::*;
+    use crate::event::{Event, EventPayload};
+
+    fn ev(payload: EventPayload) -> Event {
+        Event {
+            ts: "2026-07-24T00:00:00.000Z".into(),
+            payload,
+        }
+    }
+
+    fn entered(state: &str, cycle: u32, attempt: u32) -> Event {
+        ev(EventPayload::StateEntered {
+            state: state.into(),
+            cycle,
+            attempt,
+            session_id: None,
+            model: "m".into(),
+            thinking: "low".into(),
+            tools: vec![],
+        })
+    }
+
+    fn committed(from: &str, to: &str, cycle: u32) -> Event {
+        ev(EventPayload::TransitionCommitted {
+            from: from.into(),
+            to: to.into(),
+            cycle,
+        })
+    }
+
+    /// A loop head that is also the entry state — the shape the shipped
+    /// `standard-ticket` template has. Its first entry is never committed
+    /// into, so without seeding at `state_entered` it would still read as
+    /// cycle 0 partway through cycle two, handing the loop a free iteration
+    /// past `max_cycles`.
+    #[test]
+    fn entry_state_that_is_a_loop_head_counts_its_first_entry() {
+        let head = |s: &str| s == "implement";
+
+        let rs = fold_with_loop_heads(&[entered("implement", 1, 1)], &head);
+        assert_eq!(rs.cycle_of("implement"), 1, "first entry is cycle 1");
+
+        let rs = fold_with_loop_heads(
+            &[
+                entered("implement", 1, 1),
+                committed("implement", "review", 1),
+                entered("review", 1, 1),
+                committed("review", "implement", 1),
+                entered("implement", 2, 1),
+            ],
+            &head,
+        );
+        assert_eq!(rs.cycle_of("implement"), 2, "back-edge starts cycle 2");
+    }
+
+    /// A retry is a new attempt, not a new cycle — the seeding must not fire
+    /// twice for the same entry.
+    #[test]
+    fn retrying_the_entry_head_does_not_advance_the_cycle() {
+        let head = |s: &str| s == "implement";
+        let rs = fold_with_loop_heads(
+            &[entered("implement", 1, 1), entered("implement", 1, 2)],
+            &head,
+        );
+        assert_eq!(rs.cycle_of("implement"), 1);
+        assert_eq!(rs.attempts_of("implement", 1), 2);
+    }
+
+    /// A loop head reached by an edge is bumped by the commit, and must not be
+    /// double-counted by the subsequent `state_entered`.
+    #[test]
+    fn loop_head_reached_by_an_edge_is_counted_once() {
+        let head = |s: &str| s == "qa";
+        let rs = fold_with_loop_heads(
+            &[
+                entered("implement", 1, 1),
+                committed("implement", "qa", 1),
+                entered("qa", 1, 1),
+            ],
+            &head,
+        );
+        assert_eq!(rs.cycle_of("qa"), 1);
     }
 }

@@ -463,7 +463,9 @@ fn max_cycles_exhaustion_escalates() {
     let mut ledger = FakeLedger::default();
     let outcome = run(&m, &guards, &runner, &mut ledger);
 
-    assert_eq!(outcome.status, RunStatus::Done);
+    // Escalation is a failed run, not a successful one: the ticket did not
+    // go through, and the exit status must say so.
+    assert_eq!(outcome.status, RunStatus::Failed);
     assert_eq!(outcome.terminal_state.as_deref(), Some("blocked"));
 
     // cycle 1 (from `start`), cycle 2 (self-loop) both run; the 3rd would
@@ -537,7 +539,9 @@ fn navigator_cap_exceeded_escalates_without_spawning() {
     let mut ledger = FakeLedger::default();
     let outcome = run(&m, &guards, &runner, &mut ledger);
 
-    assert_eq!(outcome.status, RunStatus::Done);
+    // Escalation is a failed run, not a successful one: the ticket did not
+    // go through, and the exit status must say so.
+    assert_eq!(outcome.status, RunStatus::Failed);
     assert_eq!(outcome.terminal_state.as_deref(), Some("blocked"));
     assert_eq!(runner.navigator_calls.borrow().len(), 2);
     assert_eq!(ledger.payloads_of("navigator_invoked").len(), 2);
@@ -674,7 +678,9 @@ fn navigator_choosing_escalate_routes_to_escalation_state() {
     let mut ledger = FakeLedger::default();
     let outcome = run(&m, &guards, &runner, &mut ledger);
 
-    assert_eq!(outcome.status, RunStatus::Done);
+    // Escalation is a failed run, not a successful one: the ticket did not
+    // go through, and the exit status must say so.
+    assert_eq!(outcome.status, RunStatus::Failed);
     assert_eq!(outcome.terminal_state.as_deref(), Some("blocked"));
     // Escalation is a harness override: no guard_checked for this commit.
     assert!(ledger.payloads_of("guard_checked").is_empty());
@@ -802,18 +808,197 @@ fn validate_warns_on_ungrounded_when_gate() {
 }
 
 #[test]
-fn validate_warns_on_qa_shaped_state_with_edit_or_write() {
+fn validate_warns_on_validation_state_with_edit_or_write() {
     let mut m = base_machine();
-    m.entry = "a".into();
+    m.entry = "qa-staging".into();
     m.terminals.insert("done".into());
-    m.states
-        .insert("a".into(), state_with_tools("a", &["read", "edit"]));
+    m.states.insert(
+        "qa-staging".into(),
+        state_with_tools("qa-staging", &["read", "edit"]),
+    );
     m.transitions
-        .push(judged_edge("a", "done", "looks correct"));
+        .push(judged_edge("qa-staging", "done", "looks correct"));
     let diags = crate::validate(&m, &always_resolves);
     assert!(
         diags
             .iter()
             .any(|d| d.severity == crate::Severity::Warning && d.message.contains("allowlists"))
+    );
+}
+
+/// The counterpart, and the reason the trigger is the stage's identity rather
+/// than "gates a criteria edge": `implement → review` is criteria-gated and
+/// `implement` must be able to edit. Warning there fires on every ordinary
+/// machine — including the shipped `standard-ticket` template — which is how
+/// you teach someone to ignore warnings.
+#[test]
+fn validate_does_not_warn_on_an_implement_state_that_edits() {
+    let mut m = base_machine();
+    m.entry = "implement".into();
+    m.terminals.insert("done".into());
+    m.states.insert(
+        "implement".into(),
+        state_with_tools("implement", &["read", "edit", "write"]),
+    );
+    m.transitions
+        .push(judged_edge("implement", "done", "the plan is done"));
+    let diags = crate::validate(&m, &always_resolves);
+    assert!(
+        !diags.iter().any(|d| d.message.contains("allowlists")),
+        "implement legitimately edits; got: {diags:?}"
+    );
+}
+
+/// The scope of `v.qa.result` is `qa`, not the guard's parameter `v`. Getting
+/// this wrong makes every ungrounded-var warning name the same meaningless
+/// scope, which is how the check quietly stops earning its keep.
+#[test]
+fn guard_scope_extraction_skips_the_fn_parameter() {
+    let scopes = crate::validate::extract_var_scopes(
+        r#"(fn [v] (and (= v.qa.result "fail") (not= v.qa.error_class "transient")))"#,
+    );
+    assert!(scopes.contains("qa"), "got {scopes:?}");
+    assert!(!scopes.contains("v"), "got {scopes:?}");
+}
+
+#[test]
+fn guard_scope_extraction_falls_back_when_there_is_no_fn_head() {
+    let scopes = crate::validate::extract_var_scopes("build.status == 'pass'");
+    assert!(scopes.contains("build"), "got {scopes:?}");
+}
+
+/// A loop head re-entered only by an `on_fail: route` is still a loop head.
+/// The shipped `standard-ticket` template loops exactly this way — a failed
+/// Judge routes back to `implement` — so treating routes as non-re-entry made
+/// `loop validate` reject the template it ships with.
+#[test]
+fn validate_counts_an_on_fail_route_as_loop_head_re_entry() {
+    let mut m = base_machine();
+    m.entry = "implement".into();
+    m.terminals.insert("done".into());
+    m.states.insert("implement".into(), state("implement"));
+    m.states.insert("review".into(), state("review"));
+    m.transitions.push(loop_core::Transition {
+        on_fail: OnFail::Route("implement".into()),
+        ..judged_edge("review", "done", "no blocking defects")
+    });
+    m.transitions
+        .push(judged_edge("implement", "review", "plan done"));
+    m.loops.push(loop_core::LoopSpec {
+        name: "fix".into(),
+        states: vec!["implement".into(), "review".into()],
+        max_cycles: 4,
+        on_exhausted: OnExhausted::Escalate,
+    });
+
+    let diags = crate::validate(&m, &always_resolves);
+    assert!(
+        !diags.iter().any(|d| d.message.contains("never re-entered")),
+        "got: {diags:?}"
+    );
+}
+
+/// Reaching the escalation terminal is a failed run, not a successful one.
+/// `blocked` is where an exhausted loop, a capped Navigator, or a worker that
+/// cannot route itself ends up — reporting `done` there would tell a human, or
+/// a CI wrapper reading the exit status, that the ticket went through.
+#[test]
+fn reaching_the_escalation_terminal_reports_failed_not_done() {
+    let reg = GuardRegistry::default();
+    let mut m = base_machine();
+    m.entry = "work".into();
+    m.terminals.insert("done".into());
+    m.terminals.insert("blocked".into());
+    m.escalation_state = Some("blocked".into());
+    m.states.insert("work".into(), state("work"));
+    m.transitions
+        .push(reg.edge_when("work", "done", "qa.result == 'pass'", |v| {
+            v.get_path("qa.result") == Some(&json!("pass"))
+        }));
+
+    let runner = FakeRunner::default();
+    runner.script_worker("work", worker_result(proposal_blocked("cannot proceed")));
+    runner.script_navigator(choice_with_addendum("blocked", "needs a human"));
+
+    let guards = reg.evaluator();
+    let mut ledger = FakeLedger::default();
+    let outcome = run(&m, &guards, &runner, &mut ledger);
+
+    assert_eq!(outcome.terminal_state.as_deref(), Some("blocked"));
+    assert_eq!(outcome.status, RunStatus::Failed);
+}
+
+// ── crashed vs stuck workers ─────────────────────────────────────────────
+
+/// A worker whose *process* died must be re-entered, not escalated. The two
+/// failures look alike at the proposal layer (both yield no transition) but
+/// mean opposite things: a stuck worker asked for routing, a crashed one never
+/// got to decide. Escalating on a crash throws away a run a retry would have
+/// finished.
+#[test]
+fn a_crashed_worker_is_re_entered_not_escalated() {
+    let mut m = base_machine();
+    m.entry = "test".into();
+    m.terminals.insert("done".into());
+    m.terminals.insert("blocked".into());
+    m.escalation_state = Some("blocked".into());
+    m.states.insert("test".into(), state("test"));
+    m.transitions.push(edge("test", "done"));
+
+    let runner = FakeRunner::default();
+    let mut crashed = worker_result(proposal_to("done", "unused"));
+    crashed.exit_ok = false;
+    crashed.proposal = None;
+    runner.script_worker("test", crashed);
+    runner.script_worker("test", worker_result(proposal_to("done", "suite green")));
+
+    let guards = GuardRegistry::default().evaluator();
+    let mut ledger = FakeLedger::default();
+    let outcome = run(&m, &guards, &runner, &mut ledger);
+
+    assert_eq!(outcome.status, RunStatus::Done);
+    assert_eq!(outcome.terminal_state.as_deref(), Some("done"));
+
+    // Re-entered with a second attempt, and no navigator was consulted.
+    let entered = ledger.payloads_of("state_entered");
+    assert_eq!(entered.len(), 2);
+    assert!(ledger.payloads_of("navigator_invoked").is_empty());
+
+    // The crash left no `worker_output`, so the ledger tail keeps the shape
+    // the fold reads as "crashed mid-flight" — an out-of-process `loop resume`
+    // therefore recovers exactly as this in-process retry did.
+    assert_eq!(ledger.payloads_of("worker_output").len(), 1);
+    assert_eq!(ledger.payloads_of("error").len(), 1);
+}
+
+/// ...but a stage that dies every time is a real fault, not a flake. It must
+/// stop rather than spin on the budget.
+#[test]
+fn a_stage_that_always_crashes_escalates_after_the_cap() {
+    let mut m = base_machine();
+    m.entry = "test".into();
+    m.terminals.insert("done".into());
+    m.terminals.insert("blocked".into());
+    m.escalation_state = Some("blocked".into());
+    m.states.insert("test".into(), state("test"));
+    m.transitions.push(edge("test", "done"));
+
+    let runner = FakeRunner::default();
+    for _ in 0..crate::MAX_CRASH_ATTEMPTS + 2 {
+        let mut crashed = worker_result(proposal_to("done", "unused"));
+        crashed.exit_ok = false;
+        crashed.proposal = None;
+        runner.script_worker("test", crashed);
+    }
+
+    let guards = GuardRegistry::default().evaluator();
+    let mut ledger = FakeLedger::default();
+    let outcome = run(&m, &guards, &runner, &mut ledger);
+
+    assert_eq!(outcome.status, RunStatus::Failed);
+    assert_eq!(outcome.terminal_state.as_deref(), Some("blocked"));
+    assert_eq!(
+        ledger.payloads_of("state_entered").len(),
+        crate::MAX_CRASH_ATTEMPTS as usize
     );
 }

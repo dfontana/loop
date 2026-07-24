@@ -49,9 +49,11 @@
 //! Notes that matter for the conversion:
 //! - `:when` is a **function**, not a string. It receives the vars table and
 //!   must return a boolean. It is stored in the Lua registry behind a
-//!   [`loop_core::GuardRef`]; `when-src` is best-effort source text for the
-//!   ledger (`string.dump` is not readable, so record the transition's index
-//!   and any `:when-doc` string the author supplied).
+//!   [`loop_core::GuardRef`]. `when_src` is the guard's **source text**, sliced
+//!   out of the `.fnl` by the closure's line range (or the author's explicit
+//!   `:when-doc`). It must be the text, not a `file:line` label: the ledger
+//!   prints it, and `loop validate` parses it for the var scopes the guard
+//!   reads.
 //! - `:on-fail` is `"retry"` | `"abort"` | `{:route "state-id"}`.
 //! - `:model`/`:thinking`/`:provider` are all optional at every level — leave
 //!   them `None` and let [`loop_core::Machine::resolve_model`] stack the layers.
@@ -261,14 +263,64 @@ fn parse_on_fail(value: mlua::Value, ctx: &str) -> Result<OnFail> {
 
 /// Best-effort human-readable label for a guard closure that didn't come with
 /// a `:when-doc`: `file:line` from the function's own debug info.
-fn guard_debug_label(f: &mlua::Function) -> Option<String> {
+/// The guard's **source text**, sliced out of the `.fnl` file by the line range
+/// the closure's debug info reports.
+///
+/// This has to be the text, not a `file:line` label: `when_src` is what the
+/// ledger shows in `guard_checked` and what `loop validate` parses to find the
+/// var scopes a guard reads. A location label would make `validate` think a
+/// guard over `qa.result` gated on a scope called `machine` (from
+/// `machine.fnl`) — which is exactly the bug this replaced.
+///
+/// `correlate: true` at compile time makes these line numbers Fennel lines, so
+/// the slice lands in the file the author actually wrote.
+fn guard_source_text(f: &mlua::Function, machine_source: &str) -> Option<String> {
     let info = f.info();
-    let source = info.source.map(|s| s.trim_start_matches('@').to_string());
-    match (source, info.line_defined) {
-        (Some(src), Some(line)) => Some(format!("{src}:{line}")),
-        (Some(src), None) => Some(src),
-        (None, _) => None,
+    let (first, last) = (info.line_defined?, info.last_line_defined?);
+    if first < 1 || last < first {
+        return None;
     }
+    let lines: Vec<&str> = machine_source
+        .lines()
+        .skip(first - 1)
+        .take(last - first + 1)
+        .collect();
+    if lines.is_empty() {
+        return None;
+    }
+    // Collapse to one line and keep just the guard expression: the slice starts
+    // at the enclosing `:when` key, which is noise in a ledger line.
+    let joined = lines.join(" ");
+    let collapsed = joined.split_whitespace().collect::<Vec<_>>().join(" ");
+    let text = match collapsed.find("(fn ") {
+        Some(i) => balanced_form(&collapsed[i..])
+            .unwrap_or(&collapsed[i..])
+            .to_string(),
+        None => collapsed,
+    };
+    (!text.is_empty()).then_some(text)
+}
+
+/// The prefix of `s` up to and including the paren that closes the one it
+/// starts with. Quotes are respected so a `")"` inside a string doesn't count.
+fn balanced_form(s: &str) -> Option<&str> {
+    let (mut depth, mut in_str, mut escaped) = (0i32, false, false);
+    for (i, c) in s.char_indices() {
+        match c {
+            _ if escaped => escaped = false,
+            '\\' if in_str => escaped = true,
+            '"' => in_str = !in_str,
+            '(' if !in_str => depth += 1,
+            ')' if !in_str => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(&s[..=i]);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 /// `:playbook` (bare name or `/`-containing path) or a state-local `:prompt`.
@@ -441,7 +493,11 @@ fn parse_budgets(table: &mlua::Table) -> Result<Budgets> {
     }
 }
 
-fn parse_transitions(vm: &FennelVm, table: &mlua::Table) -> Result<Vec<Transition>> {
+fn parse_transitions(
+    vm: &FennelVm,
+    table: &mlua::Table,
+    machine_source: &str,
+) -> Result<Vec<Transition>> {
     let mut out = Vec::new();
     let Some(arr) = get_table(table, "transitions")? else {
         return Ok(out);
@@ -464,7 +520,7 @@ fn parse_transitions(vm: &FennelVm, table: &mlua::Table) -> Result<Vec<Transitio
         let (when, when_src) = match get_value(&t, "when")? {
             mlua::Value::Nil => (None, when_doc),
             mlua::Value::Function(f) => {
-                let src = when_doc.or_else(|| guard_debug_label(&f));
+                let src = when_doc.or_else(|| guard_source_text(&f, machine_source));
                 let guard_ref = vm.register_guard(f, src.clone())?;
                 (Some(guard_ref), src)
             }
@@ -544,6 +600,7 @@ pub fn machine_from_table(
     vm: &FennelVm,
     table: &mlua::Table,
     machine_dir: &Path,
+    machine_source: &str,
     source_hash: String,
     source_path: &Path,
     config: &Config,
@@ -567,7 +624,7 @@ pub fn machine_from_table(
         }
     }
 
-    let transitions = parse_transitions(vm, table)?;
+    let transitions = parse_transitions(vm, table, machine_source)?;
     for t in &transitions {
         if !states.contains_key(&t.from) {
             return Err(CoreError::machine(format!(
