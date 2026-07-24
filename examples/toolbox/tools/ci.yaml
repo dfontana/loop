@@ -1,0 +1,37 @@
+# ~/.loop/tools/ci.yaml
+# Generic CI tools — part of the portable toolbox, NOT used by PROJ-1487's
+# machine. Present so the toolbox in the examples matches the library the docs
+# advertise (docs/04-toolbox.md tree): a real ~/.loop/ carries more tools than
+# any one ticket binds. A ticket picks the subset it needs in each state's
+# `tools:` allowlist; unused tools cost nothing.
+
+ci_status:
+  description: >
+    Report the current CI status for a branch (latest run's conclusion +
+    per-check breakdown). Read-only. Useful in a review or pre-PR gate stage.
+  parameters:
+    branch:
+      type: string
+      description: Git branch to query
+      validationCmd: git rev-parse --verify "$1" >/dev/null 2>&1
+  commandTemplate: |
+    gh run list --branch "$BRANCH" --limit 1 --json conclusion,status,workflowName \
+      | jq -r '.[0] // {conclusion:"none"}
+               | "LOOP_VARS {\"ci\":{\"result\":\"" + (.conclusion // "pending") + "\"}}"'
+  timeout: 60
+
+ci_wait:
+  description: >
+    Block until the branch's in-flight CI run finishes, then emit its conclusion
+    as a gating var. Use in a state that must not proceed on red.
+  parameters:
+    branch:
+      type: string
+      description: Git branch to wait on
+      validationCmd: git rev-parse --verify "$1" >/dev/null 2>&1
+  commandTemplate: |
+    gh run watch "$(gh run list --branch "$BRANCH" --limit 1 --json databaseId -q '.[0].databaseId')" \
+      --exit-status \
+      && echo 'LOOP_VARS {"ci":{"result":"success"}}' \
+      || { echo 'LOOP_VARS {"ci":{"result":"failure"}}'; exit 1; }
+  timeout: 1800
