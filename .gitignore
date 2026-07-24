@@ -1,0 +1,4 @@
+/target
+**/target
+.loop/ledger.jsonl
+.loop/artifacts/
