@@ -9,8 +9,8 @@ thinking: high
 
 QA classified a failure as **real** — the change itself is wrong, not the
 infrastructure. Your job is to find the root cause and apply a concrete fix, not
-to re-run and hope. You share a session with `implement` (`sessionKey: impl`), so
-you remember what was built; build on it.
+to re-run and hope. Every stage starts fresh, so use the ledger digest and
+referenced artifacts to understand what implement already did.
 
 ## What was being validated
 $TASK

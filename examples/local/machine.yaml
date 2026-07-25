@@ -1,12 +1,8 @@
-# examples/machine.yaml
-# The per-ticket machine for PROJ-1487. The ticket's unique files are just this
-# machine + its prose (task.md, plan.md) + any bespoke local playbook
-# (playbooks/validate-contract.md) + the ledger it produces. Everything else it
-# references — generic playbooks, tools — lives in the portable toolbox at
-# ~/.loop/ and is reused untouched.
+# Historical pre-v1 YAML sketch for PROJ-1487.
 #
-# `loop validate machine.yaml`  → lints the graph + resolves every reference
-# `loop run`                     → drives it to a terminal
+# loop v1 loads only machine.fnl; this file is retained for the YAML-vs-Fennel
+# comparison in docs/02-language.md and must not be passed to `loop validate`
+# or `loop run`. The executable example is local/machine.fnl.
 # See docs/06-example-walkthrough.md for the run this produces.
 
 ticket: PROJ-1487

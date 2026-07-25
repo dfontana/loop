@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ~/.loop/tools/bin/classify-spark.sh
+# ~/.config/loop/tools/bin/classify-spark.sh (staged to $PI_AGENT_DIR/bin/)
 #
 # Reads a sparkctl job-output JSON document on stdin and prints exactly one
 # authoritative `LOOP_VARS` line carrying qa.result + qa.error_class, then the

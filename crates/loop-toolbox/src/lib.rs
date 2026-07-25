@@ -90,8 +90,9 @@ impl<'a> Toolbox<'a> {
     }
 
     /// Merge `~/.config/loop/tools/*.yaml` into
-    /// `~/.local/state/loop/agent-dir/scoped-tools.yaml` and copy `mcp.json`
-    /// alongside it. Returns the directory to export as `PI_AGENT_DIR`.
+    /// `~/.local/state/loop/agent-dir/scoped-tools.yaml`, copy `mcp.json`, and
+    /// stage optional `tools/bin/` helpers alongside them. Returns the directory
+    /// to export as `PI_AGENT_DIR`.
     ///
     /// On a same-named tool in two files, the alphabetically later file wins
     /// and a warning is collected — silently dropping a tool is how you get a
@@ -105,6 +106,7 @@ impl<'a> Toolbox<'a> {
         let dest = agent_dir.join("scoped-tools.yaml");
         let (_names, warnings) = scoped::merge_tools(&tools_dir, &dest)?;
         scoped::stage_mcp(&tools_dir, &agent_dir)?;
+        stage_tool_helpers(&tools_dir, &agent_dir)?;
 
         Ok((agent_dir, warnings))
     }
@@ -149,6 +151,51 @@ impl<'a> Toolbox<'a> {
     pub fn config(&self) -> &Config {
         self.config
     }
+}
+
+/// Copy optional executable helpers from `tools/bin/` into the staged agent
+/// directory. Scoped-tool commands can then invoke them through `$PI_AGENT_DIR`
+/// without assuming a particular XDG configuration path.
+fn stage_tool_helpers(tools_dir: &Path, agent_dir: &Path) -> Result<()> {
+    let source = tools_dir.join("bin");
+    if !source.exists() {
+        return Ok(());
+    }
+
+    let destination = agent_dir.join("bin");
+    if destination.exists() {
+        std::fs::remove_dir_all(&destination)
+            .io_ctx(format!("clearing staged helpers {}", destination.display()))?;
+    }
+    copy_tree(&source, &destination)
+}
+
+fn copy_tree(source: &Path, destination: &Path) -> Result<()> {
+    std::fs::create_dir_all(destination).io_ctx(format!(
+        "creating staged helper directory {}",
+        destination.display()
+    ))?;
+    for entry in std::fs::read_dir(source)
+        .io_ctx(format!("reading helper directory {}", source.display()))?
+    {
+        let entry = entry.io_ctx(format!("reading helper entry in {}", source.display()))?;
+        let source_path = entry.path();
+        let destination_path = destination.join(entry.file_name());
+        if entry
+            .file_type()
+            .io_ctx(format!("reading helper type {}", source_path.display()))?
+            .is_dir()
+        {
+            copy_tree(&source_path, &destination_path)?;
+        } else {
+            std::fs::copy(&source_path, &destination_path).io_ctx(format!(
+                "staging helper {} to {}",
+                source_path.display(),
+                destination_path.display()
+            ))?;
+        }
+    }
+    Ok(())
 }
 
 /// Write `content` to `path` only if the file is absent or its content hash
@@ -413,11 +460,18 @@ mod tests {
             "shared:\n  description: from b\n  commandTemplate: echo b\n",
         )
         .unwrap();
+        let helpers = tools_dir.join("bin");
+        std::fs::create_dir_all(&helpers).unwrap();
+        std::fs::write(helpers.join("classify.sh"), "#!/bin/sh\necho helper\n").unwrap();
 
         let (agent_dir, warnings) = tb.stage_agent_dir().unwrap();
         assert_eq!(agent_dir, config.paths.agent_dir());
         assert_eq!(warnings.len(), 1);
         assert!(agent_dir.join("scoped-tools.yaml").is_file());
+        assert_eq!(
+            std::fs::read_to_string(agent_dir.join("bin/classify.sh")).unwrap(),
+            "#!/bin/sh\necho helper\n"
+        );
     }
 
     /// Smoke test against the real `examples/toolbox` fixtures: every shipped

@@ -34,7 +34,7 @@ $ENTRY_ADDENDUM
    harness will route you or escalate. Do not thrash.
 
 ## Notes
-- This stage shares a session with `debug` (sessionKey `impl`), so on a later
-  cycle you'll remember what you built here. Build on it; don't restart.
+- Every stage starts fresh. Use `$LEDGER_DIGEST` and the referenced artifacts to
+  understand earlier work before making a change.
 - You have `edit`/`write` here. Later QA stages do not — so leave the tree in a
   state QA can validate without fixing.

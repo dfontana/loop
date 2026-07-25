@@ -19,5 +19,5 @@ pipeline column and API field.
 
 ## Acceptance
 
-The structured acceptance cases live in `machine.yaml` (`qa_cases`) so stages can
+The structured acceptance cases live in `machine.fnl` (`qa-cases`) so stages can
 reference them by id; this file is the human framing.

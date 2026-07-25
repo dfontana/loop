@@ -70,11 +70,11 @@ reimplementing them:
 
 ## Glossary
 
-- **Machine** — the per-ticket definition: states, transitions, per-state model/thinking/tools, and QA cases. One file (`machine.yaml` or `machine.fnl`) that **references** the task and plan prose (`task.md`, `plan.md`) and each stage's playbook by name/path.
+- **Machine** — the per-ticket definition: states, transitions, per-state model/thinking/tools, and QA cases. One Fennel file (`machine.fnl`) that **references** the task and plan prose (`task.md`, `plan.md`) and each stage's playbook by name/path.
 - **State / Stage** — a node in the machine, bound to a **playbook** that supplies its prompt.
-- **Playbook** — a stage's prompt (a markdown file) plus default model/thinking (essentially a pi *skill*). Resolved **local-first** (`./.loop/playbooks/`, bespoke per ticket) then **toolbox** (`~/.loop/playbooks/`, reusable): "how to implement", "how to review", "how to debug Spark errors".
+- **Playbook** — a stage's prompt (a markdown file) plus default model/thinking (essentially a pi *skill*). Resolved **local-first** (`./.loop/playbooks/`, bespoke per ticket) then **toolbox** (`~/.config/loop/playbooks/`, reusable): "how to implement", "how to review", "how to debug Spark errors".
 - **Tool** — a pre-canned capability bound into a stage: a `scoped-tools` YAML command (wrapped HTTP/CLI call), an MCP server, or a playbook invoked as a tool. From the toolbox.
-- **Toolbox** — the portable library of playbooks + tools + machine templates, stored outside any project (`~/.loop/`).
+- **Toolbox** — the portable library of playbooks + tools + machine templates, stored outside any project (`~/.config/loop/`).
 - **Ledger** — append-only JSONL, the event-sourced record of one run. The source of truth for "where are we".
 - **Cycle** — one traversal of a loop (e.g. `qa#3`), with a unique id injected into prompts and tools.
 - **Worker** — the pi agent spawned to execute a stage.

@@ -1,7 +1,7 @@
-# ~/.loop/tools/ci.yaml
+# ~/.config/loop/tools/ci.yaml
 # Generic CI tools — part of the portable toolbox, NOT used by PROJ-1487's
 # machine. Present so the toolbox in the examples matches the library the docs
-# advertise (docs/04-toolbox.md tree): a real ~/.loop/ carries more tools than
+# advertise (docs/04-toolbox.md tree): a real ~/.config/loop/ carries more tools than
 # any one ticket binds. A ticket picks the subset it needs in each state's
 # `tools:` allowlist; unused tools cost nothing.
 

@@ -9,7 +9,7 @@ thinking: medium
   LOCAL, per-ticket playbook. Lives in ./.loop/playbooks/, not in the toolbox.
   It answers "how does a bespoke stage get its prompt": a stage's `playbook:`
   resolves local-first, then the toolbox — so dropping this file next to the
-  machine gives `validate_contract` a prompt of its own without touching ~/.loop.
+  machine gives `validate_contract` a prompt of its own without touching ~/.config/loop.
 
   qa_staging keeps using the generic toolbox `qa` playbook because pipeline
   validation is generic; contract validation is specific to this endpoint and

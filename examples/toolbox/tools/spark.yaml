@@ -1,4 +1,4 @@
-# examples/tools/spark.yaml  →  installed at ~/.loop/tools/spark.yaml
+# examples/tools/spark.yaml  →  installed at ~/.config/loop/tools/spark.yaml
 # scoped-tools definitions for the Spark pipeline. Same format as your
 # pi-extensions/extensions/scoped-tools README. The agent sees only the tool
 # schema and stdout — never the templates, tokens, or cluster coordinates.
@@ -56,5 +56,5 @@ fetch_job_output:
   # versioned and testable, not embedded in a prompt.
   commandTemplate: |
     sparkctl fetch --job-id $JOB_ID --token $TOKEN --sample 50 --json \
-      | ~/.loop/tools/bin/classify-spark.sh
+      | sh "$PI_AGENT_DIR/bin/classify-spark.sh"
   timeout: 300

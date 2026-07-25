@@ -21,12 +21,35 @@ A stage's `playbook:` resolves **local-first**, then toolbox — so `local/` win
 a name clash (see [docs/04](../docs/04-toolbox.md)). Everything is now filled in:
 no file references a playbook/tool/script that isn't present.
 
+## Verify the example
+
+This static smoke test needs only Rust/Cargo; it does not invoke pi, staging, or
+external tools. It stages the two example locations in a disposable sandbox,
+then validates the machine and folds its recorded ledger:
+
+```sh
+fixture="$(mktemp -d)"
+mkdir -p "$fixture/project/.loop" "$fixture/config/loop" "$fixture/state"
+cp -R examples/local/. "$fixture/project/.loop/"
+cp -R examples/toolbox/. "$fixture/config/loop/"
+
+LOOP_CONFIG_DIR="$fixture/config/loop" LOOP_STATE_DIR="$fixture/state" \
+  cargo run --quiet -p loop-cli -- --dir "$fixture/project" validate
+LOOP_CONFIG_DIR="$fixture/config/loop" LOOP_STATE_DIR="$fixture/state" \
+  cargo run --quiet -p loop-cli -- --dir "$fixture/project" status --json
+
+rm -rf "$fixture"
+```
+
+A live `loop run` additionally needs pi with the configured extensions plus the
+Spark/staging credentials and binaries named by the example tools.
+
 ## `local/` — per-ticket (`./.loop/`), discarded after PROJ-1487
 
 | File | What it is | Doc |
 |---|---|---|
 | [`local/machine.fnl`](local/machine.fnl) | **The ticket machine** — what `loop run` actually loads. References prose + playbooks + tools by path/name. | [02](../docs/02-language.md), [06](../docs/06-example-walkthrough.md), [09](../docs/09-implementation-plan.md) |
-| [`local/machine.yaml`](local/machine.yaml) | The same machine in the YAML surface that lost the doc-02 argument. Historical; nothing loads it. | [02](../docs/02-language.md) |
+| [`local/machine.yaml`](local/machine.yaml) | Historical pre-v1 YAML sketch retained for the language comparison; nothing loads it. | [02](../docs/02-language.md) |
 | [`local/task.md`](local/task.md) | The ticket task, prose. `task: task.md` → `$TASK`. | [04](../docs/04-toolbox.md) |
 | [`local/plan.md`](local/plan.md) | The plan, co-authored live. `plan: plan.md` → `$PLAN`. | [04](../docs/04-toolbox.md) |
 | [`local/playbooks/validate-contract.md`](local/playbooks/validate-contract.md) | A **bespoke, local** stage prompt — resolves local-first over the toolbox. | [04](../docs/04-toolbox.md) |
@@ -47,7 +70,7 @@ no file references a playbook/tool/script that isn't present.
 | [`toolbox/tools/staging.yaml`](toolbox/tools/staging.yaml) | Deploy/contract/PR tools; safety guards, cycle-scoped idempotency, hidden secrets. | [`scoped-tools`](../../pi-extensions/extensions/scoped-tools) |
 | [`toolbox/tools/ci.yaml`](toolbox/tools/ci.yaml) | Generic CI tools — library item this ticket doesn't bind. | [`scoped-tools`](../../pi-extensions/extensions/scoped-tools) |
 | [`toolbox/tools/mcp.json`](toolbox/tools/mcp.json) | MCP server registry in real `.mcp.json` schema. | [`mcp`](../../pi-extensions/extensions/mcp) |
-| [`toolbox/tools/bin/classify-spark.sh`](toolbox/tools/bin/classify-spark.sh) | The transient/real/unknown taxonomy `fetch_job_output` shells out to. | loop |
+| [`toolbox/tools/bin/classify-spark.sh`](toolbox/tools/bin/classify-spark.sh) | The transient/real/unknown taxonomy `fetch_job_output` shells out to; loop stages it under `$PI_AGENT_DIR/bin/`. | loop |
 | [`toolbox/machines/standard-ticket.fnl`](toolbox/machines/standard-ticket.fnl) | Machine template: the plain code-only spine. | loop |
 | [`toolbox/machines/data-pipeline-ticket.fnl`](toolbox/machines/data-pipeline-ticket.fnl) | Machine template PROJ-1487 is derived from. | loop |
 | [`toolbox/ext/transition-tool.ts`](toolbox/ext/transition-tool.ts) | The Worker's transition tool. | loop (vendored) |

@@ -1,4 +1,4 @@
-# examples/tools/staging.yaml  →  ~/.loop/tools/staging.yaml
+# examples/tools/staging.yaml  →  ~/.config/loop/tools/staging.yaml
 # Deploy + contract-check tools. Note the safety guardrails: env is validated to
 # never be prod, the namespace is cycle-scoped (idempotent re-entry), and the
 # deploy token is a hidden parameter so it never reaches agent context or the ledger.
