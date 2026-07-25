@@ -107,14 +107,14 @@ state a transition names exists, `when` expressions parse, allowlisted tools are
 actually bound. Runs at `loop init` and before every `loop run`. (This is
 stronger for YAML than for Fennel — see [02-language.md](02-language.md).)
 
-## 12. Reproducibility of a fundamentally non-deterministic run
+## 12. Auditability of a fundamentally non-deterministic run
 
 **Risk:** you can't reproduce an LLM run exactly, so "what happened?" is murky.
-**Mitigation:** you don't need bit-reproducibility, you need **auditability**: the
-event-sourced ledger records every decision and its rationale; pinned
-model/thinking + config snapshot + machine hash at `run_started`; full transcripts
-retained in pi session files by id. You can always answer "what did it decide and
-why", replay the *control flow*, and resume — even if the tokens differ.
+**Mitigation:** the event-sourced ledger records every decision and its rationale,
+with the machine hash and budgets at `run_started`; model and thinking are recorded
+when each stage begins; full transcripts remain in pi session files by id. You can
+answer "what did it decide and why", replay the *control flow*, and resume — even
+if the tokens differ.
 
 ## 13. Parallelism / "multiple different QA tests" {#parallelism}
 
@@ -127,12 +127,14 @@ fine. **(Future):** a `fork`/`join` construct (à la LangGraph branches / Argo D
 aggregates. Keep this out of v1 to avoid the join/aggregation complexity until a
 ticket actually demands it.
 
-## 14. Toolbox drift breaking in-flight runs
+## 14. Toolbox changes during a run
 
 **Risk:** you edit `~/.loop/playbooks/implement.md` while a run is mid-flight.
-**Mitigation:** the `run_started` snapshot pins resolved content by hash for the
-life of the run; edits apply to the *next* run. Pin the toolbox by git tag/commit
-if you want cross-machine reproducibility.
+**Mitigation:** each stage resolves its playbook when it starts, so a playbook
+edit can affect later stages but not one already in progress. Tool and MCP
+configuration are staged before the run starts, so their edits apply on the next
+run or resume. Avoid editing the toolbox during a run when consistency matters;
+keep it in version control if you need to audit or coordinate changes.
 
 ---
 

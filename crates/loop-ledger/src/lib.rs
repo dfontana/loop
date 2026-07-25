@@ -235,7 +235,6 @@ mod tests {
             EventPayload::RunStarted {
                 ticket: "PROJ-1".into(),
                 machine_hash: "sha256:abc".into(),
-                resolved_config: json!({"playbooks": {"implement": "sha256:1"}}),
                 budgets: Budgets {
                     usd: Some(8.0),
                     wallclock_s: Some(5400),
@@ -359,7 +358,6 @@ mod tests {
             .append(EventPayload::RunStarted {
                 ticket: "T-1".into(),
                 machine_hash: "sha256:1".into(),
-                resolved_config: json!({}),
                 budgets: Budgets::default(),
             })
             .unwrap();
@@ -419,7 +417,6 @@ mod tests {
             .append(EventPayload::RunStarted {
                 ticket: "T-1".into(),
                 machine_hash: "sha256:1".into(),
-                resolved_config: json!({}),
                 budgets: Budgets::default(),
             })
             .unwrap();

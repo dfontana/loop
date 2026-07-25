@@ -22,7 +22,7 @@ Every line has `ts` (ISO-8601) and `type`. Payload by type:
 
 | `type` | Payload | Meaning |
 |---|---|---|
-| `run_started` | `ticket, machine_hash, resolved_config, config: {budget_usd, wallclock_s, max_transitions}` | Snapshot of the fully-resolved machine + toolbox at start, so mid-run edits don't change behavior. |
+| `run_started` | `ticket, machine_hash, budgets: {usd, wallclock_s, max_transitions}` | Records the run identity and its effective guardrail budgets. |
 | `state_entered` | `state, cycle, attempt, session_id, model, thinking, tools[]` | A worker is about to run this stage. |
 | `worker_output` | `state, cycle, summary, artifacts: [{name, path, sha256}], usage: {tokens, cost_usd}` | Digest of what the worker did. |
 | `transition_proposed` | `from, to \| blocked:true, rationale, by: "worker"` | The worker's `transition` tool call. |
@@ -104,7 +104,7 @@ Re-running a crashed stage must not double-apply side effects. Guidance:
 ## Example (abbreviated)
 
 ```jsonl
-{"ts":"2026-07-23T18:00:01Z","type":"run_started","ticket":"PROJ-1487","machine_hash":"sha256:9f…","config":{"budget_usd":8,"wallclock_s":5400,"max_transitions":40}}
+{"ts":"2026-07-23T18:00:01Z","type":"run_started","ticket":"PROJ-1487","machine_hash":"9f…","budgets":{"usd":8,"wallclock_s":5400,"max_transitions":40}}
 {"ts":"2026-07-23T18:00:02Z","type":"state_entered","state":"implement","cycle":1,"attempt":1,"session_id":"01f9…","model":"claude-sonnet-5","thinking":"high","tools":["read","edit","write","bash","spark_build"]}
 {"ts":"2026-07-23T18:07:44Z","type":"vars_set","scope":"build","values":{"build":{"status":"pass","id":"b-8842"}}}
 {"ts":"2026-07-23T18:07:45Z","type":"worker_output","state":"implement","cycle":1,"summary":"Added churn_score column + API field; build green.","artifacts":[{"name":"diff","path":".loop/artifacts/implement-1-diff.patch","sha256":"…"}],"usage":{"tokens":48211,"cost_usd":0.62}}

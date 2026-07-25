@@ -247,12 +247,13 @@ harness computes these each stage and injects them:
 | `$ENTRY_ADDENDUM` | navigator's get-back-on-track note, when present |
 | any `vars_set` value | e.g. `$BUILD_ID` from `build.id` |
 
-## Versioning & reproducibility
+## Toolbox changes
 
-The "portable toolbox you edit freely" and "reproducible run" goals conflict
-unless pinned. Resolve it at `run_started`: the harness **snapshots the fully
-resolved machine + every referenced playbook/tool** (by content hash) into the
-ledger. A mid-run edit to `~/.loop/playbooks/implement.md` does not affect the
-in-flight run; it affects the *next* `loop run`. `loop validate` warns if a
+The toolbox is intentionally live. A run stages tools and MCP configuration
+before it begins, while each stage resolves its playbook immediately before it
+starts. An edit to `~/.loop/playbooks/implement.md` therefore affects later
+stages of an in-flight run, but never a stage that has already started; tool and
+MCP edits apply on the next run or resume. Keep the toolbox in version control
+if you need to audit or coordinate such changes. `loop validate` warns if a
 referenced playbook/tool is missing or if the machine references a tool a stage
 doesn't allowlist.

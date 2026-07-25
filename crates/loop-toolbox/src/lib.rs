@@ -165,8 +165,7 @@ fn write_if_stale(path: &Path, content: &str) -> Result<PathBuf> {
     Ok(path.to_path_buf())
 }
 
-/// Hex sha256 of a byte slice, shared by playbook content-hashing and
-/// `materialize_ext`'s staleness check.
+/// Hex sha256 of a byte slice, used by `materialize_ext`'s staleness check.
 pub(crate) fn sha256_hex(data: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
@@ -447,7 +446,6 @@ mod tests {
             let pb = playbook::parse(name, &src, Some(path.clone()))
                 .unwrap_or_else(|e| panic!("{} failed to parse: {e}", path.display()));
             assert!(!pb.name.is_empty(), "{} has no name", path.display());
-            assert!(!pb.sha256.is_empty());
             parsed_any = true;
         }
         assert!(parsed_any, "expected at least one example playbook");

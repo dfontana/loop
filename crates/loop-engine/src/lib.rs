@@ -67,8 +67,7 @@ impl Engine<'_> {
     ///
     /// TASK T5. The loop, per docs/01-architecture.md:
     ///
-    /// 1. Fold the ledger. A fresh run appends `run_started` (with the resolved
-    ///    config snapshot); a resume picks up at the folded
+    /// 1. Fold the ledger. A fresh run appends `run_started`; a resume picks up at the folded
     ///    [`loop_core::ResumePoint`].
     /// 2. If the current state is terminal → `run_finished`, done.
     /// 3. Check global guardrails (wallclock, `$`, transition count) **before**
@@ -151,11 +150,9 @@ impl Engine<'_> {
     }
 
     fn append_run_started(&mut self) -> Result<()> {
-        let resolved_config = serde_json::to_value(self.machine).unwrap_or(serde_json::Value::Null);
         self.ledger.append(EventPayload::RunStarted {
             ticket: self.machine.ticket.clone(),
             machine_hash: self.machine.source_hash.clone(),
-            resolved_config,
             budgets: self.machine.budgets,
         })?;
         Ok(())

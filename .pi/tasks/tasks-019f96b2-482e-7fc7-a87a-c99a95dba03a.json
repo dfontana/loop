@@ -1,0 +1,17 @@
+{
+  "nextId": 3,
+  "tasks": [
+    {
+      "id": "2",
+      "subject": "Remove reproducibility snapshot feature",
+      "description": "Removed the run-start resolved-configuration snapshot and playbook hashing, updated historical-ledger compatibility coverage, documentation, and the example ledger. Formatting, strict clippy, and all workspace tests pass.",
+      "status": "completed",
+      "activeForm": "Removing reproducibility snapshot feature",
+      "metadata": {},
+      "blocks": [],
+      "blockedBy": [],
+      "createdAt": 1784941228083,
+      "updatedAt": 1784941467107
+    }
+  ]
+}

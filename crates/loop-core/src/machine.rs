@@ -288,7 +288,7 @@ pub struct Machine {
     pub navigator_max_invocations: u32,
     pub transition_mode: TransitionMode,
 
-    /// sha256 of the machine source, pinned into `run_started`.
+    /// sha256 of the machine source, recorded in `run_started`.
     pub source_hash: String,
     pub source_path: PathBuf,
     /// Directory the machine file lives in; relative refs resolve against it.

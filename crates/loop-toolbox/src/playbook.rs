@@ -6,8 +6,6 @@ use serde::Deserialize;
 
 use loop_core::{CoreError, Result, Thinking};
 
-use crate::sha256_hex;
-
 #[derive(Clone, Debug, Default)]
 pub struct ResolvedPlaybook {
     pub name: String,
@@ -18,9 +16,6 @@ pub struct ResolvedPlaybook {
     pub description: Option<String>,
     pub model: Option<String>,
     pub thinking: Option<Thinking>,
-    /// sha256 of the file, pinned into the `run_started` snapshot so a mid-run
-    /// toolbox edit cannot change behavior (docs/07-risks.md #14).
-    pub sha256: String,
 }
 
 /// The frontmatter fields we care about. Anything else the author put in the
@@ -35,7 +30,6 @@ struct Frontmatter {
 
 /// Split `---\n<yaml>\n---\n<body>`. A file without frontmatter is all body.
 pub fn parse(name: &str, source: &str, path: Option<PathBuf>) -> Result<ResolvedPlaybook> {
-    let sha256 = sha256_hex(source.as_bytes());
     let (frontmatter_src, body) = split_frontmatter(source);
 
     let fm: Frontmatter = match frontmatter_src {
@@ -52,7 +46,6 @@ pub fn parse(name: &str, source: &str, path: Option<PathBuf>) -> Result<Resolved
         description: fm.description,
         model: fm.model,
         thinking: fm.thinking,
-        sha256,
     })
 }
 
@@ -103,7 +96,6 @@ mod tests {
         assert_eq!(pb.model.as_deref(), Some("claude-sonnet-5"));
         assert_eq!(pb.thinking, Some(Thinking::High));
         assert_eq!(pb.body, "# Implement\n\nBody text.\n");
-        assert!(!pb.sha256.is_empty());
     }
 
     #[test]
@@ -136,15 +128,5 @@ mod tests {
         assert!(pb.body.contains("above the rule"));
         assert!(pb.body.contains("---"));
         assert!(pb.body.contains("below the rule"));
-    }
-
-    #[test]
-    fn sha256_is_stable_for_identical_content() {
-        let src = "---\nname: a\n---\nbody\n";
-        let a = parse("a", src, None).unwrap();
-        let b = parse("a", src, None).unwrap();
-        assert_eq!(a.sha256, b.sha256);
-        let c = parse("a", "---\nname: a\n---\nother body\n", None).unwrap();
-        assert_ne!(a.sha256, c.sha256);
     }
 }

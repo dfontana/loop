@@ -57,10 +57,10 @@ model/prompt/tools without touching the rest.
                     └──────────────────────────────────────────────┘
 ```
 
-- **Machine loader** — parses `machine.yaml` (or `.fnl`), validates the graph,
-  resolves every playbook/tool reference against the toolbox, and snapshots the
-  fully-resolved config into the ledger's `run_started` event (so a mid-run
-  toolbox edit can't change behavior).
+- **Machine loader** — parses `machine.yaml` (or `.fnl`) and validates the graph.
+  The run stages tools and MCP configuration before it begins; each stage resolves
+  its playbook immediately before it runs, so a playbook edit applies to stages
+  that have not started yet.
 - **Ledger** — the append-only JSONL run record. Folding it yields the current
   state, the active cycle counters, and per-state attempt counts. See
   [03-ledger.md](03-ledger.md).
@@ -80,7 +80,7 @@ model/prompt/tools without touching the rest.
 ## The control loop
 
 ```text
-load machine; resolve toolbox refs; snapshot config
+load machine
 fold ledger → (current_state, cycle_counters, attempts)   # fresh run: entry state
 loop:
     if current_state is terminal: emit run_finished; exit

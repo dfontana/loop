@@ -113,13 +113,10 @@ impl Event {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum EventPayload {
-    /// Always the first line. Pins the resolved machine + toolbox for the run.
+    /// Always the first line. Records the run's machine identity and guardrails.
     RunStarted {
         ticket: String,
         machine_hash: String,
-        /// The fully-resolved machine and every referenced playbook/tool by
-        /// content hash, so a mid-run toolbox edit cannot change behavior.
-        resolved_config: serde_json::Value,
         budgets: Budgets,
     },
     /// A worker is about to run this stage.

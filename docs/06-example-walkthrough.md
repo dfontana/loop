@@ -60,8 +60,8 @@ Loops with bounded cycles: `qa = {qa_staging, debug}` max 4; the
 Abbreviated from [`examples/ledger.jsonl`](../examples/local/ledger.jsonl). Read it as
 "harness action → why".
 
-1. **`run_started`** — harness snapshots the resolved machine + toolbox hashes,
-   records budgets (`$8`, 90 min, 40 transitions).
+1. **`run_started`** — harness records the machine hash and budgets (`$8`, 90
+   min, 40 transitions).
 
 2. **`implement` (cycle 1)** — spawns
    `pi -p --model claude-sonnet-5:high --tools read,edit,write,bash,spark_build`.

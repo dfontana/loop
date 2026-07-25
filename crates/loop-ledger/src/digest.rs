@@ -182,7 +182,6 @@ mod tests {
         let mut events = vec![ev(EventPayload::RunStarted {
             ticket: "PROJ-1".into(),
             machine_hash: "sha256:abc".into(),
-            resolved_config: json!({}),
             budgets: Budgets::default(),
         })];
 
@@ -315,7 +314,6 @@ mod tests {
         let mut events = vec![ev(EventPayload::RunStarted {
             ticket: "T".into(),
             machine_hash: "h".into(),
-            resolved_config: json!({}),
             budgets: Budgets::default(),
         })];
         let long_rationale = "a".repeat(1000);

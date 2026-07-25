@@ -280,7 +280,6 @@ mod tests {
         ev(EventPayload::RunStarted {
             ticket: "T-1".into(),
             machine_hash: "sha256:deadbeef".into(),
-            resolved_config: serde_json::Value::Null,
             budgets: Budgets::default(),
         })
     }
