@@ -278,7 +278,7 @@ struct Emitter<W: Write> {
 
 impl<W: Write> Emitter<W> {
     fn line(&mut self, v: &Value) {
-        let _ = writeln!(self.out, "{}", v);
+        let _ = writeln!(self.out, "{v}");
     }
 
     fn raw(&mut self, s: &str) {
