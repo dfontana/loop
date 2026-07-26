@@ -1286,6 +1286,345 @@ fn preview_is_deterministic_and_creates_no_run_or_render_files() {
     }
 }
 
+// ── `loop recap` ─────────────────────────────────────────────────────────────
+//
+// The grouping recap is built on — which events belong to which attempt — is
+// unit-tested in `report`, where it is a pure function of a slice of events.
+// What only the real binary can show is what these cover: that a real run
+// produces a report naming every attempt and labelling its evidence by author,
+// that a partial run is reported rather than refused, and that a machine edited
+// since the run cannot quietly explain it.
+
+fn guard_line(
+    ts: &str,
+    from: &str,
+    to: &str,
+    check: &str,
+    criteria: &str,
+    check_output: Option<&str>,
+    judge: Option<&str>,
+) -> String {
+    // `Option`, matching `entered_line`'s session id, so "no Judge ran" and "an
+    // empty rationale" stay distinguishable at the call site.
+    let opt = |s: Option<&str>| {
+        s.map_or("null".to_string(), |s| {
+            serde_json::Value::from(s).to_string()
+        })
+    };
+    format!(
+        r#"{{"ts":"{ts}","elapsed_s":0,"type":"guard_checked","from":"{from}","to":"{to}","structural":"pass","check":"{check}","criteria":"{criteria}","check_output":{},"judge_rationale":{},"usage":{{"tokens":10,"cost_usd":0.01}}}}"#,
+        opt(check_output),
+        opt(judge)
+    )
+}
+
+fn proposed_line(ts: &str, from: &str, to: &str, rationale: &str) -> String {
+    format!(
+        r#"{{"ts":"{ts}","elapsed_s":0,"type":"transition_proposed","from":"{from}","to":"{to}","blocked":false,"rationale":"{rationale}","by":"worker"}}"#
+    )
+}
+
+fn committed_line(ts: &str, from: &str, to: &str, cycle: u32) -> String {
+    format!(
+        r#"{{"ts":"{ts}","elapsed_s":0,"type":"transition_committed","from":"{from}","to":"{to}","cycle":{cycle}}}"#
+    )
+}
+
+/// The end-to-end shape of the feature: a real run of the shipped template,
+/// recapped. Every attempt gets a section, the Worker's own account is labelled
+/// as testimony rather than as fact, and the harness check and the Judge appear
+/// beside it as separate evidence.
+#[test]
+fn recap_of_a_finished_run_names_every_attempt_and_labels_its_evidence() {
+    let fx = Fixture::new(
+        r#"{"steps":[
+          {"match":{"role":"worker","state":"implement"},"summary":"implemented the plan",
+           "usage":{"tokens":4200,"cost_usd":0.11},
+           "transition":{"to":"review","rationale":"plan items done"}},
+          {"match":{"role":"judge"},"verdict":{"pass":true,"rationale":"covers the checklist"}},
+
+          {"match":{"role":"worker","state":"review"},"summary":"found a defect",
+           "usage":{"tokens":3100,"cost_usd":0.08},
+           "transition":{"to":"test","rationale":"reviewed"}},
+          {"match":{"role":"judge"},"verdict":{"pass":false,"rationale":"backfill covers 29 days"}},
+
+          {"match":{"role":"worker","state":"implement"},"summary":"fixed the window",
+           "usage":{"tokens":2600,"cost_usd":0.07},
+           "transition":{"to":"review","rationale":"fixed"}},
+          {"match":{"role":"judge"},"verdict":{"pass":true,"rationale":"now 30 days"}},
+
+          {"match":{"role":"worker","state":"review"},"summary":"clean",
+           "usage":{"tokens":2900,"cost_usd":0.07},
+           "transition":{"to":"test","rationale":"clean"}},
+          {"match":{"role":"judge"},"repeat":true,"verdict":{"pass":true,"rationale":"good"}},
+
+          {"match":{"role":"worker","state":"test"},"summary":"128 passed",
+           "usage":{"tokens":1800,"cost_usd":0.04},
+           "transition":{"to":"open-pr","rationale":"suite green"}},
+
+          {"match":{"role":"worker","state":"open-pr"},"summary":"opened PR #412",
+           "usage":{"tokens":900,"cost_usd":0.02},
+           "transition":{"to":"done","rationale":"PR open"}}
+        ]}"#,
+    );
+    fx.run(&["init", "PROJ-9"]);
+    let run = fx.run(&["run"]);
+    assert!(run.status.success(), "{}", combined(&run));
+
+    let out = fx.run(&["recap"]);
+    assert!(out.status.success(), "{}", combined(&out));
+    assert!(
+        out.stderr.is_empty(),
+        "an unmodified machine warns about nothing: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = stdout(&out);
+
+    for expected in [
+        "# PROJ-9 — recap",
+        "## Run summary",
+        "- machine on disk: unchanged since the run started",
+        "- outcome: finished — Done at `done`",
+        "## Attempt timeline",
+        // Both attempts at the state that was routed back into — the second
+        // one is the whole reason a recap exists, and the first must not be
+        // overwritten by it.
+        "### 1. implement — cycle 1, attempt 1",
+        "### 3. implement — cycle 2, attempt 1",
+        // Evidence, attributed. A Worker summary is testimony; the Judge's
+        // verdict and the harness's commit are not.
+        "**Worker** — the Worker's own account of what it did",
+        "implemented the plan",
+        "**Judge** rationale",
+        "backfill covers 29 days",
+        "**Committed** `implement` → `review` (cycle 1) — the harness's decision.",
+        "## Why it ended",
+        "- status: Done",
+        "- terminal state: done",
+        "## Inspecting further",
+        "`loop session implement`",
+        "loop logs --raw | jq",
+    ] {
+        assert!(text.contains(expected), "missing {expected:?} in:\n{text}");
+    }
+
+    // A failed guard is not omitted just because it produced no commit.
+    assert!(text.contains("- criteria: fail"), "{text}");
+
+    // Every `state_entered` in the ledger gets exactly one section.
+    let attempts = fx
+        .ledger()
+        .iter()
+        .filter(|e| e["type"] == "state_entered")
+        .count();
+    assert_eq!(
+        text.matches("\n### ").count(),
+        attempts,
+        "one section per attempt, got {} for {attempts} attempts:\n{text}",
+        text.matches("\n### ").count()
+    );
+
+    // Deterministic: no LLM, no clock, no machine state. Two runs of the
+    // command over the same ledger are the same bytes.
+    assert_eq!(stdout(&fx.run(&["recap"])), text);
+}
+
+/// A recap of nothing is a request that cannot be served. `status` and `logs`
+/// can truthfully answer "nowhere"; a report file containing only headings is
+/// worse than an error.
+#[test]
+fn recap_of_an_empty_ledger_is_an_error() {
+    let fx = Fixture::new(r#"{"steps":[]}"#);
+    fx.run(&["init", "TINY-1"]);
+
+    let out = fx.run(&["recap"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(stdout(&out).is_empty(), "{}", stdout(&out));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("no run to recap"), "{err}");
+    assert!(err.contains("ledger.jsonl"), "{err}");
+}
+
+/// Completion is not required. An interrupted run is reported to date, with the
+/// folded resume point and the last durable event standing in for the
+/// `run_finished` that never arrived.
+#[test]
+fn recap_of_an_interrupted_run_reports_it_to_date() {
+    let fx = Fixture::new(r#"{"steps":[]}"#);
+    fx.run(&["init", "TINY-1"]);
+    fx.machine(TINY_MACHINE);
+    fx.write_ledger(&[
+        run_started_line("TINY-1"),
+        entered_line("2026-07-26T12:00:01Z", "implement", 1, 1, Some("s-1")),
+        output_line("2026-07-26T12:05:00Z", "implement", 1, "half of it"),
+        proposed_line("2026-07-26T12:05:01Z", "implement", "done", "think so"),
+    ]);
+
+    let out = fx.run(&["recap"]);
+    assert!(out.status.success(), "{}", combined(&out));
+    let text = stdout(&out);
+    for expected in [
+        "- outcome: unfinished — last at `implement`",
+        "unfinished — no `run_finished` in this ledger",
+        "- resume point: re-run the guards on `implement` → `done`",
+        "- last durable event: 2026-07-26T12:05:01Z",
+        "`loop resume` continues from the resume point above.",
+        // The attempt itself is still reported in full.
+        "### 1. implement — cycle 1, attempt 1",
+        "half of it",
+    ] {
+        assert!(text.contains(expected), "missing {expected:?} in:\n{text}");
+    }
+}
+
+/// The recap must still work with no machine at all, and must not lose early
+/// attempts the way `status`'s recent window does.
+#[test]
+fn recap_needs_no_machine_and_keeps_the_earliest_attempts() {
+    let fx = Fixture::new(r#"{"steps":[]}"#);
+    fx.run(&["init", "TINY-1"]);
+
+    let mut lines = vec![run_started_line("TINY-1")];
+    for n in 1..=8u32 {
+        let ts = format!("2026-07-26T12:{n:02}:00Z");
+        lines.push(entered_line(&ts, "implement", n, 1, None));
+        lines.push(output_line(&ts, "implement", n, &format!("pass {n}")));
+        lines.push(proposed_line(&ts, "implement", "implement", "again"));
+        lines.push(guard_line(
+            &ts,
+            "implement",
+            "implement",
+            "pass",
+            "skip",
+            Some("ok"),
+            None,
+        ));
+        lines.push(committed_line(&ts, "implement", "implement", n));
+    }
+    fx.write_ledger(&lines);
+    std::fs::remove_file(fx.project.join(".loop/machine.fnl")).unwrap();
+
+    let out = fx.run(&["recap"]);
+    assert!(out.status.success(), "{}", combined(&out));
+    let text = stdout(&out);
+
+    // `status` shows the last 12 events; the first attempt here is 35 events
+    // back, and is the one a recap is asked for.
+    assert!(
+        text.contains("pass 1"),
+        "the earliest attempt survives:\n{text}"
+    );
+    assert!(text.contains("pass 8"), "{text}");
+    assert_eq!(text.matches("\n### ").count(), 8, "{text}");
+    // No machine loaded, so nothing claims to know what a cycle is.
+    assert!(text.contains("- machine on disk: not loaded"), "{text}");
+    assert!(text.contains("re-entries of every state"), "{text}");
+    // No session ids in this ledger, so there is nothing to offer reopening.
+    assert!(
+        text.contains("No attempt recorded a pi session id"),
+        "{text}"
+    );
+}
+
+/// A machine edited since the run cannot be used to explain the run. The recap
+/// says so in the report and on stderr, and still reports everything the ledger
+/// holds.
+#[test]
+fn recap_refuses_to_explain_a_run_with_a_machine_that_has_since_changed() {
+    let fx = Fixture::new(
+        r#"{"steps":[
+          {"match":{"role":"worker"},"repeat":true,"summary":"did the work",
+           "usage":{"tokens":10,"cost_usd":0.01},
+           "transition":{"to":"done","rationale":"done"}},
+          {"match":{"role":"judge"},"repeat":true,"verdict":{"pass":true,"rationale":"ok"}}
+        ]}"#,
+    );
+    fx.run(&["init", "TINY-1"]);
+    fx.machine(TINY_MACHINE);
+    assert!(fx.run(&["run"]).status.success());
+
+    // The description a reader would otherwise see attached to the attempt.
+    let before = stdout(&fx.run(&["recap"]));
+    assert!(before.contains("implement — cycle 1, attempt 1 — Do the work."));
+
+    fx.machine(&TINY_MACHINE.replace("Do the work.", "Something else entirely."));
+    let out = fx.run(&["recap"]);
+    assert!(out.status.success(), "{}", combined(&out));
+    let text = stdout(&out);
+    let err = String::from_utf8_lossy(&out.stderr);
+
+    assert!(err.contains("has changed since this run started"), "{err}");
+    assert!(text.contains("- machine on disk: CHANGED"), "{text}");
+    assert!(
+        !text.contains("Something else entirely"),
+        "a description written after the run must not label it:\n{text}"
+    );
+    // …but the ledger's own account is untouched.
+    assert!(text.contains("did the work"), "{text}");
+    assert!(text.contains("- status: Done"), "{text}");
+}
+
+/// Guard failure, a retry, a Navigator route, an error, and an aborted finish —
+/// the shapes a healthy run never produces and a recap exists to explain.
+#[test]
+fn recap_reports_guard_failures_navigator_routes_and_the_fatal_error() {
+    let fx = Fixture::new(r#"{"steps":[]}"#);
+    fx.run(&["init", "TINY-1"]);
+    fx.machine(TINY_MACHINE);
+    fx.write_ledger(&[
+        run_started_line("TINY-1"),
+        entered_line("2026-07-26T12:00:01Z", "implement", 1, 1, Some("s-1")),
+        output_line("2026-07-26T12:01:00Z", "implement", 1, "first try"),
+        proposed_line("2026-07-26T12:01:01Z", "implement", "done", "looks done"),
+        guard_line(
+            "2026-07-26T12:01:02Z",
+            "implement",
+            "done",
+            "fail",
+            "skip",
+            Some("cargo test\nFAILED: 3 tests"),
+            None,
+        ),
+        entered_line("2026-07-26T12:02:00Z", "implement", 1, 2, Some("s-2")),
+        output_line("2026-07-26T12:03:00Z", "implement", 1, "second try"),
+        r#"{"ts":"2026-07-26T12:03:01Z","elapsed_s":0,"type":"transition_proposed","from":"implement","to":null,"blocked":true,"rationale":"I cannot get the suite green","by":"worker"}"#.into(),
+        r#"{"ts":"2026-07-26T12:03:02Z","elapsed_s":0,"type":"navigator_invoked","from":"implement","proposal":"blocked: I cannot get the suite green","chosen_to":"blocked","entry_prompt":"summarize what you tried","usage":{"tokens":50,"cost_usd":0.001}}"#.into(),
+        r#"{"ts":"2026-07-26T12:03:03Z","elapsed_s":0,"type":"error","state":"implement","kind":"fatal","detail":"escalated: the suite never went green"}"#.into(),
+        r#"{"ts":"2026-07-26T12:03:04Z","elapsed_s":0,"type":"run_finished","status":"aborted","terminal_state":null,"totals":{"cost_usd":0.05,"wallclock_s":184,"transitions":0}}"#.into(),
+    ]);
+
+    let out = fx.run(&["recap"]);
+    assert!(out.status.success(), "{}", combined(&out));
+    let text = stdout(&out);
+
+    for expected in [
+        // The failing tier, with the harness's own evidence beside it.
+        "- check: fail",
+        "- criteria: skip (not configured on this edge)",
+        "**Check** output — harness evidence, not the Worker's:",
+        "FAILED: 3 tests",
+        // The retry is its own section, not a footnote on the first attempt.
+        "### 2. implement — cycle 1, attempt 2",
+        "second try",
+        // A blocked proposal names no target, and the Navigator's choice is
+        // attributed to the Navigator.
+        "blocked — no target proposed",
+        "**Navigator** was asked to route out of `implement` and chose `blocked`",
+        "summarize what you tried",
+        // The guardrail that ended it, repeated where the reader looks for it.
+        "- status: Aborted",
+        "- terminal state: (none — the run stopped without reaching one)",
+        "The last fatal error recorded before it stopped:",
+        "escalated: the suite never went green",
+    ] {
+        assert!(text.contains(expected), "missing {expected:?} in:\n{text}");
+    }
+
+    // A recap of a failed run is still a successful report: `loop run` owns
+    // the exit code a CI wrapper gates on.
+    assert_eq!(out.status.code(), Some(0));
+}
+
 const TINY_MACHINE: &str = r#"
 {:ticket "TINY-1"
  :task "Make the thing."

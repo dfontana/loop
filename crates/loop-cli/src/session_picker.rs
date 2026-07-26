@@ -184,94 +184,66 @@ impl Scope {
 
 /// Build one candidate per usable `state_entered`, **newest first**.
 ///
-/// Association is by *ledger episode*: a candidate owns the events from its own
-/// `state_entered` up to the next one. Within that window the matching
-/// `worker_output` (same state and cycle) and any errors belong to it.
-/// `worker_output` carries no attempt field, so bounding by the episode is what
-/// keeps attempt 2's summary from being credited to attempt 1 — and it needs no
-/// change to the ledger's wire format to do it.
+/// A projection of [`crate::episode`]: that module owns which events belong to
+/// which attempt, and this one owns what a *reopenable* attempt is. Within an
+/// episode the matching `worker_output` (same state and cycle) and any errors
+/// belong to it.
 ///
 /// A `state_entered` with no session id is dropped: there is nothing to reopen.
 /// Judge and Navigator spawns are sessionless by design and never appear here.
 pub fn candidates(events: &[Event]) -> Vec<Candidate> {
-    // Where each episode ends, so the scan below is a single pass with a known
-    // right edge rather than a nested search.
-    let entered: Vec<usize> = events
-        .iter()
-        .enumerate()
-        .filter(|(_, e)| matches!(e.payload, EventPayload::StateEntered { .. }))
-        .map(|(i, _)| i)
-        .collect();
+    let mut out: Vec<Candidate> = crate::episode::episodes(events)
+        .into_iter()
+        .filter_map(|ep| {
+            let session_id = ep.session_id?;
 
-    let mut out = Vec::new();
-    for (n, &start) in entered.iter().enumerate() {
-        let end = entered.get(n + 1).copied().unwrap_or(events.len());
-        let EventPayload::StateEntered {
-            state,
-            cycle,
-            attempt,
-            session_id,
-            model,
-            thinking,
-            ..
-        } = &events[start].payload
-        else {
-            continue;
-        };
-        let Some(session_id) = session_id
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-        else {
-            continue;
-        };
-
-        let mut summary = None;
-        let mut usage = None;
-        let mut artifacts = Vec::new();
-        let mut errors = Vec::new();
-        for e in &events[start + 1..end] {
-            match &e.payload {
-                EventPayload::WorkerOutput {
-                    state: s,
-                    cycle: c,
-                    summary: text,
-                    artifacts: arts,
-                    usage: u,
-                } if s == state && c == cycle => {
-                    summary = Some(text.clone());
-                    usage = Some(*u);
-                    artifacts = arts.clone();
+            let mut summary = None;
+            let mut usage = None;
+            let mut artifacts = Vec::new();
+            let mut errors = Vec::new();
+            for e in ep.body {
+                match &e.payload {
+                    EventPayload::WorkerOutput {
+                        state: s,
+                        cycle: c,
+                        summary: text,
+                        artifacts: arts,
+                        usage: u,
+                    } if s == ep.state && *c == ep.cycle => {
+                        summary = Some(text.clone());
+                        usage = Some(*u);
+                        artifacts = arts.clone();
+                    }
+                    EventPayload::Error { detail, .. } => errors.push(detail.clone()),
+                    _ => {}
                 }
-                EventPayload::Error { detail, .. } => errors.push(detail.clone()),
-                _ => {}
             }
-        }
 
-        let outcome = if summary.is_some() {
-            Outcome::Finished
-        } else if errors.is_empty() {
-            Outcome::Incomplete
-        } else {
-            Outcome::Crashed
-        };
+            let outcome = if summary.is_some() {
+                Outcome::Finished
+            } else if errors.is_empty() {
+                Outcome::Incomplete
+            } else {
+                Outcome::Crashed
+            };
 
-        out.push(Candidate {
-            ordinal: CandidateOrdinal(start),
-            session_id: session_id.to_string(),
-            state: state.clone(),
-            cycle: *cycle,
-            attempt: *attempt,
-            ts: events[start].ts.clone(),
-            model: model.clone(),
-            thinking: thinking.clone(),
-            summary,
-            usage,
-            artifacts,
-            errors,
-            outcome,
-        });
-    }
+            Some(Candidate {
+                ordinal: CandidateOrdinal(ep.ordinal),
+                session_id: session_id.to_string(),
+                state: ep.state.clone(),
+                cycle: ep.cycle,
+                attempt: ep.attempt,
+                ts: ep.entered.ts.clone(),
+                model: ep.model.to_string(),
+                thinking: ep.thinking.to_string(),
+                summary,
+                usage,
+                artifacts,
+                errors,
+                outcome,
+            })
+        })
+        .collect();
 
     // Newest-first in reverse ledger order. The timestamp is display metadata,
     // never the sort key: a hand-edited or clock-skewed `ts` must not be able to

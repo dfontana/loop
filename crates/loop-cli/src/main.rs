@@ -8,6 +8,7 @@ use clap::{Parser, Subcommand};
 use loop_core::Paths;
 
 mod commands;
+mod episode;
 mod output;
 mod report;
 mod session_picker;
@@ -71,6 +72,8 @@ enum Command {
         #[arg(long, conflicts_with = "n")]
         raw: bool,
     },
+    /// Explain the recorded run: every attempt, the evidence behind it, and why it ended.
+    Recap,
     /// Continue an interrupted run from the folded resume point.
     Resume {
         #[arg(long)]
@@ -121,6 +124,7 @@ fn try_main() -> anyhow::Result<()> {
         } => commands::run(paths, max_transitions, true, verbose),
         Command::Status { json } => commands::status(paths, json),
         Command::Logs { n, raw } => commands::logs(paths, n, raw),
+        Command::Recap => commands::recap(paths),
         Command::Session { state, latest } => commands::session(paths, state, latest),
         Command::Doctor => commands::doctor(paths),
     }

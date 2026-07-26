@@ -1,4 +1,4 @@
-//! The ten subcommands.
+//! The eleven subcommands.
 
 use std::collections::BTreeMap;
 use std::io::Write as _;
@@ -344,14 +344,9 @@ pub fn status(paths: Paths, json: bool) -> Result<()> {
     // which would list `done#1` alongside a genuine `implement#2`. Status has
     // to keep working when the machine is missing or mid-edit, though — that is
     // often exactly when you want it — so a load failure just costs the line.
-    let loop_heads: Option<Vec<String>> = load(paths.clone()).ok().map(|(_vm, _cfg, m)| {
-        m.loops
-            .iter()
-            .filter_map(|l| l.head().cloned())
-            .collect::<Vec<_>>()
-    });
-    let folded = match &loop_heads {
-        Some(heads) => loop_core::fold_with_loop_heads(&events, &|s| heads.iter().any(|h| h == s)),
+    let machine = load(paths.clone()).ok().map(|(_vm, _cfg, m)| m);
+    let folded = match &machine {
+        Some(m) => loop_core::fold_with_loop_heads(&events, &|s| m.loop_with_head(s).is_some()),
         None => loop_core::fold(&events),
     };
 
@@ -381,13 +376,8 @@ pub fn status(paths: Paths, json: bool) -> Result<()> {
         folded.totals.cost_usd,
         fmt_duration(folded.totals.wallclock_s)
     );
-    if loop_heads.is_some() && !folded.cycles.is_empty() {
-        let cycles: Vec<String> = folded
-            .cycles
-            .iter()
-            .map(|(s, n)| format!("{s}#{n}"))
-            .collect();
-        println!("  cycles: {}", cycles.join(", "));
+    if machine.is_some() && !folded.cycles.is_empty() {
+        println!("  cycles: {}", report::fmt_cycles(&folded));
     }
     println!("\nrecent:");
     for e in events
@@ -419,6 +409,78 @@ pub fn logs(paths: Paths, n: usize, raw: bool) -> Result<()> {
     for event in events.iter().rev().take(n).collect::<Vec<_>>().iter().rev() {
         println!("{}  {}", event.ts, summarize(event));
     }
+    Ok(())
+}
+
+/// `loop recap` — what this run did and why, answered from the ledger.
+///
+/// The deterministic counterpart to `preview`: that command explains the
+/// declaration before a run, this one explains the observed execution after or
+/// during one. No LLM is involved and nothing is stored — the report is a pure
+/// function of the ledger, so the same ledger renders the same recap.
+///
+/// The ledger is the only source of truth. `machine.fnl` is loaded
+/// opportunistically and trusted *only* when its hash still matches the one
+/// `run_started` recorded: a machine edited since the run cannot be used to
+/// explain decisions the run made under the old one, and saying so is more
+/// useful than quietly labelling a historical attempt with a description
+/// somebody wrote afterwards.
+pub fn recap(paths: Paths) -> Result<()> {
+    let ledger_path = paths.ledger_file();
+    let events = Ledger::open(&ledger_path)?.read_all()?;
+    // An empty ledger has no run to report on. Unlike `status` and `logs`,
+    // which are asked "where is it?" and can truthfully answer "nowhere", a
+    // recap of nothing is a request that cannot be served — and a report file
+    // containing only headings is worse than an error.
+    if events.is_empty() {
+        bail!(
+            "no run to recap: {} is empty — `loop run` starts one",
+            ledger_path.display()
+        );
+    }
+
+    let recorded_hash = events.iter().find_map(|e| match &e.payload {
+        loop_core::EventPayload::RunStarted { machine_hash, .. } => Some(machine_hash.as_str()),
+        _ => None,
+    });
+    // No recorded hash means nothing on disk could ever be proven to be the
+    // machine that ran, so the Fennel VM is never started for one.
+    let loaded = recorded_hash.and_then(|_| load(paths.clone()).ok().map(|(_vm, _cfg, m)| m));
+
+    let machine = match (recorded_hash, &loaded) {
+        (Some(recorded), Some(m)) if recorded == m.source_hash => report::Provenance::Matches(m),
+        (Some(recorded), Some(m)) => {
+            // stderr, so `loop recap > run-recap.md` still produces a clean
+            // file. The report repeats the mismatch in its own summary, so the
+            // warning is a nudge rather than the only place it appears.
+            eprintln!(
+                "warning: {} has changed since this run started (ledger {recorded}, on disk \
+                 {}) — the recap reports only what the ledger recorded",
+                paths.machine_file().display(),
+                m.source_hash,
+            );
+            report::Provenance::Changed {
+                current: m.source_hash.clone(),
+            }
+        }
+        _ => report::Provenance::NotLoaded,
+    };
+
+    let folded = match &machine {
+        report::Provenance::Matches(m) => {
+            loop_core::fold_with_loop_heads(&events, &|s| m.loop_with_head(s).is_some())
+        }
+        _ => loop_core::fold(&events),
+    };
+
+    print!(
+        "{}",
+        report::recap(&report::Recap {
+            events: &events,
+            folded: &folded,
+            machine,
+        })
+    );
     Ok(())
 }
 

@@ -2,7 +2,7 @@
 
 `loop` — "A local, ticket-level agent orchestrator".
 
-Ten subcommands: [`init`](#loop-init), [`validate`](#loop-validate), [`preview`](#loop-preview), [`diagram`](#loop-diagram), [`run`](#loop-run), [`resume`](#loop-resume), [`status`](#loop-status), [`logs`](#loop-logs), [`session`](#loop-session), [`doctor`](#loop-doctor).
+Eleven subcommands: [`init`](#loop-init), [`validate`](#loop-validate), [`preview`](#loop-preview), [`diagram`](#loop-diagram), [`run`](#loop-run), [`resume`](#loop-resume), [`status`](#loop-status), [`recap`](#loop-recap), [`logs`](#loop-logs), [`session`](#loop-session), [`doctor`](#loop-doctor).
 
 For what the runtime actually does with the machine, see [02-how-it-works.md](02-how-it-works.md). For the keys inside `config.fnl` and `machine.fnl`, see [03-customizing.md](03-customizing.md).
 
@@ -392,6 +392,68 @@ Header is one of `not started`, ``running — at `{state}` ``, or `finished — 
 | `note` | `note: <text…70>` |
 | `run_finished` | `run_finished Done` |
 
+## `loop recap`
+
+```
+loop recap
+loop recap > run-recap.md
+```
+
+> Explain the recorded run: every attempt, the evidence behind it, and why it ended.
+
+No flags. The post-run counterpart to [`preview`](#loop-preview): that command explains the declaration, this one explains the observed execution. Markdown to stdout, so it redirects into a ticket write-up unchanged.
+
+**Deterministic.** No LLM, no clock, no network, and nothing written. The report is a pure function of the ledger, so the same ledger renders byte-identical output on every invocation.
+
+### Output sections
+
+Always these four, always in this order:
+
+| Section | Contents |
+| --- | --- |
+| `# <ticket> — recap` | Heading and a one-line provenance note. |
+| `## Run summary` | Start timestamp, the budgets recorded on `run_started`, the machine hash and whether the machine on disk still matches it, outcome, totals, cycle counts, Navigator invocation count, attempt count. Any events recorded before the first `state_entered` are appended here. |
+| `## Attempt timeline` | One `###` section per `state_entered`, in ledger order. Header bullets: entered timestamp and elapsed, `model:thinking`, skills, MCP, session id. Then the episode's events in ledger order — Worker summary, usage and artifacts; the proposal and its rationale; each guard tier's outcome with the full check output and the full Judge rationale; the Navigator's choice; the committed move; any errors and notes before the next attempt. |
+| `## Why it ended` | For a finished run: status, terminal state, the timestamp, and `run_finished`'s totals — plus the last fatal `error` when the status is not `Done`. For an unfinished one: the folded resume point and the last durable event. |
+| `## Inspecting further` | A `loop session <state>` line per state with a reopenable attempt, and the `loop logs --raw \| jq` recipes for the complete stream. |
+
+### Evidence labels
+
+Claims in the timeline are attributed to whoever made them. `**Worker**` is the Worker's own account and is not treated as proof of anything; `**Check**` is output from a command the harness ran in its own process; `**Judge**` is an independent verdict; `**Committed**` is the harness's decision. Artifact lines are Worker claims — the harness captured the file, not its contents' truth.
+
+Multi-line evidence (Worker summaries, check output, Judge rationales, error details) is reproduced **in full**, inside a fence grown past any backtick run in the text so arbitrary build output cannot escape its block. Nothing in the timeline is truncated; the 60-character summaries belong to [`status`](#loop-status) and [`logs`](#loop-logs).
+
+### Partial runs
+
+Completion is not required. A run in flight or interrupted is reported to date, with the resume point and last durable event in place of a terminal transition. Attempts with no `worker_output`, no session id, no artifacts, or no commit still get their section — a failed attempt that produced nothing is not omitted.
+
+### The machine, and the hash warning
+
+`machine.fnl` is loaded opportunistically and used **only** when `Machine::source_hash` equals the `machine_hash` recorded on `run_started`. On a match the report adds state descriptions to attempt headings and folds cycles against the machine's declared loop heads.
+
+Otherwise — the machine is missing, fails to load, the ledger has no `run_started`, or the hashes differ — the recap:
+
+- prints `- machine on disk: CHANGED — now <hash>` (or `not loaded`) in the run summary;
+- omits state descriptions entirely;
+- folds machine-agnostically, so `cycles` counts re-entries of every state and says so on the line;
+- and, on a hash mismatch specifically, writes a warning to **stderr**:
+
+```
+warning: <path>/machine.fnl has changed since this run started (ledger <a>, on disk <b>) — the recap reports only what the ledger recorded
+```
+
+stderr rather than stdout, so `loop recap > run-recap.md` still produces a clean file; the report carries the same fact in its own summary.
+
+### Exit and edge cases
+
+The report goes to stdout in full; only the hash warning goes to stderr. **An empty ledger is an error**, not an empty report:
+
+```
+error: no run to recap: <path>/.loop/ledger.jsonl is empty — `loop run` starts one
+```
+
+Opening the ledger repairs a torn trailing line first, exactly as [`status`](#loop-status) does. A recap of a `Failed` or `Aborted` run still exits 0 — it is a report, and [`loop run`](#loop-run) owns the exit code a CI wrapper gates on. Exit 1 is reserved for an empty, unreadable, or interior-corrupt ledger.
+
 ## `loop logs`
 
 ```
@@ -629,6 +691,7 @@ Per command:
 | `run` | outcome `Done` | outcome `Failed` or `Aborted`; ledger already has a run; machine missing or fails to load |
 | `resume` | outcome `Done` | as `run`, plus an empty ledger |
 | `status` | always, including the empty-ledger message | ledger unreadable or has a corrupt interior line |
+| `recap` | a report was printed, **whatever the run's outcome was** | empty ledger; ledger unreadable or has a corrupt interior line |
 | `logs` | human tail, or complete JSONL with `--raw` | ledger unreadable or has a corrupt interior line |
 | `session` | pi exited 0, **or** the picker was cancelled | no usable candidate; no terminal and no `--latest`; pi could not be spawned; pi exited non-zero |
 | `doctor` | all four checks pass | `{n} problem(s)` |

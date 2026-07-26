@@ -235,7 +235,25 @@ error: run ended at `blocked` without completing — see `loop status`
 error: run aborted — see `loop status` for the guardrail
 ```
 
-Whichever it is, `loop status` is the first thing to reach for. It folds the ledger and prints where the run is, what it has cost, and how many cycles each looping stage has burned:
+Whichever it is, `loop recap` is the first thing to reach for. It reads the ledger and writes the whole run out as Markdown: what it was started with, one section per stage attempt, and why it stopped.
+
+```
+loop recap                  # to the terminal
+loop recap > run-recap.md   # or straight into the ticket
+```
+
+Four sections, always in this order:
+
+1. **Run summary** — the ticket, the budgets the run started under, its outcome, totals, cycle counts, and how often the Navigator had to step in.
+2. **Attempt timeline** — every `state_entered`, in order, with the model and skills it ran under, the Worker's summary and cost, its proposal, each guard tier's outcome, the check's captured output, the Judge's rationale, and the committed move. **Failed attempts are in here too**, including the ones that produced no commit at all.
+3. **Why it ended** — the terminal transition, or the guardrail that stopped it. For a run still going or interrupted, the resume point and the last durable event instead.
+4. **Inspecting further** — the `loop session` and `loop logs --raw` commands for this particular run.
+
+Two things make it worth trusting. It is **deterministic** — no LLM writes any of it, so the same ledger always renders the same report. And it **labels evidence by author**: a `**Worker**` block is the Worker's own account of what it did and proves nothing on its own, while `**Check**` is output from a command the harness ran itself and `**Judge**` is an independent verdict. When those three disagree, the recap shows you the disagreement rather than a smoothed-over summary.
+
+It also works on a run that is still going, or one that crashed — "recap to date" is a normal answer. The only thing it refuses is an empty ledger.
+
+Then there are progressively deeper views. `loop status` is the quick one-screen answer while a run is in flight:
 
 ```
 running — at `review`
@@ -248,11 +266,12 @@ For the event-by-event view, use `logs`:
 ```
 loop logs            # the last 20 events, oldest first
 loop logs -n 50      # a larger human-readable tail
+loop logs --raw      # the complete ledger as JSONL, for jq
 ```
 
 `loop status --json` gives you a machine-readable folded summary for scripting.
 
-`status` tells you _that_ the review failed twice. When you want to know _why_, reach for the transcript:
+`recap` tells you _that_ the review failed twice, and what the Judge said about it. When you want the reasoning behind it, reach for the transcript:
 
 ```
 loop session
@@ -277,7 +296,7 @@ loop resume
 
 `resume` re-reads the ledger, works out where the run actually got to, and continues from there. An interrupted _stage_ re-runs from the beginning as a new attempt rather than picking up mid-thought, so stages should be safe to run twice. `loop run` refuses to start on top of an existing run and tells you to resume; `loop resume` refuses when there is nothing to continue.
 
-Underneath both is `.loop/ledger.jsonl` — one JSON object per line, appended and fsynced, never rewritten. To access the complete ledger without knowing its path, use `loop logs --raw`; it is meant to compose with `jq` and other tools. To start a genuinely fresh run, delete it.
+Underneath all of them is `.loop/ledger.jsonl` — one JSON object per line, appended and fsynced, never rewritten. Everything above is a view over it: `recap` narrates it, `status` folds it, `logs` prints it, `session` looks up the ids inside it. To access the complete ledger without knowing its path, use `loop logs --raw`; it is meant to compose with `jq` and other tools. To start a genuinely fresh run, delete it.
 
 ## Where to go next
 

@@ -26,10 +26,13 @@ While it runs, or after it stops:
 
 ```sh
 loop status          # where it is and how it got there
+loop recap           # every attempt, its evidence, and why the run ended
 loop logs            # recent ledger events
 loop session         # pick a stage and reopen what that worker actually did
 loop resume          # continue an interrupted run
 ```
+
+`recap` is the post-run counterpart to `preview`: `preview` explains the machine you declared, `recap` explains the run that happened. It reads the ledger and nothing else — no LLM, no second history — so the same ledger always renders the same report, and it labels each piece of evidence by who authored it: the Worker's own summary, the harness's check output, the Judge's verdict. It writes Markdown to stdout, so `loop recap > run-recap.md` is a ticket write-up.
 
 `status` folds the ledger into a summary; `session` is how you read the full transcript behind any line of it. loop keeps no transcript of its own — it records the session id pi filed each stage under, and hands it back:
 

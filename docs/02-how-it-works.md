@@ -372,6 +372,35 @@ corrupt ledger line 47 of /proj/.loop/ledger.jsonl: …
 
 ## Inspecting a run
 
+Five views over the same ledger, in increasing depth: `recap` narrates the whole run, `status` folds it to one screen, `logs` prints the events, `--raw | jq` queries them, and `session` opens the Worker transcript behind any of it.
+
+### `loop recap`
+
+```
+loop recap
+loop recap > run-recap.md
+```
+
+The deterministic post-run report. Markdown on stdout, four sections: **Run summary**, **Attempt timeline** (one section per `state_entered`, in ledger order), **Why it ended**, and **Inspecting further**.
+
+It is a report _over_ the ledger, not another state or history store. Nothing is written; no LLM is involved; the machine is not consulted for anything the ledger already knows. The same ledger renders byte-identical output every time, which is the property that makes it usable as evidence.
+
+**Evidence labels.** The attempt timeline attributes every claim to whoever made it, because the three sources are not equally trustworthy and the interesting runs are the ones where they disagree:
+
+| Label | Who authored it | What it proves |
+| --- | --- | --- |
+| `**Worker**` | the Worker itself, from `worker_output.summary` | nothing on its own — it is the agent's own account of its own work |
+| `**Proposal**` | the Worker (or the Navigator, when it routed) | what was asked for, not what was granted |
+| `**Check**` | the harness, running the edge's `:cmd` in its own process | a real signal — the Worker never touched this |
+| `**Judge**` | an independent Judge spawn with no tools and no session | a second opinion on the criteria, from something that did not do the work |
+| `**Committed**` | the harness | what actually happened |
+
+Artifact lines are Worker claims too: the harness captured the file the Worker pointed at, and captures nothing about whether it says what the Worker said it says.
+
+**Partial runs.** Completion is not required. A run still in flight, or one killed mid-stage, is reported to date: "Why it ended" carries the folded resume point and the last durable event instead of a terminal transition. Attempts that produced no `worker_output`, no session id, and no commit still get their section — a failed attempt that left nothing behind is exactly what a recap is for. An **empty ledger is an error**, not an empty report.
+
+**The machine is optional, and only sometimes trusted.** `machine.fnl` is loaded opportunistically and used _only_ when its hash still equals the `machine_hash` on `run_started`. When it differs — or when it will not load, or the ledger has no `run_started` — the recap says so, drops the state descriptions, and falls back to the machine-agnostic fold, where the `cycles` figure counts re-entries of every state rather than declared loops. A machine edited after a run cannot explain decisions the run made under the old one.
+
 ### `loop status`
 
 ```
@@ -557,6 +586,8 @@ Reading it:
 `retry` never appears — it is the default and would be noise on every edge — and a route gets its own arrow rather than a label fragment. So an edge labelled `check, judge, wait 30s` runs a command, then the Judge, then sleeps 30 seconds after committing.
 
 ### Reading the ledger directly
+
+`loop recap` answers the common questions — what happened, in what order, and why it stopped — without any of this. Reach for `jq` when you want an aggregate the recap does not compute, or a shape only your ticket cares about.
 
 `loop logs --raw` is the path-independent way to reach the complete ledger. The flat envelope makes `jq` the right tool. Three that earn their keep:
 
