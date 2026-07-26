@@ -86,16 +86,14 @@ impl AgentRunner for PiRunner {
     /// - The `transition` call arrives as a `tool_execution_end` event whose
     ///   result text starts with `LOOP_TRANSITION `. We take that over the
     ///   tool-call args: the tool validates before echoing.
-    /// - `LOOP_VARS {…}` lines appear in *any* tool's result text. Every one
-    ///   is scraped, in order, and deep-merged — these are the trusted vars.
     /// - `usage` is summed off every `message_end` event for an assistant
     ///   message.
     /// - A worker that never calls `transition` is not an error here: we
     ///   return `proposal: None` and let the engine decide (it re-enters or
     ///   navigates).
     /// - `exit_ok` reflects the process exit code only; a non-zero exit
-    ///   doesn't stop us from returning whatever partial summary/vars/usage
-    ///   the stream did contain before it was cut off.
+    ///   doesn't stop us from returning whatever partial summary/usage the
+    ///   stream did contain before it was cut off.
     fn run_worker(&self, spec: &WorkerSpec) -> Result<WorkerResult> {
         let cmd = command::worker_command(&self.pi_bin, spec);
         let (outcome, exit_ok) = self.spawn_and_parse(cmd, "worker")?;
@@ -103,7 +101,6 @@ impl AgentRunner for PiRunner {
         Ok(WorkerResult {
             summary: outcome.summary,
             proposal,
-            vars: outcome.vars,
             usage: outcome.usage,
             session_id: outcome.session_id,
             exit_ok,

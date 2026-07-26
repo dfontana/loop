@@ -1,9 +1,7 @@
 //! Engine integration tests, against the fakes in [`crate::test_support`].
 //! No Lua, no subprocess, no filesystem, no API key.
 
-use serde_json::json;
-
-use loop_core::{Config, OnExhausted, OnFail, Paths, PlaybookRef, RunStatus, Vars};
+use loop_core::{Config, OnExhausted, OnFail, Paths, PlaybookRef, RunStatus};
 
 use crate::guards::select_edge;
 use crate::test_support::*;
@@ -17,19 +15,13 @@ fn config() -> Config {
     })
 }
 
-fn run(
-    machine: &loop_core::Machine,
-    guards: &FakeGuards,
-    runner: &FakeRunner,
-    ledger: &mut FakeLedger,
-) -> Outcome {
+fn run(machine: &loop_core::Machine, runner: &FakeRunner, ledger: &mut FakeLedger) -> Outcome {
     let cfg = config();
     let artifacts = FakeArtifacts;
     let stage = FakeStageBuilder { machine };
     let mut engine = Engine {
         machine,
         config: &cfg,
-        guards,
         runner,
         ledger,
         artifacts: &artifacts,
@@ -43,7 +35,6 @@ fn run(
 
 #[test]
 fn happy_path_entry_to_terminal_with_right_ledger_sequence() {
-    let reg = GuardRegistry::default();
     let mut m = base_machine();
     m.entry = "implement".into();
     m.terminals.insert("done".into());
@@ -54,29 +45,20 @@ fn happy_path_entry_to_terminal_with_right_ledger_sequence() {
         "review",
         "plan addressed, build green",
     ));
-    m.transitions.push(
-        reg.edge_when("review", "done", "review.result == 'clean'", |v| {
-            v.get_path("review.result") == Some(&json!("clean"))
-        }),
-    );
+    m.transitions
+        .push(judged_edge("review", "done", "no blocking defects remain"));
 
     let runner = FakeRunner::default();
     runner.script_worker(
         "implement",
         worker_result(proposal_to("review", "plan done, build green")),
     );
-    runner.script_worker(
-        "review",
-        worker_result_with_vars(
-            proposal_to("done", "clean review"),
-            Vars::from_value(json!({"review": {"result": "clean"}})),
-        ),
-    );
+    runner.script_worker("review", worker_result(proposal_to("done", "clean review")));
     runner.script_judge(verdict(true, "checklist covered, no TODOs"));
+    runner.script_judge(verdict(true, "no defects worth blocking on"));
 
-    let guards = reg.evaluator();
     let mut ledger = FakeLedger::default();
-    let outcome = run(&m, &guards, &runner, &mut ledger);
+    let outcome = run(&m, &runner, &mut ledger);
 
     assert_eq!(outcome.status, RunStatus::Done);
     assert_eq!(outcome.terminal_state.as_deref(), Some("done"));
@@ -92,7 +74,6 @@ fn happy_path_entry_to_terminal_with_right_ledger_sequence() {
             "guard_checked",
             "transition_committed",
             "state_entered",
-            "vars_set",
             "worker_output",
             "transition_proposed",
             "guard_checked",
@@ -101,57 +82,46 @@ fn happy_path_entry_to_terminal_with_right_ledger_sequence() {
         ]
     );
 
-    // implement -> review: judged (criteria), no `when`.
-    if let loop_core::EventPayload::GuardChecked {
-        structural,
-        when,
-        criteria,
-        ..
-    } = ledger.payloads_of("guard_checked")[0]
-    {
-        assert_eq!(*structural, loop_core::GuardOutcome::Pass);
-        assert_eq!(*when, loop_core::GuardOutcome::Skip);
-        assert_eq!(*criteria, loop_core::GuardOutcome::Pass);
-    } else {
-        panic!("expected GuardChecked");
-    }
-
-    // review -> done: `when`, no criteria.
-    if let loop_core::EventPayload::GuardChecked { when, criteria, .. } =
-        ledger.payloads_of("guard_checked")[1]
-    {
-        assert_eq!(*when, loop_core::GuardOutcome::Pass);
-        assert_eq!(*criteria, loop_core::GuardOutcome::Skip);
-    } else {
-        panic!("expected GuardChecked");
+    for i in 0..2 {
+        if let loop_core::EventPayload::GuardChecked {
+            structural,
+            criteria,
+            ..
+        } = ledger.payloads_of("guard_checked")[i]
+        {
+            assert_eq!(*structural, loop_core::GuardOutcome::Pass);
+            assert_eq!(*criteria, loop_core::GuardOutcome::Pass);
+        } else {
+            panic!("expected GuardChecked");
+        }
     }
 }
 
 // ── guard tiers & on_fail ────────────────────────────────────────────────
 
 #[test]
-fn when_guard_fail_retries_source_state() {
-    let reg = GuardRegistry::default();
+fn judge_fail_retries_source_state() {
     let mut m = base_machine();
     m.entry = "check".into();
     m.terminals.insert("done".into());
     m.states.insert("check".into(), state("check"));
     m.transitions
-        .push(reg.edge_when("check", "done", "qa.result == 'pass'", |v| {
-            v.get_path("qa.result") == Some(&json!("pass"))
-        }));
+        .push(judged_edge("check", "done", "the suite is green"));
 
     let runner = FakeRunner::default();
-    let mut fail = worker_result(proposal_to("done", "think it's fine"));
-    fail.vars = Vars::from_value(json!({"qa": {"result": "fail"}}));
-    runner.script_worker("check", fail);
-    let mut pass = worker_result(proposal_to("done", "actually fine now"));
-    pass.vars = Vars::from_value(json!({"qa": {"result": "pass"}}));
-    runner.script_worker("check", pass);
+    runner.script_worker(
+        "check",
+        worker_result(proposal_to("done", "think it's fine")),
+    );
+    runner.script_worker(
+        "check",
+        worker_result(proposal_to("done", "actually fine now")),
+    );
+    runner.script_judge(verdict(false, "two specs still red"));
+    runner.script_judge(verdict(true, "suite is green"));
 
-    let guards = reg.evaluator();
     let mut ledger = FakeLedger::default();
-    let outcome = run(&m, &guards, &runner, &mut ledger);
+    let outcome = run(&m, &runner, &mut ledger);
 
     assert_eq!(outcome.status, RunStatus::Done);
     let entered = ledger.payloads_of("state_entered");
@@ -168,14 +138,14 @@ fn when_guard_fail_retries_source_state() {
     let checks = ledger.payloads_of("guard_checked");
     assert_eq!(checks.len(), 2);
     match checks[0] {
-        loop_core::EventPayload::GuardChecked { when, .. } => {
-            assert_eq!(*when, loop_core::GuardOutcome::Fail)
+        loop_core::EventPayload::GuardChecked { criteria, .. } => {
+            assert_eq!(*criteria, loop_core::GuardOutcome::Fail)
         }
         _ => unreachable!(),
     }
     match checks[1] {
-        loop_core::EventPayload::GuardChecked { when, .. } => {
-            assert_eq!(*when, loop_core::GuardOutcome::Pass)
+        loop_core::EventPayload::GuardChecked { criteria, .. } => {
+            assert_eq!(*criteria, loop_core::GuardOutcome::Pass)
         }
         _ => unreachable!(),
     }
@@ -201,9 +171,8 @@ fn judge_fail_with_on_fail_route_sends_elsewhere_without_further_guard_checks() 
     );
     runner.script_judge(verdict(false, "TODOs remain"));
 
-    let guards = GuardRegistry::default().evaluator();
     let mut ledger = FakeLedger::default();
-    let outcome = run(&m, &guards, &runner, &mut ledger);
+    let outcome = run(&m, &runner, &mut ledger);
 
     assert_eq!(outcome.status, RunStatus::Done);
     assert_eq!(outcome.terminal_state.as_deref(), Some("needs_human"));
@@ -238,127 +207,37 @@ fn on_fail_abort_finishes_run_failed() {
     );
     runner.script_judge(verdict(false, "not clean"));
 
-    let guards = GuardRegistry::default().evaluator();
     let mut ledger = FakeLedger::default();
-    let outcome = run(&m, &guards, &runner, &mut ledger);
+    let outcome = run(&m, &runner, &mut ledger);
 
     assert_eq!(outcome.status, RunStatus::Failed);
     assert_eq!(outcome.terminal_state.as_deref(), Some("implement"));
 }
 
-// ── docs/07 #2: trusted vs untrusted vars ───────────────────────────────
+// ── select_edge ─────────────────────────────────────────────────────────
 
+/// Parallel edges used to be told apart by their `when` guards. Without those,
+/// the first declared edge wins and the rest are dead — which is why
+/// [`crate::validate`] rejects the duplicate rather than letting it silently
+/// decide which `criteria` applies.
 #[test]
-fn worker_declared_var_cannot_open_a_gate_that_a_tool_emitted_var_can() {
-    let reg = GuardRegistry::default();
-    let mut m = base_machine();
-    m.entry = "check".into();
-    m.terminals.insert("done".into());
-    m.states.insert("check".into(), state("check"));
-    m.transitions
-        .push(reg.edge_when("check", "done", "qa.result == 'pass'", |v| {
-            v.get_path("qa.result") == Some(&json!("pass"))
-        }));
-
-    let runner = FakeRunner::default();
-    // Attempt 1: the worker *claims* pass via the untrusted `transition(vars=...)`
-    // channel. `WorkerResult.vars` (the trusted, tool-emitted channel) is empty.
-    let mut claimed = worker_result(loop_core::Proposal {
-        vars: Vars::from_value(json!({"qa": {"result": "pass"}})),
-        ..proposal_to("done", "looks good to me")
-    });
-    claimed.vars = Vars::new(); // no trusted assertion
-    runner.script_worker("check", claimed);
-
-    // Attempt 2: a tool actually asserts it via LOOP_VARS (WorkerResult.vars).
-    let mut real = worker_result(proposal_to("done", "tool confirms pass"));
-    real.vars = Vars::from_value(json!({"qa": {"result": "pass"}}));
-    runner.script_worker("check", real);
-
-    let guards = reg.evaluator();
-    let mut ledger = FakeLedger::default();
-    let outcome = run(&m, &guards, &runner, &mut ledger);
-
-    assert_eq!(
-        outcome.status,
-        RunStatus::Done,
-        "should eventually pass on attempt 2"
-    );
-
-    let checks = ledger.payloads_of("guard_checked");
-    assert_eq!(checks.len(), 2);
-    match checks[0] {
-        loop_core::EventPayload::GuardChecked { when, .. } => {
-            assert_eq!(
-                *when,
-                loop_core::GuardOutcome::Fail,
-                "the worker's own untrusted vars claim must not open the gate"
-            )
-        }
-        _ => unreachable!(),
-    }
-    match checks[1] {
-        loop_core::EventPayload::GuardChecked { when, .. } => {
-            assert_eq!(*when, loop_core::GuardOutcome::Pass)
-        }
-        _ => unreachable!(),
-    }
-
-    let vars_events = ledger.payloads_of("vars_set");
-    let trust_flags: Vec<bool> = vars_events
-        .iter()
-        .map(|p| match p {
-            loop_core::EventPayload::VarsSet { trusted, .. } => *trusted,
-            _ => unreachable!(),
-        })
-        .collect();
-    assert_eq!(trust_flags, vec![false, true]);
-}
-
-// ── select_edge: multi-edge disambiguation ──────────────────────────────
-
-#[test]
-fn select_edge_picks_first_passing_when_among_same_from_and_to() {
-    let reg = GuardRegistry::default();
+fn select_edge_takes_the_first_declared_edge_and_none_when_absent() {
     let mut m = base_machine();
     m.states.insert("a".into(), state("a"));
     m.states.insert("b".into(), state("b"));
-    let e1 = reg.edge_when("a", "b", "always false", |_| false);
-    let e2 = reg.edge_when("a", "b", "always true", |_| true);
-    m.transitions.push(e1);
-    m.transitions.push(e2.clone());
+    m.transitions.push(judged_edge("a", "b", "first"));
+    m.transitions.push(judged_edge("a", "b", "second"));
 
-    let guards = reg.evaluator();
-    let found = select_edge(&m, &guards, "a", "b", &Vars::new())
-        .unwrap()
-        .unwrap();
-    assert_eq!(found.when_src.as_deref(), Some("always true"));
+    let found = select_edge(&m, "a", "b").expect("an edge exists");
+    assert_eq!(found.criteria.as_deref(), Some("first"));
 
-    // If none pass, `select_edge` returns `None`.
-    m.transitions.pop();
-    m.transitions.push(loop_core::Transition {
-        when: e2.when,
-        ..reg.edge_when("a", "b", "always false 2", |_| false)
-    });
-    // rebuild with two always-false guards
-    let reg2 = GuardRegistry::default();
-    let mut m2 = base_machine();
-    m2.states.insert("a".into(), state("a"));
-    m2.states.insert("b".into(), state("b"));
-    m2.transitions
-        .push(reg2.edge_when("a", "b", "f1", |_| false));
-    m2.transitions
-        .push(reg2.edge_when("a", "b", "f2", |_| false));
-    let guards2 = reg2.evaluator();
-    let none = select_edge(&m2, &guards2, "a", "b", &Vars::new()).unwrap();
-    assert!(none.is_none());
+    assert!(select_edge(&m, "b", "a").is_none());
 }
 
 // ── docs/06: transient vs real routing, self-loop with backoff ─────────
 
 #[test]
 fn transient_vs_real_routing_drives_self_loop_then_real_failure_to_debug() {
-    let reg = GuardRegistry::default();
     let mut m = base_machine();
     m.entry = "start".into();
     m.terminals.insert("validate".into());
@@ -367,46 +246,50 @@ fn transient_vs_real_routing_drives_self_loop_then_real_failure_to_debug() {
     m.states.insert("debug".into(), state("debug"));
 
     m.transitions.push(edge("start", "qa_staging"));
-    m.transitions.push(
-        reg.edge_when("qa_staging", "validate", "qa.result == 'pass'", |v| {
-            v.get_path("qa.result") == Some(&json!("pass"))
-        }),
-    );
+    m.transitions
+        .push(judged_edge("qa_staging", "validate", "the run passed"));
     m.transitions.push(loop_core::Transition {
         backoff_s: Some(0),
-        ..reg.edge_when("qa_staging", "qa_staging", "fail && transient", |v| {
-            v.get_path("qa.result") == Some(&json!("fail"))
-                && v.get_path("qa.error_class") == Some(&json!("transient"))
-        })
+        ..judged_edge(
+            "qa_staging",
+            "qa_staging",
+            "the failure was infrastructural",
+        )
     });
-    m.transitions
-        .push(reg.edge_when("qa_staging", "debug", "fail && real", |v| {
-            v.get_path("qa.result") == Some(&json!("fail"))
-                && v.get_path("qa.error_class") == Some(&json!("real"))
-        }));
+    m.transitions.push(judged_edge(
+        "qa_staging",
+        "debug",
+        "the failure was a real defect",
+    ));
     m.transitions.push(edge("debug", "qa_staging"));
     m.loops
         .push(loop_spec("qa", &["qa_staging"], 5, OnExhausted::Escalate));
 
     let runner = FakeRunner::default();
     runner.script_worker("start", worker_result(proposal_to("qa_staging", "go")));
-    let mut cycle1 = worker_result(proposal_to("qa_staging", "transient, retry"));
-    cycle1.vars = Vars::from_value(json!({"qa": {"result": "fail", "error_class": "transient"}}));
-    runner.script_worker("qa_staging", cycle1);
-    let mut cycle2 = worker_result(proposal_to("debug", "real failure"));
-    cycle2.vars = Vars::from_value(json!({"qa": {"result": "fail", "error_class": "real"}}));
-    runner.script_worker("qa_staging", cycle2);
+    runner.script_worker(
+        "qa_staging",
+        worker_result(proposal_to("qa_staging", "transient, retry")),
+    );
+    runner.script_worker(
+        "qa_staging",
+        worker_result(proposal_to("debug", "real failure")),
+    );
     runner.script_worker(
         "debug",
         worker_result(proposal_to("qa_staging", "fixed it")),
     );
-    let mut cycle3 = worker_result(proposal_to("validate", "all green"));
-    cycle3.vars = Vars::from_value(json!({"qa": {"result": "pass"}}));
-    runner.script_worker("qa_staging", cycle3);
+    runner.script_worker(
+        "qa_staging",
+        worker_result(proposal_to("validate", "all green")),
+    );
+    // One verdict per judged edge, in the order the run takes them.
+    runner.script_judge(verdict(true, "executor was lost mid-stage"));
+    runner.script_judge(verdict(true, "schema mismatch in the transform"));
+    runner.script_judge(verdict(true, "output sample satisfies the QA cases"));
 
-    let guards = reg.evaluator();
     let mut ledger = FakeLedger::default();
-    let outcome = run(&m, &guards, &runner, &mut ledger);
+    let outcome = run(&m, &runner, &mut ledger);
 
     assert_eq!(outcome.status, RunStatus::Done);
     assert_eq!(outcome.terminal_state.as_deref(), Some("validate"));
@@ -435,7 +318,6 @@ fn transient_vs_real_routing_drives_self_loop_then_real_failure_to_debug() {
 
 #[test]
 fn max_cycles_exhaustion_escalates() {
-    let reg = GuardRegistry::default();
     let mut m = base_machine();
     m.entry = "start".into();
     m.terminals.insert("blocked".into());
@@ -445,7 +327,7 @@ fn max_cycles_exhaustion_escalates() {
     m.transitions.push(edge("start", "qa_staging"));
     m.transitions.push(loop_core::Transition {
         backoff_s: Some(0),
-        ..reg.edge_when("qa_staging", "qa_staging", "always retry", |_| true)
+        ..edge("qa_staging", "qa_staging")
     });
     m.loops
         .push(loop_spec("qa", &["qa_staging"], 2, OnExhausted::Escalate));
@@ -459,9 +341,8 @@ fn max_cycles_exhaustion_escalates() {
         );
     }
 
-    let guards = reg.evaluator();
     let mut ledger = FakeLedger::default();
-    let outcome = run(&m, &guards, &runner, &mut ledger);
+    let outcome = run(&m, &runner, &mut ledger);
 
     // Escalation is a failed run, not a successful one: the ticket did not
     // go through, and the exit status must say so.
@@ -485,7 +366,6 @@ fn max_cycles_exhaustion_escalates() {
 
 #[test]
 fn max_cycles_exhaustion_aborts_when_configured() {
-    let reg = GuardRegistry::default();
     let mut m = base_machine();
     m.entry = "start".into();
     m.terminals.insert("done".into());
@@ -494,7 +374,7 @@ fn max_cycles_exhaustion_aborts_when_configured() {
     m.transitions.push(edge("start", "qa_staging"));
     m.transitions.push(loop_core::Transition {
         backoff_s: Some(0),
-        ..reg.edge_when("qa_staging", "qa_staging", "always retry", |_| true)
+        ..edge("qa_staging", "qa_staging")
     });
     m.loops
         .push(loop_spec("qa", &["qa_staging"], 1, OnExhausted::Abort));
@@ -508,9 +388,8 @@ fn max_cycles_exhaustion_aborts_when_configured() {
         );
     }
 
-    let guards = reg.evaluator();
     let mut ledger = FakeLedger::default();
-    let outcome = run(&m, &guards, &runner, &mut ledger);
+    let outcome = run(&m, &runner, &mut ledger);
 
     assert_eq!(outcome.status, RunStatus::Aborted);
 }
@@ -535,9 +414,8 @@ fn navigator_cap_exceeded_escalates_without_spawning() {
     runner.script_navigator(choice("debug"));
     runner.script_navigator(choice("debug"));
 
-    let guards = GuardRegistry::default().evaluator();
     let mut ledger = FakeLedger::default();
-    let outcome = run(&m, &guards, &runner, &mut ledger);
+    let outcome = run(&m, &runner, &mut ledger);
 
     // Escalation is a failed run, not a successful one: the ticket did not
     // go through, and the exit status must say so.
@@ -562,9 +440,8 @@ fn max_transitions_budget_aborts() {
     runner.script_worker("ping", worker_result(proposal_to("pong", "go")));
     runner.script_worker("pong", worker_result(proposal_to("ping", "back")));
 
-    let guards = GuardRegistry::default().evaluator();
     let mut ledger = FakeLedger::default();
-    let outcome = run(&m, &guards, &runner, &mut ledger);
+    let outcome = run(&m, &runner, &mut ledger);
 
     assert_eq!(outcome.status, RunStatus::Aborted);
     assert_eq!(outcome.totals.transitions, 1);
@@ -593,9 +470,8 @@ fn budget_usd_aborts() {
         );
     }
 
-    let guards = GuardRegistry::default().evaluator();
     let mut ledger = FakeLedger::default();
-    let outcome = run(&m, &guards, &runner, &mut ledger);
+    let outcome = run(&m, &runner, &mut ledger);
 
     assert_eq!(outcome.status, RunStatus::Aborted);
     assert!(outcome.totals.cost_usd > 1.0);
@@ -613,7 +489,6 @@ fn wallclock_budget_aborts() {
     // Should never even be reached: the wallclock check happens before spawn.
     runner.script_worker("spend", worker_result(proposal_to("done", "go")));
 
-    let guards = GuardRegistry::default().evaluator();
     let mut ledger = FakeLedger::default();
     let cfg = config();
     let artifacts = FakeArtifacts;
@@ -621,7 +496,6 @@ fn wallclock_budget_aborts() {
     let mut engine = Engine {
         machine: &m,
         config: &cfg,
-        guards: &guards,
         runner: &runner,
         ledger: &mut ledger,
         artifacts: &artifacts,
@@ -649,9 +523,8 @@ fn blocked_proposal_routes_through_navigator_to_chosen_state() {
     runner.script_worker("debug", worker_result(proposal_blocked("need more data")));
     runner.script_navigator(choice("qa_staging"));
 
-    let guards = GuardRegistry::default().evaluator();
     let mut ledger = FakeLedger::default();
-    let outcome = run(&m, &guards, &runner, &mut ledger);
+    let outcome = run(&m, &runner, &mut ledger);
 
     assert_eq!(outcome.status, RunStatus::Done);
     assert_eq!(outcome.terminal_state.as_deref(), Some("qa_staging"));
@@ -674,9 +547,8 @@ fn navigator_choosing_escalate_routes_to_escalation_state() {
         "needs a human; nothing reachable fits",
     ));
 
-    let guards = GuardRegistry::default().evaluator();
     let mut ledger = FakeLedger::default();
-    let outcome = run(&m, &guards, &runner, &mut ledger);
+    let outcome = run(&m, &runner, &mut ledger);
 
     // Escalation is a failed run, not a successful one: the ticket did not
     // go through, and the exit status must say so.
@@ -787,23 +659,24 @@ fn validate_catches_escalation_state_not_a_terminal() {
     );
 }
 
+/// Two edges between the same pair used to be disambiguated by their `when`
+/// guards. Now `select_edge` takes the first and the rest are dead, so the
+/// duplicate has to be an error — not a silently ignored `criteria`.
 #[test]
-fn validate_warns_on_ungrounded_when_gate() {
-    let reg = GuardRegistry::default();
+fn validate_rejects_duplicate_edges_between_the_same_pair() {
     let mut m = base_machine();
     m.entry = "a".into();
     m.terminals.insert("done".into());
-    m.states
-        .insert("a".into(), state_with_tools("a", &["read", "bash"]));
-    m.transitions
-        .push(reg.edge_when("a", "done", "qa.result == 'pass'", |v| {
-            v.get_path("qa.result") == Some(&json!("pass"))
-        }));
+    m.states.insert("a".into(), state("a"));
+    m.transitions.push(judged_edge("a", "done", "first"));
+    m.transitions.push(judged_edge("a", "done", "second"));
     let diags = crate::validate(&m, &always_resolves);
     assert!(
         diags
             .iter()
-            .any(|d| d.severity == crate::Severity::Warning && d.message.contains("`qa`"))
+            .any(|d| d.severity == crate::Severity::Error
+                && d.message.contains("duplicate transition")),
+        "got: {diags:?}"
     );
 }
 
@@ -849,24 +722,6 @@ fn validate_does_not_warn_on_an_implement_state_that_edits() {
     );
 }
 
-/// The scope of `v.qa.result` is `qa`, not the guard's parameter `v`. Getting
-/// this wrong makes every ungrounded-var warning name the same meaningless
-/// scope, which is how the check quietly stops earning its keep.
-#[test]
-fn guard_scope_extraction_skips_the_fn_parameter() {
-    let scopes = crate::validate::extract_var_scopes(
-        r#"(fn [v] (and (= v.qa.result "fail") (not= v.qa.error_class "transient")))"#,
-    );
-    assert!(scopes.contains("qa"), "got {scopes:?}");
-    assert!(!scopes.contains("v"), "got {scopes:?}");
-}
-
-#[test]
-fn guard_scope_extraction_falls_back_when_there_is_no_fn_head() {
-    let scopes = crate::validate::extract_var_scopes("build.status == 'pass'");
-    assert!(scopes.contains("build"), "got {scopes:?}");
-}
-
 /// A loop head re-entered only by an `on_fail: route` is still a loop head.
 /// The shipped `standard-ticket` template loops exactly this way — a failed
 /// Judge routes back to `implement` — so treating routes as non-re-entry made
@@ -904,25 +759,20 @@ fn validate_counts_an_on_fail_route_as_loop_head_re_entry() {
 /// a CI wrapper reading the exit status, that the ticket went through.
 #[test]
 fn reaching_the_escalation_terminal_reports_failed_not_done() {
-    let reg = GuardRegistry::default();
     let mut m = base_machine();
     m.entry = "work".into();
     m.terminals.insert("done".into());
     m.terminals.insert("blocked".into());
     m.escalation_state = Some("blocked".into());
     m.states.insert("work".into(), state("work"));
-    m.transitions
-        .push(reg.edge_when("work", "done", "qa.result == 'pass'", |v| {
-            v.get_path("qa.result") == Some(&json!("pass"))
-        }));
+    m.transitions.push(edge("work", "done"));
 
     let runner = FakeRunner::default();
     runner.script_worker("work", worker_result(proposal_blocked("cannot proceed")));
     runner.script_navigator(choice_with_addendum("blocked", "needs a human"));
 
-    let guards = reg.evaluator();
     let mut ledger = FakeLedger::default();
-    let outcome = run(&m, &guards, &runner, &mut ledger);
+    let outcome = run(&m, &runner, &mut ledger);
 
     assert_eq!(outcome.terminal_state.as_deref(), Some("blocked"));
     assert_eq!(outcome.status, RunStatus::Failed);
@@ -952,9 +802,8 @@ fn a_crashed_worker_is_re_entered_not_escalated() {
     runner.script_worker("test", crashed);
     runner.script_worker("test", worker_result(proposal_to("done", "suite green")));
 
-    let guards = GuardRegistry::default().evaluator();
     let mut ledger = FakeLedger::default();
-    let outcome = run(&m, &guards, &runner, &mut ledger);
+    let outcome = run(&m, &runner, &mut ledger);
 
     assert_eq!(outcome.status, RunStatus::Done);
     assert_eq!(outcome.terminal_state.as_deref(), Some("done"));
@@ -991,9 +840,8 @@ fn a_stage_that_always_crashes_escalates_after_the_cap() {
         runner.script_worker("test", crashed);
     }
 
-    let guards = GuardRegistry::default().evaluator();
     let mut ledger = FakeLedger::default();
-    let outcome = run(&m, &guards, &runner, &mut ledger);
+    let outcome = run(&m, &runner, &mut ledger);
 
     assert_eq!(outcome.status, RunStatus::Failed);
     assert_eq!(outcome.terminal_state.as_deref(), Some("blocked"));

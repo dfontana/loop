@@ -78,12 +78,11 @@ fn proj1487_machine_loads_completely() {
     assert_eq!(machine.transitions.len(), 10);
 
     let implement_to_review = machine.edge("implement", "review").expect("edge exists");
-    assert!(implement_to_review.when.is_none());
     assert!(implement_to_review.criteria.is_some());
     assert_eq!(implement_to_review.on_fail, OnFail::Retry);
 
     let qa_self_loop = machine.edge("qa-staging", "qa-staging").expect("self loop");
-    assert!(qa_self_loop.when.is_some());
+    assert!(qa_self_loop.criteria.is_some());
     assert_eq!(qa_self_loop.backoff_s, Some(30));
     assert_eq!(qa_self_loop.on_fail, OnFail::Abort);
 
@@ -123,17 +122,19 @@ fn missing_entry_with_multiple_states_is_a_clear_error() {
     assert!(matches!(err, loop_core::CoreError::Machine(_)));
 }
 
+/// A leftover `:when` must fail the load rather than being ignored — silently
+/// dropping it would leave the edge with no guard at all.
 #[test]
-fn when_that_is_not_a_function_is_rejected() {
+fn leftover_when_guard_is_rejected_with_a_migration_message() {
     let vm = common::vm();
     let config = common::default_config();
-    let path = common::fixture("when_not_function.fnl");
+    let path = common::fixture("when_removed.fnl");
 
     let err = vm.load_machine(&path, &config).unwrap_err();
     let msg = err.to_string();
     assert!(
-        msg.contains("function"),
-        "expected the error to call out the wrong type, got: {msg}"
+        msg.contains(":criteria"),
+        "expected the error to name the replacement, got: {msg}"
     );
     assert!(matches!(err, loop_core::CoreError::Machine(_)));
 }

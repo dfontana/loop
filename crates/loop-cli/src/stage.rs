@@ -61,7 +61,6 @@ impl CliStage<'_> {
             entry_addendum: entry_addendum.map(str::to_string),
             qa_cases: self.machine.qa_cases.clone(),
             artifacts: folded.artifacts.clone(),
-            vars: folded.vars.clone(),
         })
     }
 
@@ -96,10 +95,9 @@ impl CliStage<'_> {
         }
         out.push_str(&format!("\n## Edges out of `{from}`\n\n"));
         for e in self.machine.edges_from(from) {
-            let guard = match (&e.when_src, &e.criteria) {
-                (Some(w), _) => format!(" (guard: {w})"),
-                (None, Some(c)) => format!(" (criteria: {})", first_line(c)),
-                _ => String::new(),
+            let guard = match &e.criteria {
+                Some(c) => format!(" (criteria: {})", first_line(c)),
+                None => String::new(),
             };
             out.push_str(&format!("- `{from}` → `{}`{guard}\n", e.to));
         }
@@ -139,8 +137,8 @@ impl StageBuilder for CliStage<'_> {
         let system_prompt_path = self.toolbox.write_rendered(&context, &body, "system")?;
 
         // Small, scalar context values only: these land in the spawn's
-        // environment where a scoped-tool's `valueFromCmd` reads them to key
-        // its idempotency on the cycle (docs/04).
+        // environment, where a stage's tooling reads them to key its
+        // idempotency on the cycle (docs/04).
         let env = [
             ("TICKET_ID", context.ticket_id.clone()),
             ("STATE", context.state.clone()),
@@ -149,7 +147,6 @@ impl StageBuilder for CliStage<'_> {
         ]
         .into_iter()
         .map(|(k, v)| (k.to_string(), v))
-        .chain(context.vars.to_env())
         .collect();
 
         let spec = WorkerSpec {

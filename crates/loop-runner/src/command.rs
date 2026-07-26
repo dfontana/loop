@@ -25,8 +25,8 @@ use loop_core::{JudgeSpec, NavigatorSpec, TransitionMode, WorkerSpec};
 /// - `LOOP_REACHABLE` → comma-separated neighbors; the transition tool builds
 ///   its enum from this.
 /// - `LOOP_TRANSITION_MODE` → `constrained` | `open`.
-/// - every `spec.env` pair, so a scoped-tool's `valueFromCmd` can read
-///   `$TICKET_ID` / `$CYCLE` and key its idempotency on them.
+/// - every `spec.env` pair, so a stage's tooling can read `$TICKET_ID` /
+///   `$CYCLE` and key its idempotency on them.
 ///
 /// Extension discovery is left on (no `--no-extensions`): the Worker is the
 /// one role that needs the installed `scoped-tools`/`mcp`/
@@ -171,7 +171,7 @@ fn navigator_message(spec: &NavigatorSpec) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use loop_core::{ArtifactClaim, ModelSpec, Proposal, Thinking, Vars};
+    use loop_core::{ArtifactClaim, ModelSpec, Proposal, Thinking};
     use std::path::PathBuf;
 
     fn args_of(cmd: &Command) -> Vec<String> {
@@ -335,7 +335,6 @@ mod tests {
                     name: "diff".into(),
                     path: "diff.patch".into(),
                 }],
-                vars: Vars::default(),
             }),
             reachable: vec!["debug".into(), "escalate".into()],
             model: ModelSpec {

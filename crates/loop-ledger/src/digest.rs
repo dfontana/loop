@@ -1,14 +1,14 @@
 //! The rolling ledger digest — the deterministic continuity channel between
 //! stages (docs/01-architecture.md, "Data flow between stages").
 //!
-//! Never transcripts: the last N committed transitions with their rationales,
-//! the current vars, and pinned artifact references. Cost and drift are the
-//! reasons this is a summary and not a replay.
+//! Never transcripts: the last N committed transitions with their rationales
+//! and pinned artifact references. Cost and drift are the reasons this is a
+//! summary and not a replay.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
-use loop_core::{ArtifactRef, Event, EventPayload, Vars};
+use loop_core::{ArtifactRef, Event, EventPayload};
 
 /// Rationale text longer than this is truncated in the digest. Rationales are
 /// meant to be one sentence; a worker padding one out shouldn't be able to
@@ -18,8 +18,8 @@ const MAX_RATIONALE_CHARS: usize = 300;
 /// Render the digest fed to a stage as `$LEDGER_DIGEST`.
 ///
 /// Deliberately reads only the *decisions* out of the log — `run_started`,
-/// `transition_committed`/`transition_proposed` (for the rationale),
-/// `vars_set`, and the artifact refs on `worker_output` — and never the
+/// `transition_committed`/`transition_proposed` (for the rationale), and the
+/// artifact refs on `worker_output` — and never the
 /// `worker_output.summary` prose. That's what keeps this a summary rather
 /// than a transcript by construction, not by convention: there's no field in
 /// this function that could leak one in.
@@ -32,7 +32,6 @@ pub fn render(events: &[Event], last_n: usize) -> String {
     let mut cost_usd = 0.0_f64;
     let mut tokens: u64 = 0;
     let mut transitions: u32 = 0;
-    let mut trusted_vars = Vars::new();
     let mut artifacts: BTreeMap<String, String> = BTreeMap::new();
     let mut committed_idx: Vec<usize> = Vec::new();
 
@@ -52,13 +51,6 @@ pub fn render(events: &[Event], last_n: usize) -> String {
             EventPayload::NavigatorInvoked { usage, .. } => {
                 cost_usd += usage.cost_usd;
                 tokens += usage.tokens;
-            }
-            EventPayload::VarsSet {
-                values, trusted, ..
-            } => {
-                if *trusted {
-                    trusted_vars.merge(&Vars::from_value(values.clone()));
-                }
             }
             EventPayload::TransitionCommitted { .. } => {
                 transitions += 1;
@@ -93,16 +85,6 @@ pub fn render(events: &[Event], last_n: usize) -> String {
                 .map(|r| truncate(&r, MAX_RATIONALE_CHARS))
                 .unwrap_or_else(|| "(no rationale recorded)".to_string());
             let _ = writeln!(out, "- cycle {cycle}: {from} -> {to} — {rationale}");
-        }
-    }
-
-    out.push_str("\n## Vars\n");
-    let env = trusted_vars.to_env();
-    if env.is_empty() {
-        out.push_str("(none)\n");
-    } else {
-        for (k, v) in env {
-            let _ = writeln!(out, "- {k}={v}");
         }
     }
 
@@ -172,7 +154,6 @@ pub fn worker_digest_for_judge(summary: &str, artifacts: &[ArtifactRef]) -> Stri
 mod tests {
     use super::*;
     use loop_core::{Actor, Budgets, Event, EventPayload, RunStatus, Totals, Usage};
-    use serde_json::json;
 
     fn ev(payload: EventPayload) -> Event {
         Event::now(payload)
@@ -268,26 +249,6 @@ mod tests {
             "worker_output.summary must never leak into the digest"
         );
         assert!(digest.len() < 5_000, "digest ballooned: {}", digest.len());
-    }
-
-    #[test]
-    fn includes_only_trusted_vars() {
-        let mut events = sample_events(0);
-        events.push(ev(EventPayload::VarsSet {
-            scope: Some("build".into()),
-            values: json!({"build": {"status": "pass"}}),
-            trusted: true,
-        }));
-        events.push(ev(EventPayload::VarsSet {
-            scope: None,
-            values: json!({"worker_hint": {"looks_done": "yes"}}),
-            trusted: false,
-        }));
-
-        let digest = render(&events, 8);
-        assert!(digest.contains("BUILD_STATUS=pass"));
-        assert!(!digest.contains("WORKER_HINT"));
-        assert!(!digest.contains("looks_done"));
     }
 
     #[test]

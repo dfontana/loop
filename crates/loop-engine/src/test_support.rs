@@ -5,14 +5,12 @@
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::path::PathBuf;
-use std::rc::Rc;
 
 use loop_core::{
     AgentRunner, ArtifactClaim, ArtifactRef, ArtifactSink, Budgets, Choice, Context, CoreError,
-    Defaults, Event, EventPayload, GuardEvaluator, GuardRef, JudgeSpec, LoopSpec, Machine,
-    ModelChoice, ModelSpec, NavigatorSpec, OnExhausted, OnFail, PlaybookRef, Proposal, QaCase,
-    Result, State, StateId, Thinking, Totals, Transition, TransitionMode, Usage, Vars, Verdict,
-    WorkerResult, WorkerSpec,
+    Defaults, Event, EventPayload, JudgeSpec, LoopSpec, Machine, ModelChoice, ModelSpec,
+    NavigatorSpec, OnExhausted, OnFail, PlaybookRef, Proposal, QaCase, Result, State, StateId,
+    Thinking, Totals, Transition, TransitionMode, Usage, Verdict, WorkerResult, WorkerSpec,
 };
 
 use crate::prompts::{StageBuilder, StagePlan};
@@ -76,8 +74,6 @@ pub fn edge(from: &str, to: &str) -> Transition {
     Transition {
         from: from.into(),
         to: to.into(),
-        when: None,
-        when_src: None,
         criteria: None,
         on_fail: OnFail::default(),
         backoff_s: None,
@@ -102,63 +98,6 @@ pub fn loop_spec(
         states: states.iter().map(|s| s.to_string()).collect(),
         max_cycles,
         on_exhausted,
-    }
-}
-
-// ── guard registry / GuardEvaluator fake ─────────────────────────────────
-
-type GuardFn = dyn Fn(&Vars) -> bool;
-type GuardEntry = (String, Rc<GuardFn>);
-
-/// Shared between test code (which registers guard closures while building a
-/// machine) and [`FakeGuards`] (which evaluates them by index). Mirrors the
-/// real split between `loop-fennel`'s Lua registry and the `GuardEvaluator`
-/// trait — a `GuardRef` is just an index here too.
-#[derive(Clone, Default)]
-pub struct GuardRegistry(Rc<RefCell<Vec<GuardEntry>>>);
-
-impl GuardRegistry {
-    pub fn register(&self, src: &str, f: impl Fn(&Vars) -> bool + 'static) -> GuardRef {
-        let mut v = self.0.borrow_mut();
-        v.push((src.to_string(), Rc::new(f)));
-        GuardRef((v.len() - 1) as u32)
-    }
-
-    /// Register and attach to a fresh edge in one call.
-    pub fn edge_when(
-        &self,
-        from: &str,
-        to: &str,
-        src: &str,
-        f: impl Fn(&Vars) -> bool + 'static,
-    ) -> Transition {
-        let guard = self.register(src, f);
-        Transition {
-            when: Some(guard),
-            when_src: Some(src.into()),
-            ..edge(from, to)
-        }
-    }
-
-    pub fn evaluator(&self) -> FakeGuards {
-        FakeGuards(self.clone())
-    }
-}
-
-pub struct FakeGuards(GuardRegistry);
-
-impl GuardEvaluator for FakeGuards {
-    fn eval(&self, guard: GuardRef, vars: &Vars) -> Result<bool> {
-        let v = (self.0).0.borrow();
-        let (_, f) = v
-            .get(guard.0 as usize)
-            .ok_or_else(|| CoreError::other("unknown guard ref in test"))?;
-        Ok(f(vars))
-    }
-
-    fn source(&self, guard: GuardRef) -> Option<String> {
-        let v = (self.0).0.borrow();
-        v.get(guard.0 as usize).map(|(s, _)| s.clone())
     }
 }
 
@@ -372,7 +311,6 @@ pub fn proposal_to(to: &str, rationale: &str) -> Proposal {
         blocked: false,
         rationale: rationale.into(),
         artifacts: Vec::new(),
-        vars: Vars::new(),
     }
 }
 
@@ -382,7 +320,6 @@ pub fn proposal_blocked(rationale: &str) -> Proposal {
         blocked: true,
         rationale: rationale.into(),
         artifacts: Vec::new(),
-        vars: Vars::new(),
     }
 }
 
@@ -390,20 +327,12 @@ pub fn worker_result(proposal: Proposal) -> WorkerResult {
     WorkerResult {
         summary: "did the work".into(),
         proposal: Some(proposal),
-        vars: Vars::new(),
         usage: Usage {
             tokens: 100,
             cost_usd: 0.1,
         },
         session_id: None,
         exit_ok: true,
-    }
-}
-
-pub fn worker_result_with_vars(proposal: Proposal, vars: Vars) -> WorkerResult {
-    WorkerResult {
-        vars,
-        ..worker_result(proposal)
     }
 }
 

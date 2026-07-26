@@ -145,12 +145,11 @@ pub enum EventPayload {
         rationale: String,
         by: Actor,
     },
-    /// The result of the three guard tiers on one proposal.
+    /// The result of the guard tiers on one proposal.
     GuardChecked {
         from: StateId,
         to: StateId,
         structural: GuardOutcome,
-        when: GuardOutcome,
         criteria: GuardOutcome,
         judge_rationale: Option<String>,
     },
@@ -167,14 +166,6 @@ pub enum EventPayload {
         from: StateId,
         to: StateId,
         cycle: u32,
-    },
-    /// Structured variables for `when` guards. Scraped from a tool's
-    /// `LOOP_VARS` line (trusted) or from `transition(vars=…)` (untrusted).
-    VarsSet {
-        scope: Option<String>,
-        values: serde_json::Value,
-        /// False when the worker declared them; such vars must never gate a QA pass.
-        trusted: bool,
     },
     Error {
         state: Option<StateId>,
@@ -202,7 +193,6 @@ impl EventPayload {
             Self::GuardChecked { .. } => "guard_checked",
             Self::NavigatorInvoked { .. } => "navigator_invoked",
             Self::TransitionCommitted { .. } => "transition_committed",
-            Self::VarsSet { .. } => "vars_set",
             Self::Error { .. } => "error",
             Self::Note { .. } => "note",
             Self::RunFinished { .. } => "run_finished",

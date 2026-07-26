@@ -159,7 +159,10 @@ pub fn validate(paths: Paths) -> Result<()> {
 }
 
 pub fn run(paths: Paths, max_transitions: Option<u32>, resuming: bool) -> Result<()> {
-    let (vm, config, mut machine) = load(paths.clone())?;
+    // The VM is only needed to *load* the machine. It used to have to outlive
+    // the run because it held the `when` guard closures; the IR is plain data
+    // now, so it can be dropped here.
+    let (_vm, config, mut machine) = load(paths.clone())?;
     if let Some(max) = max_transitions {
         machine.budgets = machine.budgets.tighten(loop_core::Budgets {
             usd: None,
@@ -201,7 +204,6 @@ pub fn run(paths: Paths, max_transitions: Option<u32>, resuming: bool) -> Result
     let mut engine = Engine {
         machine: &machine,
         config: &config,
-        guards: &vm,
         runner: &runner,
         ledger: &mut ledger,
         artifacts: &artifacts,
@@ -261,7 +263,6 @@ pub fn status(paths: Paths, json: bool) -> Result<()> {
             "status": folded.status,
             "cycles": folded.cycles,
             "totals": folded.totals,
-            "vars": folded.vars,
             "navigator_invocations": folded.navigator_invocations,
         });
         println!("{}", serde_json::to_string_pretty(&out)?);
@@ -289,9 +290,6 @@ pub fn status(paths: Paths, json: bool) -> Result<()> {
             .map(|(s, n)| format!("{s}#{n}"))
             .collect();
         println!("  cycles: {}", cycles.join(", "));
-    }
-    if !folded.trusted_vars.is_empty() {
-        println!("  vars: {}", folded.trusted_vars.as_value());
     }
     println!("\nrecent:");
     for e in events
@@ -399,25 +397,12 @@ fn summarize(e: &loop_core::Event) -> String {
             }
         }
         GuardChecked {
-            from,
-            to,
-            when,
-            criteria,
-            ..
-        } => format!("guard {from}→{to}: when={when:?} criteria={criteria:?}"),
+            from, to, criteria, ..
+        } => format!("guard {from}→{to}: criteria={criteria:?}"),
         NavigatorInvoked {
             from, chosen_to, ..
         } => format!("navigator {from} → {chosen_to}"),
         TransitionCommitted { from, to, .. } => format!("committed {from} → {to}"),
-        VarsSet {
-            values, trusted, ..
-        } => {
-            format!(
-                "vars{} {}",
-                if *trusted { "" } else { " (untrusted)" },
-                values
-            )
-        }
         Error { kind, detail, .. } => format!("error ({kind:?}): {}", truncate(detail, 60)),
         Note { text } => format!("note: {}", truncate(text, 70)),
         RunFinished { status, .. } => format!("run_finished {status:?}"),

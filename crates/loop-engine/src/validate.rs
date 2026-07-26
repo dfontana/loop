@@ -200,40 +200,18 @@ pub fn validate(machine: &Machine, resolve: &dyn Fn(&PlaybookRef) -> bool) -> Ve
         ));
     }
 
-    // Warning: a state whose only outgoing edges are `when`-guarded on a var
-    // scope no tool on that state looks bound to emit — the "gate that can
-    // never open" trap. This is a syntactic heuristic (the IR carries no
-    // tool -> emitted-vars registry): it flags a var scope referenced in a
-    // `when` that doesn't textually correspond to any allowlisted tool name.
-    for (id, state) in &machine.states {
-        let edges = machine.edges_from(id);
-        if edges.is_empty() || edges.iter().any(|t| t.when.is_none()) {
-            continue;
-        }
-        let tools = effective_tools(machine, state);
-        let mut ungrounded: BTreeSet<String> = BTreeSet::new();
-        for t in &edges {
-            let Some(src) = &t.when_src else { continue };
-            for scope in extract_var_scopes(src) {
-                let grounded = tools
-                    .iter()
-                    .any(|tool| tool.to_lowercase().contains(&scope.to_lowercase()));
-                if !grounded {
-                    ungrounded.insert(scope);
-                }
-            }
-        }
-        if !ungrounded.is_empty() {
-            out.push(Diagnostic::warning(
-                id.clone(),
+    // Error: two edges between the same pair. `when` guards used to tell such
+    // edges apart; without them `select_edge` takes the first declared one and
+    // the rest are dead, silently discarding whatever `criteria` they carry.
+    let mut seen_pairs: BTreeSet<(&str, &str)> = BTreeSet::new();
+    for t in &machine.transitions {
+        if !seen_pairs.insert((t.from.as_str(), t.to.as_str())) {
+            out.push(Diagnostic::error(
+                t.from.clone(),
                 format!(
-                    "state `{id}`'s outgoing `when` guards gate on {} but no allowlisted tool looks bound to emit {}",
-                    ungrounded
-                        .iter()
-                        .map(|s| format!("`{s}`"))
-                        .collect::<Vec<_>>()
-                        .join(", "),
-                    if ungrounded.len() == 1 { "it" } else { "them" }
+                    "duplicate transition `{}` → `{}`: only the first is ever taken — merge them \
+                     into one edge",
+                    t.from, t.to
                 ),
             ));
         }
@@ -302,66 +280,4 @@ fn effective_tools(machine: &Machine, state: &State) -> BTreeSet<String> {
         set.remove(t);
     }
     set
-}
-
-/// Pull the ledger var scope out of dotted references in a guard's source text.
-///
-/// A guard is written `(fn [v] (= v.qa.result "pass"))`, so the leading segment
-/// of a reference is the *parameter* name, not a scope — the scope is what
-/// follows it. Reporting `v` here would make every warning useless, so the
-/// parameter is parsed off the `(fn [..])` head and skipped. A reference that
-/// doesn't start with the parameter (someone destructured, or named things
-/// differently) falls back to its first segment.
-///
-/// Best-effort text scan, not a real parser: this drives a warning, never an
-/// error, so a miss costs a missing hint rather than a false failure.
-pub(crate) fn extract_var_scopes(src: &str) -> BTreeSet<String> {
-    let param = guard_param_name(src);
-    let mut scopes = BTreeSet::new();
-    let mut token = String::new();
-    let is_ident = |c: char| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.';
-    let flush = |token: &mut String, scopes: &mut BTreeSet<String>| {
-        let segments: Vec<&str> = token.split('.').filter(|s| !s.is_empty()).collect();
-        let candidate = match (&param, segments.as_slice()) {
-            // `v.qa.result` where the guard is `(fn [v] …)` → `qa`
-            (Some(p), [first, second, ..]) if first == p => Some(*second),
-            (Some(p), [only]) if only == p => None,
-            (_, [first, _, ..]) => Some(*first),
-            _ => None,
-        };
-        if let Some(scope) = candidate {
-            if scope.chars().next().is_some_and(|c| c.is_alphabetic()) {
-                scopes.insert(scope.to_string());
-            }
-        }
-        token.clear();
-    };
-    for c in src.chars() {
-        if is_ident(c) {
-            token.push(c);
-        } else {
-            flush(&mut token, &mut scopes);
-        }
-    }
-    flush(&mut token, &mut scopes);
-    scopes
-}
-
-/// The single parameter of a `(fn [v] …)` head, if the source looks like one.
-fn guard_param_name(src: &str) -> Option<String> {
-    let after_fn = src.split_once("(fn ")?.1;
-    let open = after_fn.find('[')?;
-    let close = after_fn.find(']')?;
-    if close < open {
-        return None;
-    }
-    let params = after_fn[open + 1..close].trim();
-    // Only a single plain parameter tells us anything; a destructuring form
-    // gives us no name to strip.
-    (!params.is_empty() && params.split_whitespace().count() == 1)
-        .then(|| params.to_string())
-        .filter(|p| {
-            p.chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
-        })
 }

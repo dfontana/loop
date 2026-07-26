@@ -12,7 +12,6 @@ use std::collections::BTreeMap;
 use crate::event::{Event, EventPayload, RunStatus, Totals};
 use crate::machine::StateId;
 use crate::runner::Proposal;
-use crate::vars::Vars;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum FoldStatus {
@@ -48,11 +47,6 @@ pub struct RunState {
     pub cycles: BTreeMap<StateId, u32>,
     /// (state, cycle) → attempts made.
     pub attempts: BTreeMap<(StateId, u32), u32>,
-    /// Every var seen, trusted or not. For prompts and display.
-    pub vars: Vars,
-    /// Only vars a tool asserted via `LOOP_VARS`. **`when` guards gate on these
-    /// alone** — a worker-declared var must never open a QA gate (docs/07 #2).
-    pub trusted_vars: Vars,
     pub totals: Totals,
     pub navigator_invocations: u32,
     /// Navigator invocations per source state, for the per-state ping-pong cap.
@@ -91,7 +85,6 @@ impl RunState {
 ///
 /// TASK T5. Rules (docs/03-ledger.md):
 /// - `state_entered` bumps `attempts[(state, cycle)]` and sets `current`.
-/// - `vars_set` deep-merges into `vars`; when `trusted`, also into `trusted_vars`.
 /// - `transition_committed` sets `current = to`; the caller tells cycles apart
 ///   via [`fold_with_loop_heads`] — plain `fold` counts a re-entry of any state
 ///   as a cycle bump for that state, which is the machine-agnostic reading.
@@ -175,7 +168,6 @@ pub fn fold_with_loop_heads(events: &[Event], is_loop_head: &dyn Fn(&str) -> boo
                     blocked: *blocked,
                     rationale: rationale.clone(),
                     artifacts: Vec::new(),
-                    vars: Vars::new(),
                 };
                 tail = Tail::ProposedWithoutCommit {
                     from: from.clone(),
@@ -195,15 +187,6 @@ pub fn fold_with_loop_heads(events: &[Event], is_loop_head: &dyn Fn(&str) -> boo
                 }
                 rs.totals.transitions += 1;
                 tail = Tail::Committed;
-            }
-            EventPayload::VarsSet {
-                values, trusted, ..
-            } => {
-                let v = Vars::from_value(values.clone());
-                rs.vars.merge(&v);
-                if *trusted {
-                    rs.trusted_vars.merge(&v);
-                }
             }
             EventPayload::Error { .. } => {}
             EventPayload::Note { .. } => {}
@@ -270,7 +253,6 @@ mod tests {
     use super::*;
     use crate::event::{ArtifactRef, GuardOutcome, Usage};
     use crate::machine::Budgets;
-    use serde_json::json;
 
     fn ev(payload: EventPayload) -> Event {
         Event::now(payload)
@@ -328,7 +310,6 @@ mod tests {
             from: from.into(),
             to: to.into(),
             structural: GuardOutcome::Pass,
-            when: GuardOutcome::Skip,
             criteria: GuardOutcome::Skip,
             judge_rationale: None,
         })
@@ -339,14 +320,6 @@ mod tests {
             from: from.into(),
             to: to.into(),
             cycle,
-        })
-    }
-
-    fn vars_set(values: serde_json::Value, trusted: bool) -> Event {
-        ev(EventPayload::VarsSet {
-            scope: None,
-            values,
-            trusted,
         })
     }
 
@@ -524,21 +497,6 @@ mod tests {
         let plain = fold(&events);
         assert_eq!(plain.cycle_of("qa_staging"), 2);
         assert_eq!(plain.cycle_of("debug"), 1);
-    }
-
-    #[test]
-    fn trusted_and_untrusted_vars_are_tracked_separately() {
-        let events = vec![
-            started(),
-            entered("qa_staging", 1, 1),
-            vars_set(json!({"qa": {"result": "pass"}}), true),
-            vars_set(json!({"qa": {"result": "fail"}}), false),
-        ];
-        let rs = fold(&events);
-        // `vars` holds the last writer regardless of trust; `trusted_vars`
-        // only ever reflects tool-emitted facts.
-        assert_eq!(rs.vars.get_path("qa.result").unwrap(), "fail");
-        assert_eq!(rs.trusted_vars.get_path("qa.result").unwrap(), "pass");
     }
 
     #[test]

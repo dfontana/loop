@@ -1,10 +1,9 @@
 //! The context namespace (docs/04-toolbox.md) — the `$UPPER_SNAKE` variables a
-//! playbook template and a scoped-tool's `valueFromCmd` can both see.
+//! playbook template can see.
 
 use std::collections::BTreeMap;
 
 use crate::machine::QaCase;
-use crate::vars::Vars;
 
 #[derive(Clone, Debug, Default)]
 pub struct Context {
@@ -21,8 +20,6 @@ pub struct Context {
     pub qa_cases: Vec<QaCase>,
     /// Captured artifacts by name → `$ARTIFACT_<NAME>`.
     pub artifacts: BTreeMap<String, String>,
-    /// Ledger vars, flattened into `$BUILD_ID`-style names.
-    pub vars: Vars,
 }
 
 impl Context {
@@ -49,9 +46,6 @@ impl Context {
         m.insert("QA_CASES".into(), self.qa_cases_md());
         for (name, path) in &self.artifacts {
             m.insert(format!("ARTIFACT_{}", name.to_uppercase()), path.clone());
-        }
-        for (name, value) in self.vars.to_env() {
-            m.entry(name).or_insert(value);
         }
         m
     }

@@ -198,7 +198,6 @@ mod tests {
     use loop_core::{
         Actor, ArtifactRef, Budgets, ErrorKind, GuardOutcome, RunStatus, Totals, Usage,
     };
-    use serde_json::json;
 
     fn tmp_ledger() -> (tempfile::TempDir, Ledger) {
         let dir = tempfile::tempdir().unwrap();
@@ -275,7 +274,6 @@ mod tests {
                 from: "implement".into(),
                 to: "review".into(),
                 structural: GuardOutcome::Pass,
-                when: GuardOutcome::Skip,
                 criteria: GuardOutcome::Pass,
                 judge_rationale: Some("Looks fine.".into()),
             },
@@ -293,11 +291,6 @@ mod tests {
                 from: "implement".into(),
                 to: "review".into(),
                 cycle: 1,
-            },
-            EventPayload::VarsSet {
-                scope: Some("build".into()),
-                values: json!({"build": {"status": "pass"}}),
-                trusted: true,
             },
             EventPayload::Error {
                 state: Some("qa".into()),

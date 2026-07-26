@@ -2,8 +2,7 @@
 //!
 //! # The authored `machine.fnl` shape (v1)
 //!
-//! A machine file evaluates to a table. Keyword keys, kebab-case state ids,
-//! guards as plain functions of one argument (the vars table).
+//! A machine file evaluates to a table. Keyword keys, kebab-case state ids.
 //!
 //! ```fennel
 //! {:ticket "PROJ-1487"
@@ -34,26 +33,15 @@
 //!  [{:from "implement" :to "review"
 //!    :criteria "The plan's items are addressed, the build is green, no TODOs remain."
 //!    :on-fail "retry"}
-//!   {:from "qa-staging" :to "validate-contract"
-//!    :when (fn [v] (= v.qa.result "pass"))}
 //!   {:from "qa-staging" :to "qa-staging"
-//!    :when (fn [v] (and (= v.qa.result "fail") (= v.qa.error_class "transient")))
 //!    :backoff-s 30 :on-fail "abort"}
-//!   {:from "qa-staging" :to "debug"
-//!    :when (fn [v] (and (= v.qa.result "fail") (not= v.qa.error_class "transient")))}]
+//!   {:from "qa-staging" :to "debug"}]
 //!
 //!  :loops
 //!  [{:name "qa" :states ["qa-staging" "debug"] :max-cycles 4 :on-exhausted "escalate"}]}
 //! ```
 //!
 //! Notes that matter for the conversion:
-//! - `:when` is a **function**, not a string. It receives the vars table and
-//!   must return a boolean. It is stored in the Lua registry behind a
-//!   [`loop_core::GuardRef`]. `when_src` is the guard's **source text**, sliced
-//!   out of the `.fnl` by the closure's line range (or the author's explicit
-//!   `:when-doc`). It must be the text, not a `file:line` label: the ledger
-//!   prints it, and `loop validate` parses it for the var scopes the guard
-//!   reads.
 //! - `:on-fail` is `"retry"` | `"abort"` | `{:route "state-id"}`.
 //! - `:model`/`:thinking`/`:provider` are all optional at every level — leave
 //!   them `None` and let [`loop_core::Machine::resolve_model`] stack the layers.
@@ -91,8 +79,6 @@ use loop_core::{
     OnExhausted, OnFail, PlaybookRef, QaCase, Result, State, StateId, Thinking, Transition,
     TransitionMode,
 };
-
-use crate::FennelVm;
 
 // ── small Lua table readers ────────────────────────────────────────────────
 
@@ -259,68 +245,6 @@ fn parse_on_fail(value: mlua::Value, ctx: &str) -> Result<OnFail> {
             other.type_name()
         ))),
     }
-}
-
-/// Best-effort human-readable label for a guard closure that didn't come with
-/// a `:when-doc`: `file:line` from the function's own debug info.
-/// The guard's **source text**, sliced out of the `.fnl` file by the line range
-/// the closure's debug info reports.
-///
-/// This has to be the text, not a `file:line` label: `when_src` is what the
-/// ledger shows in `guard_checked` and what `loop validate` parses to find the
-/// var scopes a guard reads. A location label would make `validate` think a
-/// guard over `qa.result` gated on a scope called `machine` (from
-/// `machine.fnl`) — which is exactly the bug this replaced.
-///
-/// `correlate: true` at compile time makes these line numbers Fennel lines, so
-/// the slice lands in the file the author actually wrote.
-fn guard_source_text(f: &mlua::Function, machine_source: &str) -> Option<String> {
-    let info = f.info();
-    let (first, last) = (info.line_defined?, info.last_line_defined?);
-    if first < 1 || last < first {
-        return None;
-    }
-    let lines: Vec<&str> = machine_source
-        .lines()
-        .skip(first - 1)
-        .take(last - first + 1)
-        .collect();
-    if lines.is_empty() {
-        return None;
-    }
-    // Collapse to one line and keep just the guard expression: the slice starts
-    // at the enclosing `:when` key, which is noise in a ledger line.
-    let joined = lines.join(" ");
-    let collapsed = joined.split_whitespace().collect::<Vec<_>>().join(" ");
-    let text = match collapsed.find("(fn ") {
-        Some(i) => balanced_form(&collapsed[i..])
-            .unwrap_or(&collapsed[i..])
-            .to_string(),
-        None => collapsed,
-    };
-    (!text.is_empty()).then_some(text)
-}
-
-/// The prefix of `s` up to and including the paren that closes the one it
-/// starts with. Quotes are respected so a `")"` inside a string doesn't count.
-fn balanced_form(s: &str) -> Option<&str> {
-    let (mut depth, mut in_str, mut escaped) = (0i32, false, false);
-    for (i, c) in s.char_indices() {
-        match c {
-            _ if escaped => escaped = false,
-            '\\' if in_str => escaped = true,
-            '"' => in_str = !in_str,
-            '(' if !in_str => depth += 1,
-            ')' if !in_str => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(&s[..=i]);
-                }
-            }
-            _ => {}
-        }
-    }
-    None
 }
 
 /// `:playbook` (bare name or `/`-containing path) or a state-local `:prompt`.
@@ -493,11 +417,7 @@ fn parse_budgets(table: &mlua::Table) -> Result<Budgets> {
     }
 }
 
-fn parse_transitions(
-    vm: &FennelVm,
-    table: &mlua::Table,
-    machine_source: &str,
-) -> Result<Vec<Transition>> {
+fn parse_transitions(table: &mlua::Table) -> Result<Vec<Transition>> {
     let mut out = Vec::new();
     let Some(arr) = get_table(table, "transitions")? else {
         return Ok(out);
@@ -516,29 +436,20 @@ fn parse_transitions(
         let ctx = format!("transitions[{i}]");
         let from = require_str(&t, "from", &ctx)?;
         let to = require_str(&t, "to", &ctx)?;
-        let when_doc = get_str(&t, "when-doc")?;
-        let (when, when_src) = match get_value(&t, "when")? {
-            mlua::Value::Nil => (None, when_doc),
-            mlua::Value::Function(f) => {
-                let src = when_doc.or_else(|| guard_source_text(&f, machine_source));
-                let guard_ref = vm.register_guard(f, src.clone())?;
-                (Some(guard_ref), src)
-            }
-            other => {
-                return Err(CoreError::machine(format!(
-                    "{ctx}: `:when` must be a function, got {}",
-                    other.type_name()
-                )));
-            }
-        };
+        // `:when` was a Fennel closure gating on ledger vars. Both are gone;
+        // say so rather than ignoring the key and silently unguarding an edge.
+        if !matches!(get_value(&t, "when")?, mlua::Value::Nil) {
+            return Err(CoreError::machine(format!(
+                "{ctx}: `:when` guards were removed — express the condition as \
+                 `:criteria` for the Judge to evaluate"
+            )));
+        }
         let criteria = get_str(&t, "criteria")?;
         let on_fail = parse_on_fail(get_value(&t, "on-fail")?, &ctx)?;
         let backoff_s = get_u64(&t, "backoff-s")?;
         out.push(Transition {
             from,
             to,
-            when,
-            when_src,
             criteria,
             on_fail,
             backoff_s,
@@ -595,12 +506,10 @@ fn parse_navigator_max_invocations(table: &mlua::Table, default: u32) -> Result<
 }
 
 /// Convert an evaluated machine table into the IR, resolving `:task`/`:plan`
-/// paths against `machine_dir` and registering guards with `vm`.
+/// paths against `machine_dir`.
 pub fn machine_from_table(
-    vm: &FennelVm,
     table: &mlua::Table,
     machine_dir: &Path,
-    machine_source: &str,
     source_hash: String,
     source_path: &Path,
     config: &Config,
@@ -624,7 +533,7 @@ pub fn machine_from_table(
         }
     }
 
-    let transitions = parse_transitions(vm, table, machine_source)?;
+    let transitions = parse_transitions(table)?;
     for t in &transitions {
         if !states.contains_key(&t.from) {
             return Err(CoreError::machine(format!(

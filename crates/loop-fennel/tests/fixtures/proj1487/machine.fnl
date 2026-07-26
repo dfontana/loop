@@ -47,31 +47,31 @@
    :on-fail "retry"}
 
   {:from "review" :to "implement"
-   :when (fn [v] (= v.review.result "changes_requested"))}
+   :criteria "The review identified defects that require code changes."}
 
   {:from "review" :to "qa-staging"
-   :when (fn [v] (= v.review.result "clean"))}
+   :criteria "The review found no defect requiring a code change."}
 
   {:from "qa-staging" :to "qa-staging"
-   :when (fn [v] (and (= v.qa.result "fail") (= v.qa.error_class "transient")))
+   :criteria "The pipeline run failed for infrastructure reasons rather than a defect in the code under test."
    :backoff-s 30
    :on-fail "abort"}
 
   {:from "qa-staging" :to "debug"
-   :when (fn [v] (and (= v.qa.result "fail") (not= v.qa.error_class "transient")))}
+   :criteria "The pipeline run failed deterministically: a schema, contract, assertion, or logic error in the code under test."}
 
   {:from "qa-staging" :to "validate-contract"
-   :when (fn [v] (= v.qa.result "pass"))}
+   :criteria "The pipeline run completed successfully and its output sample satisfies the QA cases."}
 
   {:from "debug" :to "qa-staging"
    :criteria "A concrete fix was applied and the build is green."
    :on-fail "retry"}
 
   {:from "validate-contract" :to "implement"
-   :when (fn [v] (= v.contract.result "mismatch"))}
+   :criteria "The staging response does not match the committed OpenAPI schema."}
 
   {:from "validate-contract" :to "open-pr"
-   :when (fn [v] (= v.contract.result "match"))}
+   :criteria "The staging response matches the committed OpenAPI schema."}
 
   {:from "open-pr" :to "done"
    :criteria "A pull request exists for this branch with a populated description."}]

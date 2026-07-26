@@ -88,7 +88,6 @@ fn mock_pi_drives_worker_judge_navigator_and_a_crash() {
         r#"{
             "steps": [
                 { "match": {"role": "worker", "state": "implement", "cycle": 1},
-                  "vars": {"build": {"status": "pass", "id": "b-1"}},
                   "summary": "implemented the thing",
                   "transition": {"to": "review", "rationale": "plan items done"},
                   "usage": {"tokens": 100, "cost_usd": 0.05} },
@@ -141,7 +140,6 @@ fn mock_pi_drives_worker_judge_navigator_and_a_crash() {
     assert_eq!(worker_result.summary, "implemented the thing");
     assert_eq!(worker_result.usage.tokens, 100);
     assert!((worker_result.usage.cost_usd - 0.05).abs() < 1e-9);
-    assert_eq!(worker_result.vars.get_path("build.status").unwrap(), "pass");
     let proposal = worker_result.proposal.expect("worker proposed");
     assert_eq!(proposal.to.as_deref(), Some("review"));
     assert_eq!(proposal.rationale, "plan items done");

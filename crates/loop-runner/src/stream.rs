@@ -16,8 +16,8 @@
 //! - `{"type":"tool_execution_end","toolCallId":…,"toolName":…,"result":…,"isError":…}`
 //!   — `result` is exactly the extension's `execute()` return value
 //!   (`{content:[{type:"text",text:"LOOP_TRANSITION {…}"}]}` etc., per
-//!   `crates/loop-toolbox/ext/*.ts`). `LOOP_TRANSITION` / `LOOP_VARS` /
-//!   `LOOP_VERDICT` / `LOOP_CHOICE` markers surface in that text.
+//!   `crates/loop-toolbox/ext/*.ts`). `LOOP_TRANSITION` / `LOOP_VERDICT` /
+//!   `LOOP_CHOICE` markers surface in that text.
 //!
 //! Every stream line is independently parsed; one that isn't valid JSON, or
 //! doesn't look like an event we understand, is skipped rather than failing
@@ -25,8 +25,7 @@
 //! final line rather than corrupting an earlier one.
 
 use loop_core::{
-    LOOP_CHOICE_MARKER, LOOP_TRANSITION_MARKER, LOOP_VARS_MARKER, LOOP_VERDICT_MARKER, Proposal,
-    Result, Usage, Vars,
+    LOOP_CHOICE_MARKER, LOOP_TRANSITION_MARKER, LOOP_VERDICT_MARKER, Proposal, Result, Usage,
 };
 use serde_json::Value;
 
@@ -37,8 +36,6 @@ pub struct StreamOutcome {
     /// The last assistant text block — the stage summary.
     pub summary: String,
     pub usage: Usage,
-    /// Trusted vars, deep-merged in stream order.
-    pub vars: Vars,
     /// Raw payloads found after each marker, keyed by marker name, in the
     /// order they were scraped off the stream.
     pub markers: Vec<(String, String)>,
@@ -121,17 +118,7 @@ pub fn parse_stream(mut reader: impl std::io::BufRead) -> Result<StreamOutcome> 
                     continue;
                 };
                 if let Some(text) = concat_text_blocks(result) {
-                    for (name, payload) in scan_markers(&text) {
-                        if name == LOOP_VARS_MARKER {
-                            if let Ok(v) = serde_json::from_str::<Value>(&payload) {
-                                outcome.vars.merge(&Vars::from_value(v));
-                            }
-                            // A malformed LOOP_VARS payload is silently
-                            // dropped from `vars` but still recorded below —
-                            // it never gates anything since nothing merged.
-                        }
-                        outcome.markers.push((name, payload));
-                    }
+                    outcome.markers.extend(scan_markers(&text));
                 }
             }
             _ => {}
@@ -150,7 +137,6 @@ pub fn parse_stream(mut reader: impl std::io::BufRead) -> Result<StreamOutcome> 
 pub fn scan_markers(text: &str) -> Vec<(String, String)> {
     const NAMES: &[&str] = &[
         LOOP_TRANSITION_MARKER,
-        LOOP_VARS_MARKER,
         LOOP_VERDICT_MARKER,
         LOOP_CHOICE_MARKER,
     ];
@@ -249,7 +235,7 @@ mod tests {
     }
 
     #[test]
-    fn full_worker_stream_parses_summary_usage_vars_and_proposal() {
+    fn full_worker_stream_parses_summary_usage_and_proposal() {
         let mut stream = String::new();
         stream.push_str(&line(
             &json!({"type": "session", "version": 3, "id": "sess-1", "timestamp": "t", "cwd": "/proj"}),
@@ -260,7 +246,7 @@ mod tests {
         stream.push_str(&tool_result_line(
             "call_1",
             "spark_build",
-            "Building...\nLOOP_VARS {\"build\":{\"status\":\"pass\",\"id\":\"b-1\"}}\nDone.",
+            "Building...\nDone.",
         ));
         stream.push_str(&assistant_message_end(
             "Build passed, moving on.",
@@ -270,7 +256,7 @@ mod tests {
         stream.push_str(&tool_result_line(
             "call_2",
             "transition",
-            "LOOP_TRANSITION {\"to\":\"review\",\"blocked\":false,\"rationale\":\"build green\",\"artifacts\":[],\"vars\":{}}",
+            "LOOP_TRANSITION {\"to\":\"review\",\"blocked\":false,\"rationale\":\"build green\",\"artifacts\":[]}",
         ));
         stream.push_str(&line(
             &json!({"type": "turn_end", "message": {}, "toolResults": []}),
@@ -283,41 +269,11 @@ mod tests {
         assert_eq!(outcome.summary, "Build passed, moving on.");
         assert_eq!(outcome.usage.tokens, 333);
         assert!((outcome.usage.cost_usd - 0.33).abs() < 1e-9);
-        assert_eq!(outcome.vars.get_path("build.status").unwrap(), "pass");
-        assert_eq!(outcome.vars.get_path("build.id").unwrap(), "b-1");
 
         let proposal = outcome.proposal().unwrap().expect("a proposal");
         assert_eq!(proposal.to.as_deref(), Some("review"));
         assert!(!proposal.blocked);
         assert_eq!(proposal.rationale, "build green");
-    }
-
-    #[test]
-    fn multiple_loop_vars_lines_deep_merge_in_order() {
-        let mut stream = String::new();
-        stream.push_str(&tool_result_line(
-            "c1",
-            "spark_build",
-            "LOOP_VARS {\"qa\":{\"result\":\"fail\",\"detail\":\"boom\"}}",
-        ));
-        stream.push_str(&tool_result_line(
-            "c2",
-            "spark_retest",
-            "LOOP_VARS {\"qa\":{\"result\":\"pass\"}}",
-        ));
-
-        let outcome = parse_stream(Cursor::new(stream)).unwrap();
-        assert_eq!(outcome.vars.get_path("qa.result").unwrap(), "pass");
-        assert_eq!(outcome.vars.get_path("qa.detail").unwrap(), "boom");
-    }
-
-    #[test]
-    fn loop_vars_line_embedded_in_surrounding_prose() {
-        let text = "Starting job 42...\nsome noise here\nLOOP_VARS {\"deploy\":{\"status\":\"ok\"}}\nCleaning up temp files\nExit 0";
-        let stream = tool_result_line("c1", "spark_deploy", text);
-
-        let outcome = parse_stream(Cursor::new(stream)).unwrap();
-        assert_eq!(outcome.vars.get_path("deploy.status").unwrap(), "ok");
     }
 
     #[test]
@@ -374,11 +330,12 @@ mod tests {
 
     #[test]
     fn scan_markers_finds_several_in_one_blob() {
-        let text = "prefix\nLOOP_VARS {\"a\":1}\nmiddle\nLOOP_VARS {\"b\":2}\nsuffix";
+        let text = "prefix\nLOOP_VERDICT {\"a\":1}\nmiddle\nLOOP_CHOICE {\"b\":2}\nsuffix";
         let found = scan_markers(text);
         assert_eq!(found.len(), 2);
-        assert_eq!(found[0].0, LOOP_VARS_MARKER);
+        assert_eq!(found[0].0, LOOP_VERDICT_MARKER);
         assert_eq!(found[0].1, "{\"a\":1}");
+        assert_eq!(found[1].0, LOOP_CHOICE_MARKER);
         assert_eq!(found[1].1, "{\"b\":2}");
     }
 

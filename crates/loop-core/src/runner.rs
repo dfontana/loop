@@ -11,7 +11,6 @@ use serde::{Deserialize, Serialize};
 use crate::error::Result;
 use crate::event::{ArtifactClaim, Usage};
 use crate::machine::{ModelSpec, StateId, TransitionMode};
-use crate::vars::Vars;
 
 /// Everything a worker spawn needs. Assembled deterministically by the engine
 /// from the state's config plus the rendered prompt files.
@@ -57,9 +56,6 @@ pub struct Proposal {
     pub rationale: String,
     #[serde(default)]
     pub artifacts: Vec<ArtifactClaim>,
-    /// UNTRUSTED hints. Merged into the ledger as `trusted: false`.
-    #[serde(default)]
-    pub vars: Vars,
 }
 
 #[derive(Clone, Debug)]
@@ -68,8 +64,6 @@ pub struct WorkerResult {
     pub summary: String,
     /// `None` when the worker ended its turn without calling `transition`.
     pub proposal: Option<Proposal>,
-    /// Trusted vars scraped from `LOOP_VARS` lines in tool output.
-    pub vars: Vars,
     pub usage: Usage,
     pub session_id: Option<String>,
     /// False when pi exited non-zero.
@@ -123,12 +117,4 @@ pub trait AgentRunner {
     fn run_worker(&self, spec: &WorkerSpec) -> Result<WorkerResult>;
     fn run_judge(&self, spec: &JudgeSpec) -> Result<Verdict>;
     fn run_navigator(&self, spec: &NavigatorSpec) -> Result<Choice>;
-}
-
-/// Evaluates a Fennel `when` guard. Implemented by `loop-fennel`, which holds
-/// the closures in its Lua registry.
-pub trait GuardEvaluator {
-    fn eval(&self, guard: crate::machine::GuardRef, vars: &Vars) -> Result<bool>;
-    /// The guard's source text, for ledger and error messages.
-    fn source(&self, guard: crate::machine::GuardRef) -> Option<String>;
 }

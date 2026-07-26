@@ -1,14 +1,11 @@
-//! The three guard tiers, checked cheapest-first.
+//! The guard tiers, checked cheapest-first.
 
-use loop_core::{
-    AgentRunner, GuardEvaluator, GuardOutcome, JudgeSpec, Machine, Result, Transition, Vars,
-};
+use loop_core::{AgentRunner, GuardOutcome, JudgeSpec, Machine, Result, Transition};
 
 /// The verdict on one proposed edge, plus what to write to the ledger.
 #[derive(Clone, Debug)]
 pub struct GuardReport {
     pub structural: GuardOutcome,
-    pub when: GuardOutcome,
     pub criteria: GuardOutcome,
     pub judge_rationale: Option<String>,
     pub usage: loop_core::Usage,
@@ -16,84 +13,37 @@ pub struct GuardReport {
 
 impl GuardReport {
     pub fn passed(&self) -> bool {
-        self.structural != GuardOutcome::Fail
-            && self.when != GuardOutcome::Fail
-            && self.criteria != GuardOutcome::Fail
+        self.structural != GuardOutcome::Fail && self.criteria != GuardOutcome::Fail
     }
 }
 
-/// Pick the edge a worker's proposal takes. With several edges `from → to`
-/// (the transient-vs-real pattern), choose the first whose `when` passes; that
-/// is what makes routing on `error_class` work.
+/// The edge a worker's proposal takes.
 ///
-/// TASK T5.
-pub fn select_edge<'m>(
-    machine: &'m Machine,
-    guards: &dyn GuardEvaluator,
-    from: &str,
-    to: &str,
-    vars: &Vars,
-) -> Result<Option<&'m Transition>> {
-    for t in machine
+/// Parallel edges between the same pair used to be disambiguated by their
+/// `when` guards; with those gone the first declared edge wins, and
+/// [`crate::validate`] flags the duplicate so it never silently decides which
+/// `criteria` applies.
+pub fn select_edge<'m>(machine: &'m Machine, from: &str, to: &str) -> Option<&'m Transition> {
+    machine
         .transitions
         .iter()
-        .filter(|t| t.from == from && t.to == to)
-    {
-        let passes = match t.when {
-            // No `when` at all: unconditionally eligible, same as the `when`
-            // tier reporting `skip` in `check`.
-            None => true,
-            Some(guard) => guards.eval(guard, vars)?,
-        };
-        if passes {
-            return Ok(Some(t));
-        }
-    }
-    Ok(None)
+        .find(|t| t.from == from && t.to == to)
 }
 
 /// Run the tiers on one edge.
 ///
-/// TASK T5. Two rules that are load-bearing, not stylistic:
-/// - Gate `when` on **trusted** vars only. A worker-declared var may inform a
-///   prompt; it may never open a QA gate (docs/03, docs/07 #2).
-/// - The Judge sees the worker's output digest and artifact paths — never the
-///   worker's own claim that it succeeded (docs/07 #1).
+/// TASK T5. The load-bearing rule: the Judge sees the worker's output digest
+/// and artifact paths — never the worker's own claim that it succeeded
+/// (docs/07 #1).
 pub fn check(
-    _machine: &Machine,
-    guards: &dyn GuardEvaluator,
     runner: &dyn AgentRunner,
     edge: &Transition,
-    trusted_vars: &Vars,
     judge: impl FnOnce(&str) -> JudgeSpec,
 ) -> Result<GuardReport> {
     // Structural: by the time an edge reaches `check`, it was already resolved
     // out of the machine's declared transitions (by `select_edge` or the
     // constrained `transition` tool schema), so it always passes here.
     let structural = GuardOutcome::Pass;
-
-    // `when` — a deterministic closure over TRUSTED vars only. A
-    // worker-declared (untrusted) var must never be able to open a gate.
-    let when = match edge.when {
-        None => GuardOutcome::Skip,
-        Some(guard) => {
-            if guards.eval(guard, trusted_vars)? {
-                GuardOutcome::Pass
-            } else {
-                GuardOutcome::Fail
-            }
-        }
-    };
-
-    if when == GuardOutcome::Fail {
-        return Ok(GuardReport {
-            structural,
-            when,
-            criteria: GuardOutcome::Skip,
-            judge_rationale: None,
-            usage: loop_core::Usage::default(),
-        });
-    }
 
     // `criteria` — a separate, cheap Judge that sees only outputs and
     // artifacts, never the worker's own claim of success.
@@ -113,7 +63,6 @@ pub fn check(
 
     Ok(GuardReport {
         structural,
-        when,
         criteria,
         judge_rationale,
         usage,

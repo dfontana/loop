@@ -27,12 +27,10 @@
 //!   "default": { "summary": "did the thing", "transition": {"to": "review", "rationale": "…"} },
 //!   "steps": [
 //!     { "match": {"role": "worker", "state": "implement", "cycle": 1},
-//!       "vars":  {"build": {"status": "pass", "id": "b-1"}},
 //!       "summary": "implemented",
 //!       "transition": {"to": "review", "rationale": "plan items done"},
 //!       "usage": {"tokens": 100, "cost_usd": 0.01} },
 //!     { "match": {"role": "worker", "state": "qa-staging", "cycle": 1},
-//!       "vars": {"qa": {"result": "fail", "error_class": "transient"}},
 //!       "transition": {"to": "qa-staging", "rationale": "flaky executor"} },
 //!     { "match": {"role": "worker", "state": "debug"}, "exit": "crash" },
 //!     { "match": {"role": "judge"}, "verdict": {"pass": true, "rationale": "evidence checks out"} },
@@ -65,12 +63,8 @@
 //! - `summary`: the assistant's final text.
 //! - `usage`: `{"tokens": u64, "cost_usd": f64}`, emitted as one assistant
 //!   `message_end`'s usage.
-//! - `vars`: a JSON object, emitted as a single `LOOP_VARS <json>` line
-//!   (wrapped in a bit of surrounding prose, inside a synthetic
-//!   `spark_build`-style tool call) — this is how a step feeds trusted,
-//!   tool-emitted vars into the harness.
 //! - `transition`: `{"to": string|null, "blocked": bool, "rationale": string,
-//!   "artifacts": [{"name","path"}], "vars": object}` — worker only. Emits a
+//!   "artifacts": [{"name","path"}]}` — worker only. Emits a
 //!   `transition` tool call whose result is `LOOP_TRANSITION <json>`. Omit it
 //!   to simulate a worker that ends its turn without transitioning.
 //! - `verdict`: `{"pass": bool, "rationale": string}` — judge only. Emits
@@ -128,8 +122,6 @@ struct Step {
     #[serde(default)]
     usage: Option<UsageSpec>,
     #[serde(default)]
-    vars: Option<Value>,
-    #[serde(default)]
     transition: Option<TransitionSpec>,
     #[serde(default)]
     verdict: Option<VerdictSpec>,
@@ -153,10 +145,6 @@ struct ArtifactSpec {
     path: String,
 }
 
-fn empty_object() -> Value {
-    Value::Object(Default::default())
-}
-
 #[derive(Debug, Deserialize, Serialize, Clone)]
 struct TransitionSpec {
     #[serde(default)]
@@ -167,8 +155,6 @@ struct TransitionSpec {
     rationale: String,
     #[serde(default)]
     artifacts: Vec<ArtifactSpec>,
-    #[serde(default = "empty_object")]
-    vars: Value,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -412,19 +398,6 @@ fn run_stream<W: Write>(out: W, role: &str, inv: &Invocation, step: &Step) -> Ex
         format!("call_{next_call_id}")
     };
 
-    if let Some(vars) = &step.vars {
-        let payload = serde_json::to_string(vars).unwrap_or_else(|_| "{}".to_string());
-        let text = format!("Running checks...\nLOOP_VARS {payload}\nDone.");
-        emit_tool_call(
-            &mut em,
-            &mut tool_results,
-            &call_id(),
-            "spark_build",
-            json!({}),
-            &text,
-        );
-    }
-
     match role {
         "worker" => {
             if let Some(t) = &step.transition {
@@ -433,7 +406,6 @@ fn run_stream<W: Write>(out: W, role: &str, inv: &Invocation, step: &Step) -> Ex
                     "blocked": t.blocked,
                     "rationale": t.rationale,
                     "artifacts": t.artifacts,
-                    "vars": t.vars,
                 });
                 let text = format!("LOOP_TRANSITION {payload}");
                 emit_tool_call(
@@ -629,10 +601,9 @@ mod tests {
     }
 
     #[test]
-    fn run_stream_worker_emits_valid_ndjson_with_transition_and_vars() {
+    fn run_stream_worker_emits_valid_ndjson_with_transition() {
         let step: Step = serde_json::from_str(
-            r#"{"summary":"done","vars":{"build":{"status":"pass"}},
-                "transition":{"to":"review","rationale":"ok"}}"#,
+            r#"{"summary":"done","transition":{"to":"review","rationale":"ok"}}"#,
         )
         .unwrap();
         let inv = Invocation {
@@ -647,7 +618,6 @@ mod tests {
 
         let text = String::from_utf8(buf).unwrap();
         let mut saw_transition = false;
-        let mut saw_vars = false;
         for line in text.lines() {
             let v: Value = serde_json::from_str(line).expect("every mock-pi line is valid JSON");
             if v.get("type").and_then(Value::as_str) == Some("tool_execution_end") {
@@ -655,13 +625,9 @@ mod tests {
                 if result_text.starts_with("LOOP_TRANSITION ") {
                     saw_transition = true;
                 }
-                if result_text.contains("LOOP_VARS ") {
-                    saw_vars = true;
-                }
             }
         }
         assert!(saw_transition);
-        assert!(saw_vars);
     }
 
     #[test]

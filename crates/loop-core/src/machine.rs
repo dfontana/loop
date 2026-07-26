@@ -153,14 +153,6 @@ pub struct State {
     pub description: Option<String>,
 }
 
-/// An opaque handle to a guard closure held in `loop-fennel`'s Lua registry.
-///
-/// The engine passes it back to a [`crate::GuardEvaluator`] rather than linking
-/// `mlua` itself — that seam is what keeps the control loop testable with plain
-/// Rust fakes.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct GuardRef(pub u32);
-
 /// What to do when a guard on a proposed transition fails.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -174,16 +166,12 @@ pub enum OnFail {
     Route(StateId),
 }
 
-/// An edge. The three guard tiers are checked cheapest-first: structural (does
-/// this edge exist), `when` (a Fennel closure over ledger vars), `criteria` (an
-/// LLM Judge).
+/// An edge. Two guard tiers, checked cheapest-first: structural (does this edge
+/// exist) and `criteria` (an LLM Judge).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Transition {
     pub from: StateId,
     pub to: StateId,
-    pub when: Option<GuardRef>,
-    /// Human-readable form of the `when` guard, for the ledger and `validate`.
-    pub when_src: Option<String>,
     pub criteria: Option<String>,
     pub on_fail: OnFail,
     /// Sleep this long before re-entering the target (transient retry self-loops).

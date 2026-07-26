@@ -13,8 +13,8 @@
 
 use loop_core::{
     AgentRunner, ArtifactRef, ArtifactSink, Config, ErrorKind, Event, EventPayload, FoldStatus,
-    GuardEvaluator, GuardOutcome, LedgerSink, LoopSpec, Machine, OnExhausted, OnFail, Proposal,
-    Result, ResumePoint, RunState, RunStatus, StateId, Totals, Transition, fold_with_loop_heads,
+    GuardOutcome, LedgerSink, LoopSpec, Machine, OnExhausted, OnFail, Proposal, Result,
+    ResumePoint, RunState, RunStatus, StateId, Totals, Transition, fold_with_loop_heads,
 };
 
 pub mod guards;
@@ -37,7 +37,6 @@ mod tests;
 pub struct Engine<'a> {
     pub machine: &'a Machine,
     pub config: &'a Config,
-    pub guards: &'a dyn GuardEvaluator,
     pub runner: &'a dyn AgentRunner,
     pub ledger: &'a mut dyn LedgerSink,
     pub artifacts: &'a dyn ArtifactSink,
@@ -73,13 +72,13 @@ impl Engine<'_> {
     /// 3. Check global guardrails (wallclock, `$`, transition count) **before**
     ///    spawning. Exceeded → `run_finished{aborted}` naming the guardrail.
     /// 4. `state_entered`, build the stage, spawn the worker, append
-    ///    `worker_output` (capturing artifacts and merging trusted vars first,
-    ///    so a crash between them loses nothing).
+    ///    `worker_output` (capturing artifacts first, so a crash between them
+    ///    loses nothing).
     /// 5. `transition_proposed`. If blocked, or (in `open` mode) the target is
     ///    not a declared edge → Navigator, capped per run and per state; over
     ///    the cap → escalate.
-    /// 6. Guard tiers on the chosen edge: structural, `when`, then `criteria`
-    ///    via the Judge. A failure runs the edge's `on_fail`.
+    /// 6. Guard tiers on the chosen edge: structural, then `criteria` via the
+    ///    Judge. A failure runs the edge's `on_fail`.
     /// 7. `transition_committed`, honor `backoff_s`, bump cycle counters, and
     ///    enforce `max_cycles` — on exhaustion, `on_exhausted`.
     ///
@@ -385,8 +384,7 @@ impl Engine<'_> {
             return self.commit(rs, from, &target, None);
         }
 
-        let selected = select_edge(self.machine, self.guards, from, &target, &rs.trusted_vars)?;
-        let edge = match selected.or_else(|| self.machine.edge(from, &target)) {
+        let edge = match select_edge(self.machine, from, &target) {
             Some(e) => e.clone(),
             None => {
                 // Structurally unreachable even after navigator routing —
@@ -395,7 +393,6 @@ impl Engine<'_> {
                     from: from.to_string(),
                     to: target.clone(),
                     structural: GuardOutcome::Fail,
-                    when: GuardOutcome::Skip,
                     criteria: GuardOutcome::Skip,
                     judge_rationale: None,
                 })?;
@@ -414,20 +411,14 @@ impl Engine<'_> {
             )?),
             None => None,
         };
-        let report = guard_check(
-            self.machine,
-            self.guards,
-            self.runner,
-            &edge,
-            &rs.trusted_vars,
-            |_criteria| judge_spec.expect("check() only calls judge() when criteria is Some"),
-        )?;
+        let report = guard_check(self.runner, &edge, |_criteria| {
+            judge_spec.expect("check() only calls judge() when criteria is Some")
+        })?;
 
         self.ledger.append(EventPayload::GuardChecked {
             from: from.to_string(),
             to: target.clone(),
             structural: report.structural,
-            when: report.when,
             criteria: report.criteria,
             judge_rationale: report.judge_rationale.clone(),
         })?;
@@ -526,21 +517,14 @@ impl Engine<'_> {
             return Ok(None);
         }
 
-        // Capture artifacts and merge trusted vars *before* `worker_output` —
-        // if a crash lands between them, re-entry redoes the stage and
-        // nothing already-durable is lost (docs/03).
+        // Capture artifacts *before* `worker_output` — if a crash lands between
+        // them, re-entry redoes the stage and nothing already-durable is lost
+        // (docs/03).
         let mut artifacts = Vec::new();
         if let Some(proposal) = &result.proposal {
             for claim in &proposal.artifacts {
                 artifacts.push(self.artifacts.capture(&state, cycle, claim)?);
             }
-        }
-        if !result.vars.is_empty() {
-            self.ledger.append(EventPayload::VarsSet {
-                scope: None,
-                values: result.vars.as_value(),
-                trusted: true,
-            })?;
         }
 
         self.ledger.append(EventPayload::WorkerOutput {
@@ -556,18 +540,7 @@ impl Engine<'_> {
             blocked: true,
             rationale: "worker ended its turn without calling transition".into(),
             artifacts: Vec::new(),
-            vars: loop_core::Vars::new(),
         });
-
-        // The worker's own `vars` hints are untrusted — recorded for the
-        // record, never eligible to gate a `when` (docs/03, docs/07 #2).
-        if !proposal.vars.is_empty() {
-            self.ledger.append(EventPayload::VarsSet {
-                scope: None,
-                values: proposal.vars.as_value(),
-                trusted: false,
-            })?;
-        }
 
         self.ledger.append(EventPayload::TransitionProposed {
             from: state.clone(),
@@ -577,8 +550,8 @@ impl Engine<'_> {
             by: loop_core::Actor::Worker,
         })?;
 
-        // Re-fold: the events just appended (trusted vars, navigator/cycle
-        // context) must be visible to the guard tiers about to run.
+        // Re-fold: the events just appended (navigator/cycle context) must be
+        // visible to the guard tiers about to run.
         let events = self.ledger.read_all()?;
         let fresh = self.fold(&events);
         self.route_proposal(&fresh, &state, proposal)
