@@ -1,13 +1,13 @@
 ---
 name: debug-transient
-description: Situational checklist for telling an infrastructure flake apart from a real bug; consulted as a tool via use_playbook.
+description: Tell an infrastructure flake apart from a real bug before deciding whether to spend a code fix on a failure. Use when a failure could plausibly be either.
 model: claude-sonnet-5
 thinking: medium
 ---
 
 <!--
   A playbook used as a TOOL, not bound to a state. `debug` gets it via its
-  `use_playbook` allowlist; calling `use_playbook("debug-transient")` returns this
+  `:skills` list, which becomes `pi --skill <this file>`; it returns this
   guidance for the worker to apply in-context. It is deliberately a checklist, not
   a task with its own `transition` — the caller stays in control of its own stage.
   See docs/04-toolbox.md ("Playbooks-as-tools").

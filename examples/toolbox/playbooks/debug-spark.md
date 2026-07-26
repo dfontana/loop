@@ -27,11 +27,11 @@ job-log artifact. Start there, not from the top.
 1. **Reproduce the diagnosis, don't guess.** Read the QA job-log artifact and the
    relevant code/config. Name the root cause in one sentence before you touch
    anything.
-2. **Consult situational know-how when the class fits.** You have `use_playbook`.
-   If the symptom looks like a flake that slipped past classification, call
-   `use_playbook("debug-transient")` and apply its checklist before assuming a
-   code bug. Reach for it when the signal is ambiguous — don't burn a code fix on
-   an executor that simply died.
+2. **Consult situational know-how when the class fits.** The `debug-transient`
+   skill is loaded into this stage. If the symptom looks like a flake that
+   slipped past classification, work its checklist before assuming a code bug.
+   Reach for it when the signal is ambiguous — don't burn a code fix on an
+   executor that simply died.
 3. **Fix the actual cause.** Common real failures on this pipeline:
    - `column X not found in gold schema` → the migration was authored but never
      registered in the staging deploy manifest (staging reads the manifest, not
@@ -40,9 +40,9 @@ job-log artifact. Start there, not from the top.
      writing to the wrong table version.
    - schema/type mismatch on read → DTO or serializer disagrees with the column
      type.
-4. **Verify green.** Run `spark_build`. Do not finish on a red build — the
-   build's `LOOP_VARS` line is what the harness gates the debug→qa_staging edge
-   on, not your say-so.
+4. **Verify green.** Run the build. Do not finish on a red tree — the harness
+   re-runs the same build itself as this edge's check, so a red tree fails the
+   transition regardless of what you report.
 5. Finish with `transition(to="qa_staging", rationale="<root cause → the fix>",
    artifacts=[{name:"diff", path:"<the fix diff>"}])`. If the root cause is
    outside what you can reach (needs a plan change, missing access), call

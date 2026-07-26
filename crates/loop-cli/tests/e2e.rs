@@ -2,10 +2,9 @@
 //! Fennel VM and toolbox, against `mock-pi` instead of a live agent.
 //!
 //! These are the tests that catch what unit tests structurally cannot — every
-//! bug found while wiring wave 1 together (a guard's `when_src` being a file
-//! path instead of source text, a torn ledger line becoming unreadable once
-//! appended past, a crashed worker escalating instead of retrying) was a
-//! seam between two crates that each passed their own suite.
+//! bug found while wiring wave 1 together (a torn ledger line becoming
+//! unreadable once appended past, a crashed worker escalating instead of
+//! retrying) was a seam between two crates that each passed their own suite.
 //!
 //! Hermetic: `LOOP_CONFIG_DIR` / `LOOP_STATE_DIR` point at tempdirs, and
 //! `LOOP_PI_BIN` at the fixture binary. No network, no API key, no `~`.

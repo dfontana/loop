@@ -28,7 +28,7 @@ export default function (pi: ExtensionAPI) {
         description: "True only if every part of the criteria is satisfied by the evidence.",
       }),
       rationale: Type.String({
-        description: "Cite the specific evidence (artifact, LOOP_VARS value, diff hunk) behind the verdict.",
+        description: "Cite the specific evidence (artifact, command output, diff hunk) behind the verdict.",
       }),
     }),
     async execute(_id, params) {

@@ -2,10 +2,16 @@
 
 > **Superseded in part by [09-implementation-plan.md](09-implementation-plan.md).**
 > The toolbox lives at **`~/.config/loop/`**, not `~/.loop/`, and everything
-> loop *generates* (the merged `scoped-tools.yaml`, `mcp.json`, rendered
-> prompts) goes to **`~/.local/state/loop/`** — which is what `PI_AGENT_DIR`
-> points at, so nothing generated lands in the directory you hand-edit.
-> `loop.config.yaml` is now `config.fnl`. Everything else here holds.
+> loop *generates* (the staged `mcp.json`, rendered prompts) goes to
+> **`~/.local/state/loop/`** — which is what `PI_AGENT_DIR` points at, so
+> nothing generated lands in the directory you hand-edit. `loop.config.yaml` is
+> now `config.fnl`.
+>
+> The second kind of reusable thing is now a **skill**, not a scoped-tool: a
+> `SKILL.md` plus the scripts beside it, loaded by `pi --skill`. Per-stage tool
+> allowlists are gone, and gating moved from `LOOP_VARS`/`when` to a `:check`
+> the harness runs itself — [09](09-implementation-plan.md#why-when-guards-and-scoped-tools-were-cut)
+> records why. Everything else here holds.
 
 The toolbox is the portable, out-of-project library the "hack it per ticket, then
 discard" workflow draws on. A ticket's `./.loop/` directory holds only what's
@@ -22,13 +28,16 @@ referenced by name.
     debug-spark.md
     debug-transient.md
     open-pr.md
-  tools/                        # TOOLS — pre-canned capabilities (scoped-tools YAML + mcp config)
-    spark.yaml                  #   scoped-tools specs; harness merges tools/*.yaml → scoped-tools.yaml
-    staging.yaml
-    ci.yaml
-    mcp.json                    #   .mcp.json for the `mcp` extension (see "Existing pi-extensions")
-    bin/                        #   scripts the tool commandTemplates shell out to
-      classify-spark.sh
+  skills/                       # SKILLS — situational know-how + the scripts that carry it out
+    spark-build/
+      SKILL.md                  #   what it is for and when to reach for it
+      build.sh                  #   the script; also usable as a transition :check
+    spark-run/
+      SKILL.md
+      run.sh  classify.sh
+    staging-deploy/
+    contract-check/
+  mcp.json                      # .mcp.json for the `mcp` extension
   machines/                     # MACHINE TEMPLATES — starting points to copy
     standard-ticket.yaml
     data-pipeline-ticket.yaml
@@ -43,6 +52,7 @@ referenced by name.
   plan.md                       # the plan you co-authored live — PROSE, `plan: plan.md`
   playbooks/                    # LOCAL, bespoke stage prompts for THIS ticket (override the toolbox)
     validate-contract.md        #   e.g. a stage the toolbox doesn't cover
+  skills/                       # LOCAL skills, same local-first override
   ledger.jsonl                  # the run record (gitignored)
   artifacts/                    # captured outputs
 ```
@@ -99,7 +109,7 @@ $LEDGER_DIGEST
 
 ## How to work
 1. Implement the plan. Keep changes scoped to it.
-2. Run `spark_build` after substantive changes; do not finish on a red build.
+2. Run the build after substantive changes; do not finish on a red build.
 3. When the checklist is complete and the build is green, call
    `transition(to="review", rationale=…, artifacts=[…])`.
 4. If you cannot make progress, call `transition(blocked=true, rationale=…)`
@@ -110,8 +120,7 @@ $LEDGER_DIGEST
 
 There is no separate "stage prompt" concept — **a stage's prompt *is* the markdown
 file named by its `playbook:`.** A stage without a resolvable playbook is an error
-`loop validate` catches. Resolution mirrors the `scoped-tools` global/project
-merge you already have — **local overrides toolbox:**
+`loop validate` catches. Resolution is **local overrides toolbox:**
 
 1. `./.loop/playbooks/<name>.md` (per-ticket, bespoke) — wins if present.
 2. `~/.loop/playbooks/<name>.md` (toolbox, reusable).
@@ -139,27 +148,25 @@ Playbooks then come in two *usage* modes, and the same file can serve both:
 
 - **Directly bound to a state** — this state *is* a review, so its playbook is
   `review.md`. Most stages.
-- **Offered as a tool** — a *toolkit* of situational know-how the worker calls
-  when it hits the situation. E.g. `debug-spark.md` and `debug-transient.md` are
-  handed to the `debug` stage as tools it may consult, rather than being the
-  stage itself. A playbook-as-tool is exposed as a `use_playbook(name)` tool that
-  returns the playbook's guidance for the worker to apply in-context.
+- **Offered as situational know-how** — guidance the worker reaches for when it
+  hits the situation, rather than the stage itself. That is now a **skill**, not
+  a second usage mode for a playbook: `debug-transient` lives in `skills/` and
+  the `debug` stage lists it in `:skills`.
 
-Templating uses the `scoped-tools` convention you already have: `$UPPER_SNAKE`
-placeholders filled from the **context namespace** (below). Unknown `$NAMES` pass
-through untouched, so `$HOME` etc. still work.
+Templating is `$UPPER_SNAKE` placeholders filled from the **context namespace**
+(below). Unknown `$NAMES` pass through untouched, so `$HOME` etc. still work.
 
 ## These are existing pi-extensions, not new loop code
 
-Two of the three tool sources below are already-installed packages in
+Some of what a stage gets is already-installed packages in
 [`~/opencode/pi-extensions`](../../pi-extensions) — loop *configures* them, it
 doesn't reimplement them. Keeping this straight avoids the trap of vendoring a
 second copy:
 
 | Toolbox piece | Backed by | How loop points it at the toolbox |
 |---|---|---|
-| `tools/*.yaml` scoped-tools | [`scoped-tools`](../../pi-extensions/extensions/scoped-tools) extension | harness exports `PI_AGENT_DIR=~/.loop` and merges `tools/*.yaml` into the one `scoped-tools.yaml` that extension reads |
-| `tools/mcp.json` | [`mcp`](../../pi-extensions/extensions/mcp) extension | installed as `$PI_AGENT_DIR/mcp.json`; a stage lists `mcp` to reach it |
+| `skills/<name>/` | **pi's own skill loader** | `--no-skills` plus one `--skill <path>` per skill the state named |
+| `mcp.json` | [`mcp`](../../pi-extensions/extensions/mcp) extension | staged as `$PI_AGENT_DIR/mcp.json` |
 | `select_review_model` (in the `review` stage) | [`review-model-selector`](../../pi-extensions/extensions/review-model-selector) extension | activated per spawn; nothing to configure |
 | `ext/*.ts` (transition/verdict/choose) | **loop's own**, vendored here | `-e`-injected per spawn (Worker / Judge / Navigator) |
 
@@ -169,67 +176,71 @@ The `implement`/`review` *playbooks* likewise mirror the
 `select_review_model` + four-angle adversarial fan-out, run as a loop stage
 instead of interactively.
 
-## Tools — the "what with"
+## Skills — the "what with"
 
-A tool is a pre-canned capability bound into a stage. Three sources, all
-already-solved in your pi setup:
+A skill is situational know-how bound into a stage: a `SKILL.md` saying what it
+is for and when to reach for it, plus the scripts that carry it out. pi loads it
+by path; loop only resolves the name.
 
-1. **`scoped-tools` YAML** — the star of the show. A wrapped HTTP call or CLI
-   invocation with typed, validated parameters and hidden call-time secrets. The
-   agent never sees the command template or the token — only the tool's schema
-   and its stdout. This is exactly where you push "as much static work as
-   possible", per your goal. Example (`~/.loop/tools/staging.yaml`):
+```
+~/.config/loop/skills/staging-deploy/
+  SKILL.md      # "deploy the branch to this ticket's namespace; the script
+                #  refuses anything but dev/staging and reads its own token"
+  deploy.sh     # validates its arguments, keys the namespace on $TICKET_ID/$CYCLE
+```
 
-   ```yaml
-   staging_deploy:
-     description: Deploy the current branch to an isolated staging namespace for this ticket+cycle.
-     parameters:
-       branch:
-         type: string
-         description: Git branch to deploy
-         validationCmd: git rev-parse --verify "$1" >/dev/null
-     hiddenParameters:
-       token:   { valueFromCmd: pass show staging/deploy-token }
-       ns:      { valueFromCmd: echo "loop-$TICKET_ID-$CYCLE" }   # cycle-scoped, idempotent
-     commandTemplate: |
-       stagectl deploy --branch $BRANCH --namespace $NS --token $TOKEN --wait
-     timeout: 600
-   ```
+Resolution is **local-first**, exactly like playbooks: `./.loop/skills/<name>/`,
+then `~/.config/loop/skills/<name>/` (a bare `<name>.md` works too, for a skill
+that is pure prose). A name containing `/` is an exact path.
 
-   The harness makes `$TICKET_ID` and `$CYCLE` available to `valueFromCmd`, so
-   the namespace is unique per cycle — the injectable cycle identity doubles as
-   an idempotency key.
+The harness exports `$TICKET_ID` and `$CYCLE` into the spawn, so a script can
+key a mutation on the cycle — the injectable cycle identity doubles as an
+idempotency key, which is what makes a crash-resumed stage safe to re-enter.
 
-2. **MCP servers** — via your [`mcp`](../../pi-extensions/extensions/mcp)
-   extension's single proxy tool, configured by `tools/mcp.json`. Bind an MCP
-   server to a stage when it needs a rich external surface (Linear, a data
-   warehouse, a browser). The stage's tool allowlist includes `mcp`. Note that
-   extension defaults every server *off* per session, so a headless stage needs
-   its server pre-enabled.
+### What a skill is and isn't a boundary for
 
-3. **Playbooks-as-tools** — `use_playbook(name)` as described above, for
-   situational know-how.
+A skill's script is **not** a security boundary. Any stage with `bash` could
+call the same CLI directly, and the agent can read the script. What the script
+buys is that the *intended* path is validated in one reviewable, testable place
+— and, crucially, that the harness can run the identical code as a transition
+`:check`. When the same `build.sh` appears in a state's `:skills` and in the
+outgoing edge's `:check`, the agent's reading and the gate's are the same
+reading, and there is no version of "it passed for me" the harness disagrees
+with.
+
+That symmetry is the point of the split:
+
+- **A skill** bounds what a stage *knows* — instructions, not capability.
+- **A check** bounds what a stage can *transition past* — capability, and the
+  only tier a worker cannot author, because the harness runs it out of process
+  after the stage exits.
+
+MCP servers remain available through the [`mcp`](../../pi-extensions/extensions/mcp)
+extension's single proxy tool, configured by `mcp.json`. Note that extension
+defaults every server *off* per session, so a headless stage needs its server
+pre-enabled.
 
 ## Per-stage binding
 
-A state names the tools it gets; the harness translates that into the pi spawn's
-`--tools` allowlist and the `-e`/config it loads. QA stages deliberately *omit*
-`edit`/`write` so a validation stage can't quietly "fix" what it's supposed to be
-judging.
+A state names the skills it gets; the harness resolves each to a path and passes
+it as `pi --skill`, after `--no-skills` turns off ambient discovery. So a stage
+loads exactly what its machine declared.
 
-```yaml
-states:
-  qa_staging:
-    playbook: qa
-    tools: [read, bash, staging_deploy, spark_run, fetch_job_output]   # note: no edit/write
-  debug:
-    playbook: debug-spark
-    tools: [read, edit, bash, spark_build, use_playbook]               # can consult debug-transient
+```fennel
+:states
+{:qa-staging {:playbook "qa"
+              :skills ["staging-deploy" "spark-run"]}
+ :debug      {:playbook "debug-spark"
+              :skills ["spark-build" "debug-transient"]}}
 ```
 
-Defaults (`read, bash`) come from `loop.config.yaml`; the state list is the
-allowlist on top. Dangerous defaults can be dropped per-state with an exclude
-list that maps to pi's `--exclude-tools`.
+There is **no exclude list and no tool allowlist.** An earlier design gave each
+state a `--tools` allowlist so a QA stage could be denied `edit`/`write`; that
+was cosmetic, because the machine-wide default handed every stage `bash`, and a
+stage with bash can `sed -i` whatever it likes. What actually keeps a validation
+stage from fixing what it is grading is the pair of tiers above: an edge gated
+on a command the harness runs, and a Judge that never sees the stage's own claim
+of success.
 
 ## The context namespace
 
@@ -245,15 +256,26 @@ harness computes these each stage and injects them:
 | `$LEDGER_DIGEST` | rolling summary the harness assembles |
 | `$ARTIFACT_<NAME>` | path to a captured artifact |
 | `$ENTRY_ADDENDUM` | navigator's get-back-on-track note, when present |
-| any `vars_set` value | e.g. `$BUILD_ID` from `build.id` |
+
+The same namespace is substituted into a transition's `:check` command, and
+`$TICKET_ID`/`$STATE`/`$CYCLE`/`$ATTEMPT` are exported into both the spawn's and
+the check's environment — so a skill script and the check that re-runs it see
+the same cycle.
 
 ## Toolbox changes
 
-The toolbox is intentionally live. A run stages tools and MCP configuration
-before it begins, while each stage resolves its playbook immediately before it
-starts. An edit to `~/.loop/playbooks/implement.md` therefore affects later
-stages of an in-flight run, but never a stage that has already started; tool and
-MCP edits apply on the next run or resume. Keep the toolbox in version control
-if you need to audit or coordinate such changes. `loop validate` warns if a
-referenced playbook/tool is missing or if the machine references a tool a stage
-doesn't allowlist.
+The toolbox is intentionally live. A run stages MCP configuration before it
+begins, while each stage resolves its playbook and skills immediately before it
+starts. An edit to `~/.config/loop/playbooks/implement.md` therefore affects
+later stages of an in-flight run, but never a stage that has already started;
+MCP edits apply on the next run or resume.
+
+Skill *scripts* are read at the moment they run, by the agent and by any check
+that invokes them — so editing one mid-run changes the gate as well as the
+instructions. That is usually what you want while hacking a ticket together, and
+exactly what you don't want mid-audit. Keep the toolbox in version control.
+
+`loop validate` errors if a referenced playbook or skill doesn't resolve, or if
+two transitions share the same `from`/`to` pair (only the first would ever be
+taken). It warns on an edge with neither a `:check` nor a `:criteria` — the
+worker's proposal would be committed unexamined.

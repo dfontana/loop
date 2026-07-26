@@ -23,8 +23,9 @@ $ENTRY_ADDENDUM
 
 ## How to work
 1. Implement the plan, keeping changes scoped to it.
-2. After any substantive change, run `spark_build`. Do **not** finish on a red
-   build — the build's `LOOP_VARS` line is what the harness gates on, not your say-so.
+2. After any substantive change, run the build. Do **not** finish on a red
+   build — the harness re-runs the build itself on the way out of this stage,
+   so a red tree fails the transition regardless of what you report.
 3. When the plan's checklist is complete and the build is green, call:
    `transition(to="review", rationale="<what you did, mapped to plan items>",
    artifacts=[{name:"diff", path:"<path to the diff you wrote>"}])`.

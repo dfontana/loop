@@ -28,61 +28,67 @@
  :states
  {:implement {:playbook "implement"
               :thinking "high"
-              ;; EDIT — swap spark_build for this pipeline's build tool.
-              :tools ["edit" "write" "spark_build"]
+              ;; EDIT — swap in this pipeline's build skill.
+              :skills ["spark-build"]
               :description "Implement the plan; keep the build green."}
 
   :review {:playbook "review"
            :thinking "high"
-           :tools ["agent" "select_review_model"]
            :description "Adversarial review of the diff; find real defects."}
 
-  ;; Read-only by construction: a QA stage that can edit is a QA stage that
-  ;; will "fix" what it is supposed to be grading (docs/07 #1).
+  ;; What stops a QA stage from "fixing" what it is grading is not what it
+  ;; can reach — it is that the edges out of it are gated on commands the
+  ;; harness runs itself, plus a Judge that never sees this stage's own claims
+  ;; (docs/07 #1).
   :qa-staging {:playbook "qa"
                :thinking "high"
-               ;; EDIT — the deploy/run/fetch trio for this pipeline. Whatever
-               ;; you use, it must emit LOOP_VARS with `result` and
-               ;; `error_class`, or the guards below have nothing to gate on.
-               :tools ["staging_deploy" "spark_run" "fetch_job_output"]
-               :exclude-tools ["edit" "write"]
+               ;; EDIT — the deploy/run skills for this pipeline.
+               :skills ["staging-deploy" "spark-run"]
                :description "Deploy to staging, run the pipeline, grade it."}
 
   :debug {:playbook "debug-spark"
           :thinking "high"
-          :tools ["edit" "spark_build" "use_playbook"]
+          :skills ["spark-build" "debug-transient"]
           :description "Diagnose a real pipeline failure and fix it."}
 
   :open-pr {:playbook "open-pr"
             :thinking "low"
-            :tools ["open_pr"]
+            :skills ["open-pr"]
             :description "Open or update the pull request for this branch."}}
 
  :transitions
  [{:from "implement" :to "review"
-   :criteria "Every item in the plan is addressed in the diff, the build is green, and no TODO/FIXME markers remain in the changed files."
+   :check "bash ~/.config/loop/skills/spark-build/build.sh"
+   :criteria "Every item in the plan is addressed in the diff, and no TODO/FIXME markers remain in the changed files."
    :on-fail "retry"}
 
   {:from "review" :to "implement"
-   :when (fn [v] (= v.review.result "changes_requested"))}
+   :criteria "The review identified defects that require code changes."}
   {:from "review" :to "qa-staging"
-   :when (fn [v] (= v.review.result "clean"))}
+   :criteria "The review found no defect requiring a code change."}
 
   ;; The heart of this template: transient failures retry in place with
   ;; backoff and touch no code; real ones spawn the debugger. Burning debug
   ;; cycles on a flaky cluster — or worse, "fixing" code to match a broken
   ;; environment — is the failure this routing exists to prevent (docs/07 #4).
+  ;;
+  ;; Each edge asserts one branch of `classify.sh`'s taxonomy as a `:check`, so
+  ;; the split is decided by a versioned regex set and an exit code rather than
+  ;; by an agent that would rather retry than debug. EDIT the script to match
+  ;; your pipeline's failure vocabulary.
   {:from "qa-staging" :to "qa-staging"
-   :when (fn [v] (and (= v.qa.result "fail") (= v.qa.error_class "transient")))
+   :check "bash ~/.config/loop/skills/spark-run/classify.sh --expect transient"
    :backoff-s 30
    :on-fail "abort"}
   {:from "qa-staging" :to "debug"
-   :when (fn [v] (and (= v.qa.result "fail") (not= v.qa.error_class "transient")))}
+   :check "bash ~/.config/loop/skills/spark-run/classify.sh --expect real"}
   {:from "qa-staging" :to "open-pr"
-   :when (fn [v] (= v.qa.result "pass"))}
+   :check "bash ~/.config/loop/skills/spark-run/classify.sh --expect pass"
+   :criteria "The output sample satisfies every QA case, not just the job's exit status."}
 
   {:from "debug" :to "qa-staging"
-   :criteria "A concrete fix was applied and the build is green."
+   :check "bash ~/.config/loop/skills/spark-build/build.sh"
+   :criteria "A concrete fix to the diagnosed failure was applied — not a retry, a widened assertion, or a disabled check."
    :on-fail "retry"}
 
   {:from "open-pr" :to "done"

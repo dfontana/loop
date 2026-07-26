@@ -1,4 +1,4 @@
-//! `$UPPER_SNAKE` substitution, matching the scoped-tools convention.
+//! `$UPPER_SNAKE` substitution over the context namespace.
 
 use std::collections::BTreeMap;
 

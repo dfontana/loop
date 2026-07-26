@@ -13,7 +13,7 @@
  *   - OPEN: `to` is a free string; the harness routes unknown targets to the
  *     Navigator. More faithful to "the CLI decides validity, else reconcile".
  *
- * This mirrors the scoped-tools pattern: a thin, validated wrapper the harness
+ * A thin, validated wrapper the harness
  * fully controls, so the important decision travels as structured data, never
  * as free-text the harness has to parse out of prose.
  */
@@ -55,9 +55,6 @@ export default function (pi: ExtensionAPI) {
           { description: "Outputs later stages should receive (diffs, reports, samples)." },
         ),
       ),
-      // UNTRUSTED hints only. Real gating vars come from tool-emitted LOOP_VARS
-      // lines (see docs/03-ledger.md); a QA pass is never gated on these.
-      vars: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
     }),
     async execute(_id, params) {
       const p = params as {
@@ -65,7 +62,6 @@ export default function (pi: ExtensionAPI) {
         blocked?: boolean;
         rationale: string;
         artifacts?: { name: string; path: string }[];
-        vars?: Record<string, unknown>;
       };
       if (!p.blocked && !p.to) {
         throw new Error("transition requires either `to` or `blocked: true`.");
@@ -78,7 +74,6 @@ export default function (pi: ExtensionAPI) {
         blocked: !!p.blocked,
         rationale: p.rationale,
         artifacts: p.artifacts ?? [],
-        vars: p.vars ?? {},
       });
       return {
         content: [{ type: "text" as const, text: `LOOP_TRANSITION ${payload}` }],

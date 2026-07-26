@@ -21,8 +21,8 @@ pi --print --mode json \
    --session-id "${TICKET}-${STATE}-${CYCLE}" \       # deterministic id → resumable, forkable
    --provider  "${PROVIDER}" \
    --model     "${MODEL}:${THINKING}" \               # model + thinking in one token, e.g. claude-sonnet-5:high
-   --tools     "${ALLOWLIST}" \                        # per-stage allowlist incl. injected `transition`
-   -e ~/.loop/ext/transition-tool.ts \                # loop's OWN vendored ext (see below)
+   --no-skills --skill "${SKILL_PATH}" ... \          # exactly the skills this state named
+   -e ~/.config/loop/ext/transition-tool.ts \         # loop's OWN vendored ext (see below)
    --append-system-prompt "${RENDERED_PLAYBOOK}" \    # playbook rendered with the context namespace
    "${RENDERED_ENTRY_MESSAGE}"                         # short "you are entering STATE, cycle N" kickoff
 ```
@@ -32,26 +32,26 @@ Two different extension mechanisms feed a spawn, and they're easy to conflate:
 - **loop's own tools** — `transition-tool.ts` (Worker), `verdict-tool.ts`
   (Judge), `choose-tool.ts` (Navigator) — are vendored in `~/.loop/ext/` and
   `-e`-injected per spawn. They don't exist outside loop.
-- **existing pi-extensions** —
-  [`scoped-tools`](../../pi-extensions/extensions/scoped-tools),
-  [`mcp`](../../pi-extensions/extensions/mcp), and
+- **existing pi-extensions** — [`mcp`](../../pi-extensions/extensions/mcp) and
   [`review-model-selector`](../../pi-extensions/extensions/review-model-selector)
   — are *installed packages*, not files loop ships. The harness activates them
-  and exports `PI_AGENT_DIR=~/.loop` for the spawn so `scoped-tools` reads the
-  toolbox's merged `scoped-tools.yaml` and `mcp` reads `~/.loop/mcp.json`. There
-  is **no** `-e ~/.loop/ext/scoped-tools.ts`; that would be a second copy of an
-  extension you already have (see [04-toolbox.md](04-toolbox.md#these-are-existing-pi-extensions-not-new-loop-code)).
+  and exports `PI_AGENT_DIR` for the spawn so `mcp` finds the staged
+  `mcp.json`.
+- **skills** are pi's own mechanism, loaded by path: `--no-skills` turns off
+  ambient discovery, then one `--skill <path>` per skill the state named. So a
+  stage loads exactly what its machine declared and nothing a stray
+  `~/.pi/skills/` happens to hold.
 
 Notes:
 
 - **`--model X:thinking`** is how pi takes model + thinking level together, so
   per-state model/thinking config is a one-line render.
-- **`--tools`** is the allowlist; QA stages leave out `edit`/`write`. Built-ins,
-  `scoped-tools` commands, the `mcp` proxy, and the injected `transition` tool all
-  live in one namespace, so the allowlist is uniform.
-- **`-e`** loads extensions per spawn. The harness points `scoped-tools` at the
-  toolbox (`~/.loop/tools/*.yaml`) rather than a project `.pi/` — one env var
-  (`PI_AGENT_DIR` or a wrapper) redirects it.
+- **`--no-skills` + `--skill <path>`** pins a stage's skill set to what the
+  machine declared. Note this bounds *instructions*, not capability: a skill is
+  a prompt plus a script the agent runs through bash, so withholding one hides
+  know-how rather than revoking access. What a stage may *do* is bounded by its
+  tools; what it may *transition past* is bounded by the edge's `:check`.
+- **`-e`** loads loop's own vendored tools per spawn.
 - **`--append-system-prompt` takes a bare path, not `@path`.** pi's
   `resolvePromptInput` does `existsSync` on the argument and reads it as a file
   when it resolves, else treats it as literal text — so an `@` prefix silently
@@ -74,8 +74,7 @@ transition(
   to: enum<reachable neighbors> | null,  # default: constrained to this state's neighbors
   blocked: boolean = false,    # "I can't get where I should; route me" — the escape hatch
   rationale: string,           # why this is the right next step / why stuck
-  artifacts: [{name, path}] = [],
-  vars: object = {}            # OPTIONAL untrusted hints; never gates a QA pass (see 03/07)
+  artifacts: [{name, path}] = []
 )
 ```
 
@@ -96,8 +95,10 @@ Two things to note about the schema:
   graph is large enough that "where should I even go?" is a genuine question the
   worker should get to answer freely. Reach for it deliberately; the default
   stays constrained.
-- **`vars` is a convenience, not a source of truth.** Real gating vars come from
-  tool-emitted `LOOP_VARS` lines (see [03-ledger.md](03-ledger.md)).
+- **Nothing in this call is a gate.** Everything the worker passes here is a
+  *proposal* plus evidence for the Judge. The gate that cannot be argued with is
+  the edge's `:check`, which the harness runs after this call, in its own
+  subprocess (see [03-ledger.md](03-ledger.md)).
 
 ## Three agent roles, three cost profiles
 
@@ -131,9 +132,10 @@ The judge has **no code tools** — it reads artifacts (paths passed in) and
 returns a verdict. It cannot edit, deploy, or otherwise act.
 
 **`--no-builtin-tools` is not enough on its own**: without `--no-extensions`, an
-installed pi-extension (`scoped-tools`, `mcp`) still auto-discovers into the
-spawn, handing the Judge exactly the deploy-and-mutate surface its independence
-depends on not having. Both flags, on both the Judge and the Navigator.
+installed pi-extension (`mcp`) still auto-discovers into the spawn, handing the
+Judge exactly the deploy-and-mutate surface its independence depends on not
+having. Skill discovery is a *third* switch — `--no-skills` — and needs turning
+off too. All three flags, on both the Judge and the Navigator.
 
 ### Navigator spawn (sketch)
 

@@ -80,7 +80,7 @@ loops:
 - **Diffs beautifully.** A one-line prompt tweak is a one-line diff. Great for the "hack per ticket" workflow.
 - **Statically analyzable.** `loop validate` can walk the graph, check reachability, find dangling playbook/tool refs, and confirm a path to a terminal — all without executing anything.
 - **Safe.** No arbitrary code runs at load time.
-- **Templating is a solved problem** — reuse the `scoped-tools` `$UPPER_SNAKE` substitution you already have, over the context namespace.
+- **Templating is a solved problem** — a plain `$UPPER_SNAKE` substitution over the context namespace.
 
 **Weaknesses**
 
@@ -122,14 +122,15 @@ for the full, YAML-equivalent version; the shape:
   (defaults :model claude-sonnet-5 :thinking medium :session fresh :tools [read bash])
   (cheap-agents claude-haiku-4-5)                   ; judge + navigator in one line
 
-  ;; a stage co-locates its edges; `:when` is a real guard expr, `:judge` the LLM tier
+  ;; a stage co-locates its edges; `:check` is a command the harness runs,
+  ;; `:judge` the LLM tier
   (stage implement :thinking high :session (continue impl) :tools coder
     (to review :judge "Plan's four items done; build green; no TODO/FIXME."))
 
   (stage qa-staging :thinking high :tools [read bash staging_deploy spark_run fetch_job_output]
-    (to validate-contract :when (= qa.result :pass))
-    (to qa-staging        :when (and (= qa.result :fail) (transient? qa)) :backoff (secs 30))
-    (to debug             :when (and (= qa.result :fail) (real? qa))))
+    (to validate-contract :check "classify.sh --expect pass")
+    (to qa-staging        :check "classify.sh --expect transient" :backoff (secs 30))
+    (to debug             :check "classify.sh --expect real"))
 
   (retry-loop qa [qa-staging debug] :max 4 :on-exhausted escalate))
 ```
@@ -203,7 +204,7 @@ Both compile to one internal representation. This lets you:
 2. Reach for Fennel exactly on the tickets that need item 5 — dynamic graphs,
    real routing logic, heavy reuse — without a second engine.
 3. Keep the **toolbox** the true home of reuse regardless of surface: playbooks
-   are Markdown, tools are `scoped-tools` YAML, and machine *fragments/templates*
+   are Markdown, skills are pi's own `SKILL.md` format, and machine *fragments/templates*
    can be YAML anchors today and Fennel macros later. Most reuse lives there, not
    in the machine language.
 

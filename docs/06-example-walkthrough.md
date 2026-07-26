@@ -63,16 +63,17 @@ Abbreviated from [`examples/local/ledger.jsonl`](../examples/local/ledger.jsonl)
 1. **`run_started`** — harness records the machine hash and budgets (`$8`, 90
    min, 40 transitions).
 
-2. **`implement` (cycle 1)** — spawns a worker with
-   `claude-sonnet-5` at high thinking and the `read`, `edit`, `write`, `bash`,
-   and `spark_build` tools. The worker writes the column + API field, runs
-   `spark_build` (which prints
-   `LOOP_VARS {"build":{"status":"pass","id":"b-8842"}}` → `vars_set`), calls
-   `transition(to="review", …)`.
+2. **`implement` (cycle 1)** — spawns a worker with `claude-sonnet-5` at high
+   thinking and the `spark-build` skill. The worker writes the column + API
+   field, runs the build, calls `transition(to="review", …)`.
 
-3. **Guard implement→review** — structural pass; no `when`; **Judge** (haiku,
-   low) reads the diff artifact against the criteria "checklist addressed, builds
-   clean, no TODOs" → `pass`. `transition_committed`.
+3. **Guard implement→review** — structural pass. Then the **check**: the
+   harness runs `spark-build/build.sh` itself, in its own subprocess, and it
+   exits 0 (`build ok`). Then the **Judge** (haiku, low) reads the diff artifact
+   against the criteria "checklist addressed, no TODOs", with the build output
+   in front of it → `pass`. `transition_committed`.
+
+   Note what the worker's role was in the gate: none. It had already exited.
 
 4. **`review` (cycle 1)** — this stage's playbook *is* your `run-review` skill:
    the worker is a coordinator that fans out adversarial sub-reviewers. It finds
@@ -88,40 +89,47 @@ Abbreviated from [`examples/local/ledger.jsonl`](../examples/local/ledger.jsonl)
 
 7. **`review` (attempt 2)** — clean → `qa-staging`.
 
-8. **`qa-staging` (cycle 1)** — spawns with a **read-only** tool set
-   (`read, bash, staging_deploy, spark_run, fetch_job_output` — no `edit`).
-   Deploys to namespace `loop-PROJ-1487-1` (cycle-scoped), runs the Spark job,
-   fetches output. The job **fails**: `fetch_job_output` emits
-   `LOOP_VARS {"qa":{"result":"fail","error_class":"transient","detail":"executor lost"}}`.
+8. **`qa-staging` (cycle 1)** — spawns with the `staging-deploy` and
+   `spark-run` skills. Deploys to namespace `loop-PROJ-1487-1` (cycle-scoped),
+   runs the Spark job, reads `classify.sh`'s verdict: an executor was lost. It
+   proposes the self-loop.
 
-9. **Routing on the fail** — the machine has two edges out of `qa-staging` for a
-   fail. The `when` guard `qa.error_class == 'transient'` selects the
-   **self-loop**. Harness retries `qa-staging` (cycle 2, transient-retry counter
-   1) with backoff. This is the "debug transient problems, retest" path — no
-   debug agent spawned, no code touched, just a re-run.
+9. **Routing on the fail** — three edges leave `qa-staging`, one per branch of
+   `classify.sh`'s taxonomy, each asserting its branch as a check. The harness
+   re-runs the script itself with `--expect transient`; it agrees, exit 0.
+   Harness retries `qa-staging` (cycle 2, transient-retry counter 1) with
+   backoff. No debug agent spawned, no code touched, just a re-run.
 
-10. **`qa-staging` (cycle 2)** — job runs, but now a *real* failure:
-    `error_class: "real"`, detail "column churn_score not found in gold schema".
-    `when: qa.error_class != 'transient'` selects `→ debug`.
+   Had the worker proposed the self-loop on a run that classified as *real* —
+   the cheaper move, and the tempting one — the check would have exited
+   non-zero and the edge would have failed. The classification is not the
+   worker's to make.
 
-11. **`debug` (cycle 1)** — playbook `debug-spark`, with `use_playbook` tool so it
-    can pull `debug-transient` guidance if it turns out to be flaky after all. It
-    diagnoses a missing schema-registry migration, fixes it, rebuilds. Proposes
-    `transition(to="qa-staging")`.
+10. **`qa-staging` (cycle 2)** — job runs, but now a *real* failure: "column
+    churn_score not found in gold schema". `classify.sh --expect real` agrees
+    → `debug`.
 
-12. **`qa-staging` (cycle 3)** — passes:
-    `LOOP_VARS {"qa":{"result":"pass"}}`. `when: qa.result == 'pass'` →
+11. **`debug` (cycle 1)** — playbook `debug-spark`, with the `debug-transient`
+    skill loaded so it can work that checklist if the failure turns out to be
+    flaky after all. It diagnoses a missing schema-registry migration, fixes it,
+    rebuilds. Proposes `transition(to="qa-staging")`; the edge's check re-runs
+    the build and the Judge confirms the fix is a real one rather than a
+    widened assertion.
+
+12. **`qa-staging` (cycle 3)** — passes. `classify.sh --expect pass` exits 0,
+    and the Judge confirms the output sample covers both QA cases →
     `validate-contract`.
 
 13. **`validate-contract`** — its prompt is a **local, per-ticket playbook**
     (`./.loop/playbooks/validate-contract.md`, resolved local-first over the
     toolbox), written for this endpoint and these fields rather than overloading
-    the generic `qa` playbook. It hits the staging API and checks the response
-    schema against the OpenAPI spec (the `contract_check` command, which emits the
-    gating `LOOP_VARS`). Matches. → `open-pr`.
+    the generic `qa` playbook. It hits the staging API and validates the
+    response against the OpenAPI spec. The edge to `open-pr` runs that same
+    `check.sh` as its gate, so the stage's reading and the gate's are the same
+    reading. Matches. → `open-pr`.
 
-14. **`open-pr`** — `open-pr` tool is idempotent (checks for an existing PR for
-    the branch first), opens the PR with a body assembled from the ledger digest
+14. **`open-pr`** — the `open-pr` skill is idempotent (checks for an existing PR
+    for the branch first), opens the PR with a body assembled from the ledger digest
     (what changed, what QA ran, the cycle count). `transition(to="done")`.
 
 15. **`run_finished`** — `status: done`, totals: `$3.44`, 57 min, 10 transitions.
@@ -146,8 +154,8 @@ constrained call, logged as `navigator_invoked`.
   mostly picking states and thresholds.
 - **The toolbox gave you (reused, untouched):** `implement`, `review` (=
   run-review), `qa`, `debug-spark`, `debug-transient`, `open-pr` playbooks; the
-  `spark_build`, `spark_run`, `staging_deploy`, `fetch_job_output`,
-  `contract_check`, `open-pr` tools; and the `standard-ticket` machine template
+  `spark-build`, `spark-run`, `staging-deploy`, `contract-check`, and
+  `open-pr` skills; and the `standard-ticket` machine template
   you copied from.
 
 That ratio — a few dozen lines of unique wiring over a fat library of primitives

@@ -62,25 +62,28 @@ Spark/staging credentials and binaries named by the example tools.
 | [`toolbox/config.fnl`](toolbox/config.fnl) | Global defaults: provider, worker/judge/navigator models, budgets, which extensions load. | loop |
 | [`toolbox/playbooks/implement.md`](toolbox/playbooks/implement.md) | Generic implement playbook (== a pi skill). | ~ [`run-plan`](../../pi-extensions/skills/run-plan) |
 | [`toolbox/playbooks/review.md`](toolbox/playbooks/review.md) | Adversarial review; `select_review_model` + four-angle fan-out. | == [`run-review`](../../pi-extensions/skills/run-review) |
-| [`toolbox/playbooks/qa.md`](toolbox/playbooks/qa.md) | Read-only QA; grounded pass/fail via `LOOP_VARS`. Reused by `qa_staging`. | loop |
+| [`toolbox/playbooks/qa.md`](toolbox/playbooks/qa.md) | Grounded, evidence-backed QA. Reused by `qa-staging`. | loop |
 | [`toolbox/playbooks/debug-spark.md`](toolbox/playbooks/debug-spark.md) | Diagnose a *real* pipeline QA failure and fix it; bound to `debug`. | loop |
-| [`toolbox/playbooks/debug-transient.md`](toolbox/playbooks/debug-transient.md) | Transient-vs-real checklist, consumed as a tool via `use_playbook`. | loop |
 | [`toolbox/playbooks/open-pr.md`](toolbox/playbooks/open-pr.md) | Assemble the PR body from the ledger and open/update the PR. | loop |
-| [`toolbox/tools/spark.yaml`](toolbox/tools/spark.yaml) | `scoped-tools` for the Spark pipeline; emit gating `LOOP_VARS`. | [`scoped-tools`](../../pi-extensions/extensions/scoped-tools) |
-| [`toolbox/tools/staging.yaml`](toolbox/tools/staging.yaml) | Deploy/contract/PR tools; safety guards, cycle-scoped idempotency, hidden secrets. | [`scoped-tools`](../../pi-extensions/extensions/scoped-tools) |
-| [`toolbox/tools/ci.yaml`](toolbox/tools/ci.yaml) | Generic CI tools — library item this ticket doesn't bind. | [`scoped-tools`](../../pi-extensions/extensions/scoped-tools) |
-| [`toolbox/tools/mcp.json`](toolbox/tools/mcp.json) | MCP server registry in real `.mcp.json` schema. | [`mcp`](../../pi-extensions/extensions/mcp) |
-| [`toolbox/tools/bin/classify-spark.sh`](toolbox/tools/bin/classify-spark.sh) | The transient/real/unknown taxonomy `fetch_job_output` shells out to; loop stages it under `$PI_AGENT_DIR/bin/`. | loop |
+| [`toolbox/skills/spark-build/`](toolbox/skills/spark-build) | Build + unit-check the pipeline. `build.sh` is also the `implement → review` and `debug → qa-staging` edge check. | pi skill |
+| [`toolbox/skills/spark-run/`](toolbox/skills/spark-run) | Run a job; `classify.sh` owns the transient/real taxonomy and backs all three edges out of `qa-staging` via `--expect`. | pi skill |
+| [`toolbox/skills/staging-deploy/`](toolbox/skills/staging-deploy) | Deploy to a cycle-scoped namespace; validates its own env argument, fetches its own token. | pi skill |
+| [`toolbox/skills/contract-check/`](toolbox/skills/contract-check) | Validate a staging response against the OpenAPI spec; also the `validate-contract → open-pr` check. | pi skill |
+| [`toolbox/skills/open-pr/`](toolbox/skills/open-pr) | Open or update the branch's PR, idempotently. | pi skill |
+| [`toolbox/skills/ci-status/`](toolbox/skills/ci-status) | Generic CI read/wait — a library item this ticket doesn't load. | pi skill |
+| [`toolbox/skills/debug-transient.md`](toolbox/skills/debug-transient.md) | Transient-vs-real checklist; situational know-how the `debug` stage loads. | pi skill |
+| [`toolbox/mcp.json`](toolbox/mcp.json) | MCP server registry in real `.mcp.json` schema. | [`mcp`](../../pi-extensions/extensions/mcp) |
 | [`toolbox/machines/standard-ticket.fnl`](toolbox/machines/standard-ticket.fnl) | Machine template: the plain code-only spine. | loop |
 | [`toolbox/machines/data-pipeline-ticket.fnl`](toolbox/machines/data-pipeline-ticket.fnl) | Machine template PROJ-1487 is derived from. | loop |
 | [`toolbox/ext/transition-tool.ts`](toolbox/ext/transition-tool.ts) | The Worker's transition tool. | loop (vendored) |
 | [`toolbox/ext/verdict-tool.ts`](toolbox/ext/verdict-tool.ts) | The Judge's only tool. | loop (vendored) |
 | [`toolbox/ext/choose-tool.ts`](toolbox/ext/choose-tool.ts) | The Navigator's only tool. | loop (vendored) |
 
-> **"Backed by" matters.** Anything marked with a `pi-extensions` link is an
-> *existing installed package* loop configures, not code it ships — the harness
-> merges `toolbox/tools/*.yaml` into a generated agent dir and points
-> `scoped-tools`/`mcp` at it via `PI_AGENT_DIR` and activates
+> **"Backed by" matters.** Skills use pi's own loader — the harness resolves a
+> name to a path and passes `--skill <path>`; it does not parse or rewrite the
+> format. Anything marked with a `pi-extensions` link is an *existing installed
+> package* loop configures, not code it ships: it stages `mcp.json` into a
+> generated agent dir, points `mcp` at it via `PI_AGENT_DIR`, and activates
 > `review-model-selector` per spawn. Only the three `ext/*.ts` are loop's own.
 > See [docs/04](../docs/04-toolbox.md#these-are-existing-pi-extensions-not-new-loop-code)
 > and [docs/05](../docs/05-orchestration.md).

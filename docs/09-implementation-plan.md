@@ -9,7 +9,9 @@ binary, and it records the four decisions that supersede the earlier docs.
 |---|---|---|
 | Harness language | Node/TS, to match pi | **Rust** (`clap` CLI, `mlua` embedding Lua 5.4) |
 | Machine surface | YAML first, Fennel later ([02](02-language.md)) | **Fennel only.** No YAML machine loader is written. |
-| Fennel style | Full macro DSL (`(stage … (to … :when …))`) | **Plain table** returned by the module; guards are ordinary `fn`s. Macros are a v2 layer over an unchanged IR. |
+| Fennel style | Full macro DSL (`(stage … (to … :when …))`) | **Plain table** returned by the module. Macros are a v2 layer over an unchanged IR. |
+| Gating | `when` guards over "trusted" ledger vars scraped from tool stdout, plus `criteria` | **`:check`** — a command the harness runs itself, exit code decides — plus `criteria`. See below. |
+| Stage tooling | `scoped-tools` YAML, bound per stage by a `--tools` allowlist | **pi skills** (`--no-skills` + `--skill <path>`), resolved local-first. No per-stage tool filtering. |
 | Toolbox location | `~/.loop/` | **`~/.config/loop/`** (authored) + **`~/.local/state/loop/`** (generated) |
 
 Cut from v1, deliberately: persistent sessions (`session: continue|fork`),
@@ -20,25 +22,45 @@ path.
 
 Kept in v1, because they are load-bearing for correctness: the **Judge** and
 **Navigator** agents ([07](07-risks.md) risk #1 — the worker must not grade its
-own homework) and the **scoped-tools / mcp** wiring ([04](04-toolbox.md) — without
-it a stage has no `LOOP_VARS`-emitting tools, so `when` guards have nothing to
-gate on).
+own homework) and the **`:check`** tier ([03](03-ledger.md) — the only signal in
+the system a worker cannot author).
+
+### Why `when` guards and scoped-tools were cut
+
+They were one idea: a tool asserts a fact from a real exit code, prints
+`LOOP_VARS {…}`, the harness scrapes it into the ledger as *trusted*, and a
+Fennel `when` closure gates on it. Wrapping the command in scoped-tools YAML was
+what made the assertion trustworthy.
+
+It did not hold up. The scrape ran over **every** tool result, with no filter on
+which tool produced it — so any stage with `bash` could print the marker itself
+and open its own gate. Claimed artifacts had the same problem: the worker names
+the paths, the harness merely hashes them. Every signal reaching a guard had
+passed through the worker's session.
+
+The fix is not a better scrape. It is to have the **harness run the command
+itself**, out of process, after the stage exits — which is what `:check` is.
+Once gating no longer reads tool stdout, a scoped-tool's `validationCmd` and
+hidden parameters only constrain blast radius, and only on a stage with no
+`bash`. Every stage had `bash`, via the machine-wide default. So the wrapper was
+paying real complexity for a guarantee it never delivered, and skills — which
+the agent can read, and which carry their guardrails in a testable script —
+cover the same ground more honestly.
 
 ## Directory layout
 
 ```
 ~/.config/loop/                  # authored, git-able
   config.fnl                     # global defaults (was loop.config.yaml)
-  playbooks/*.md
-  tools/*.yaml                   # scoped-tools specs
-  tools/mcp.json
+  playbooks/*.md                 # a stage's prompt
+  skills/<name>/SKILL.md         # situational know-how + the scripts beside it
+  mcp.json
   machines/*.fnl                 # machine templates
   ext/{transition,verdict,choose}-tool.ts   # materialized from the binary
 
 ~/.local/state/loop/             # generated, disposable, safe to rm -rf
   agent-dir/                     # exported as PI_AGENT_DIR for every spawn
-    scoped-tools.yaml            # merged from ~/.config/loop/tools/*.yaml
-    mcp.json                     # copied from tools/mcp.json
+    mcp.json                     # copied from ~/.config/loop/mcp.json
   render/<ticket>/               # rendered playbooks + entry messages per spawn
 
 ./.loop/                         # per-ticket, in the project repo
@@ -58,8 +80,8 @@ against `loop-core` alone — no crate in wave 1 depends on another.
 | `loop-core` | The IR: `Machine`, `State`, `Transition`, `Config`, `Event`, `Vars`, and the two traits (`GuardEvaluator`, `AgentRunner`) every other crate is written against. No I/O. | — |
 | `loop-ledger` | JSONL append (fsync per event, tolerant of a trailing partial line), the fold to `RunState`, the artifact store (temp-file + atomic rename + sha256), the rolling digest. | core |
 | `loop-fennel` | `mlua` + vendored `fennel.lua`; loads `config.fnl` / `machine.fnl` → `Machine`; owns the Lua registry of guard closures and implements `GuardEvaluator`. | core |
-| `loop-toolbox` | Playbook resolution (local-first, then toolbox, then inline), `$UPPER_SNAKE` rendering over the context namespace, `tools/*.yaml` → merged `scoped-tools.yaml`, `PI_AGENT_DIR` staging, materializing the three `ext/*.ts` from `include_str!`. | core |
-| `loop-runner` | Spawning `pi` (worker/judge/navigator), parsing the JSONL event stream, extracting `LOOP_TRANSITION` + `LOOP_VARS`, summing `usage.cost`; implements `AgentRunner`. | core |
+| `loop-toolbox` | Playbook and skill resolution (local-first, then toolbox), `$UPPER_SNAKE` rendering over the context namespace, `PI_AGENT_DIR` staging, materializing the three `ext/*.ts` from `include_str!`. | core |
+| `loop-runner` | Spawning `pi` (worker/judge/navigator), parsing the JSONL event stream, extracting `LOOP_TRANSITION`, summing `usage.cost`; implements `AgentRunner`. Also `exec_check`, the harness's own bounded subprocess for a transition `:check`. | core |
 | `loop-engine` | The control loop of [01](01-architecture.md): guard tiers, budgets, cycle caps, navigator caps, `on_fail` handling — plus `validate` (the static linter of [07](07-risks.md) #11). Written against the traits, so it is fully testable with fakes. | core |
 | `loop-cli` | `clap`: `init`, `validate`, `run`, `status`, `resume`, `doctor`. Wires the concrete impls into the engine. | all |
 | `mock-pi` | Test fixture binary: replays a scripted JSONL stream (including crash-mid-stage) so the whole loop is testable deterministically, offline, for $0. | — |
@@ -96,7 +118,7 @@ IR is the contract), every other crate stubbed with its public signatures and
 | T1 | `loop-ledger` | round-trip every event type; fold fixtures incl. crash-resume cases; truncated-final-line tolerance; artifact hash/atomicity |
 | T2 | `loop-fennel` | load the ported `machine.fnl`; guard closures evaluate over `vars`; error messages point at Fennel source; malformed-table rejection |
 | T3 | `loop-toolbox` | local-over-toolbox resolution; `$UPPER_SNAKE` render incl. unknown-`$NAME` passthrough; YAML merge with project-over-global precedence; ext materialization |
-| T4 | `loop-runner` + `mock-pi` | parse a scripted stream → `WorkerResult`; `LOOP_TRANSITION`/`LOOP_VARS` extraction; cost summing; non-zero exit + malformed line handling |
+| T4 | `loop-runner` + `mock-pi` | parse a scripted stream → `WorkerResult`; `LOOP_TRANSITION` extraction; cost summing; non-zero exit + malformed line handling; `exec_check` exit codes, timeout, output truncation |
 | T5 | `loop-engine` | the full control loop against fakes: three guard tiers, `on_fail` retry/route/abort, cycle + navigator caps, budget aborts, `validate` catching each authoring error in [07](07-risks.md) #11 |
 
 **Wave 2 (me):** merge the workspaces, `loop-cli` wiring, end-to-end integration

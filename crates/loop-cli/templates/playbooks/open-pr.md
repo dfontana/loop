@@ -24,7 +24,7 @@ $LEDGER_DIGEST
      the real fix that were resolved) and the contract-match result. Cite the
      evidence artifacts by name.
    - **Notes for the reviewer** — anything the loop surfaced worth a human's eye.
-2. Call `open_pr(title="<ticket>: <one-line summary>", body_file="<the file>")`.
+2. Run the `open-pr` skill with the title and that body file.
    It is idempotent — if a PR already exists for this branch it updates it, so
    this is safe on crash-resume.
 3. Finish with `transition(to="done", rationale="PR #<n> open with populated
@@ -34,5 +34,5 @@ $LEDGER_DIGEST
 - `done` is a terminal state; the transition into it is gated by a Judge checking
   a PR actually exists with a real description — so make the body substantive, not
   a stub.
-- If `open_pr` fails (auth, no remote), `transition(blocked=true, rationale=…)`;
+- If it fails (auth, no remote), `transition(blocked=true, rationale=…)`;
   don't fabricate a PR URL.

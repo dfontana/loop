@@ -347,7 +347,7 @@ mod tests {
         assert!(args.contains(&"--no-builtin-tools".to_string()));
         assert!(args.contains(&"--no-extensions".to_string()));
         // Exactly one `-e`, pointing at verdict-tool.ts — no `read`, no
-        // scoped-tools, nothing else.
+        // the verdict tool, nothing else.
         let e_positions: Vec<usize> = args
             .iter()
             .enumerate()

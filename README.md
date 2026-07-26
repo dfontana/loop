@@ -33,7 +33,7 @@ is a five-minute assembly job, not a build.
 | [docs/01-architecture.md](docs/01-architecture.md) | Components, the control loop, inversion of control, data flow |
 | [docs/02-language.md](docs/02-language.md) | **YAML vs Fennel** for the machine definition — the central authoring decision, with samples |
 | [docs/03-ledger.md](docs/03-ledger.md) | JSONL event schema, folding to current state, crash-resume, artifacts |
-| [docs/04-toolbox.md](docs/04-toolbox.md) | Playbooks (stages-as-skills) vs tools (scoped-tools/MCP), templating, per-stage binding, versioning |
+| [docs/04-toolbox.md](docs/04-toolbox.md) | Playbooks (a stage's prompt) vs skills (situational know-how + scripts), templating, per-stage binding, versioning |
 | [docs/05-orchestration.md](docs/05-orchestration.md) | Spawning `pi` headless, the transition/judge/navigator agents, session models |
 | [docs/06-example-walkthrough.md](docs/06-example-walkthrough.md) | A full Spark-pipeline ticket end to end: machine, spawns, and the ledger trace it produces |
 | [docs/07-risks.md](docs/07-risks.md) | Failure modes and the mitigations the design must carry |
@@ -58,8 +58,8 @@ See [docs/09](docs/09-implementation-plan.md).
 monorepo, not a from-scratch stack. It reuses those packages rather than
 reimplementing them:
 
-- Tools are the [`scoped-tools`](../pi-extensions/extensions/scoped-tools)
-  extension; MCP surfaces are the [`mcp`](../pi-extensions/extensions/mcp)
+- Skills are pi's own (`--skill`), so the toolbox is compatible with pi's skill
+  format; MCP surfaces are the [`mcp`](../pi-extensions/extensions/mcp)
   extension; the `review` stage uses `select_review_model` from
   [`review-model-selector`](../pi-extensions/extensions/review-model-selector).
 - The `implement`/`review` playbooks mirror the
@@ -73,7 +73,8 @@ reimplementing them:
 - **Machine** — the per-ticket definition: states, transitions, per-state model/thinking/tools, and QA cases. One Fennel file (`machine.fnl`) that **references** the task and plan prose (`task.md`, `plan.md`) and each stage's playbook by name/path.
 - **State / Stage** — a node in the machine, bound to a **playbook** that supplies its prompt.
 - **Playbook** — a stage's prompt (a markdown file) plus default model/thinking (essentially a pi *skill*). Resolved **local-first** (`./.loop/playbooks/`, bespoke per ticket) then **toolbox** (`~/.config/loop/playbooks/`, reusable): "how to implement", "how to review", "how to debug Spark errors".
-- **Tool** — a pre-canned capability bound into a stage: a `scoped-tools` YAML command (wrapped HTTP/CLI call), an MCP server, or a playbook invoked as a tool. From the toolbox.
+- **Skill** — situational know-how bound into a stage: a `SKILL.md` plus the scripts beside it, loaded via `pi --skill`. From the toolbox, resolved local-first.
+- **Check** — a command the *harness* runs itself after a stage exits, whose exit code gates a transition. The one signal a worker cannot author, because it never touches the worker's session.
 - **Toolbox** — the portable library of playbooks + tools + machine templates, stored outside any project (`~/.config/loop/`).
 - **Ledger** — append-only JSONL, the event-sourced record of one run. The source of truth for "where are we".
 - **Cycle** — one traversal of a loop (e.g. `qa#3`), with a unique id injected into prompts and tools.

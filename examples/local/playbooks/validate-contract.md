@@ -36,15 +36,18 @@ $LEDGER_DIGEST
 $ENTRY_ADDENDUM
 
 ## How to work
-1. Ensure the branch is deployed to this cycle's namespace (`staging_deploy` is
-   idempotent per cycle — safe to call even if `qa_staging` already deployed).
-2. Run `contract_check` against a representative account path. It emits the
-   authoritative `LOOP_VARS {"contract":{"result":"match"|"mismatch"}}` line the
-   harness gates on — your prose does not decide this.
-3. If `mismatch`, capture the offending response and the specific schema
-   violation as an artifact, then `transition(to="implement", …)`. If `match`,
-   `transition(to="open_pr", …)`.
+1. Ensure the branch is deployed to this cycle's namespace — the deploy skill
+   is idempotent per cycle, so it is safe to run even if `qa-staging` already
+   deployed.
+2. Run the contract-check skill against a representative account path.
+3. If it reports a mismatch, capture the offending response and the specific
+   schema violation as an artifact, then `transition(to="implement", …)`. If it
+   matches, `transition(to="open-pr", …)`.
 
 ## Integrity
-Base the verdict only on `contract_check` output, never on eyeballing the JSON.
-A separate Judge may re-check your evidence.
+Base the verdict only on the check's output, never on eyeballing the JSON.
+
+The `validate-contract → open-pr` edge runs that same check as its transition
+gate, after you exit. So "it matched when I ran it" and "the harness agrees"
+are the same statement — and a mismatch you talked past will simply fail the
+edge.

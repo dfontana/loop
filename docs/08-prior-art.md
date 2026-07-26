@@ -13,7 +13,7 @@ iterates toward a metric. Great demonstration of "agent on a loop with a
 feedback signal", but there's no user-authored graph, no gating structure, no
 QA-against-staging notion, no reusable toolbox. You're generalizing its inner
 loop into an arbitrary, gated, multi-stage graph. *Steal:* the discipline of a
-crisp feedback signal per iteration — our `LOOP_VARS`/`when` gates are that signal
+crisp feedback signal per iteration — our transition `:check` commands are that signal
 made explicit and machine-checkable.
 
 ## Closest conceptual match

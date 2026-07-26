@@ -51,9 +51,9 @@ model/prompt/tools without touching the rest.
                     ┌──────────────────────────────────────────────┐
                     │  pi  (headless worker — non-deterministic)     │
                     │  --print --mode json  --model X:thinking       │
-                    │  --tools <allowlist>  -e <toolbox exts>        │
-                    │  builtin read/edit/write/bash + scoped-tools   │
-                    │  + mcp proxy + injected `transition` tool      │
+                    │  --no-skills --skill <the stage's skills>      │
+                    │  builtin read/edit/write/bash, the mcp proxy,  │
+                    │  and the injected `transition` tool            │
                     └──────────────────────────────────────────────┘
 ```
 

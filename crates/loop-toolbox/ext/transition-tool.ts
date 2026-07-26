@@ -13,7 +13,7 @@
  *   - OPEN: `to` is a free string; the harness routes unknown targets to the
  *     Navigator. More faithful to "the CLI decides validity, else reconcile".
  *
- * This mirrors the scoped-tools pattern: a thin, validated wrapper the harness
+ * A thin, validated wrapper the harness
  * fully controls, so the important decision travels as structured data, never
  * as free-text the harness has to parse out of prose.
  */

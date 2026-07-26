@@ -54,22 +54,42 @@
             :thinking "low"
             :description "Open or update the pull request for this branch."}}
 
+ ;; Two kinds of gate, and the difference matters.
+ ;;
+ ;; A `:check` is a command the HARNESS runs, in its own subprocess, after the
+ ;; stage exits. Exit 0 passes the edge. It is the only signal here a worker
+ ;; cannot author — everything else on the ledger passed through the worker's
+ ;; session first — so put a check on any edge where a mechanical fact settles
+ ;; the question. `test -f`, `cargo test`, `curl | schema-validate`.
+ ;;
+ ;; A `:criteria` is judged by an independent cheap agent that sees the stage's
+ ;; output, its artifacts, and the check's stdout — never the worker's own
+ ;; claim that it succeeded. Use it for what no exit code can decide: "every
+ ;; item in the plan is addressed", "this is a real fix, not a workaround".
+ ;;
+ ;; They compose. The check is a precondition; the criteria is the semantic
+ ;; layer on top. A failed check is not appealable to the Judge.
+ ;;
+ ;; UPGRADE THIS. `:criteria "the suite passed"` is a stopgap — swap in the
+ ;; command that actually runs your suite as a `:check` and let the criteria
+ ;; cover only what the exit code can't.
  :transitions
  [{:from "implement" :to "review"
    :criteria "Every item in the plan is addressed in the diff, the build is green, and no TODO/FIXME markers remain in the changed files."
    :on-fail "retry"}
 
-  ;; `review.result` comes from a tool the review playbook calls, not from the
-  ;; worker's prose — see docs/03 on trusted vars.
-  {:from "review" :to "implement"
-   :when (fn [v] (= v.review.result "changes_requested"))}
+  ;; A failed review isn't a dead end — it routes back to implement with the
+  ;; findings in the ledger digest.
   {:from "review" :to "test"
-   :when (fn [v] (= v.review.result "clean"))}
+   :criteria "The review found no blocking defects: no correctness bugs, no missing error handling on the changed paths, and no unaddressed review findings from a previous cycle."
+   :on-fail {:route "implement"}}
 
-  {:from "test" :to "implement"
-   :when (fn [v] (= v.test.result "fail"))}
   {:from "test" :to "open-pr"
-   :when (fn [v] (= v.test.result "pass"))}
+   ;; Replace with the command that runs your suite — then the gate stops
+   ;; depending on the stage reporting honestly.
+   ;; :check "cargo test --quiet"
+   :criteria "The test suite was actually run in this stage (the output is present, not asserted), and it passed. A suite that was not run is a fail."
+   :on-fail {:route "implement"}}
 
   {:from "open-pr" :to "done"
    :criteria "A pull request exists for this branch with a populated description."}]
