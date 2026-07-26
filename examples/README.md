@@ -1,27 +1,19 @@
 # examples
 
-A complete worked ticket, PROJ-1487: add a churn-score field to a Spark
-retention pipeline and expose it through the API.
+A complete worked ticket, PROJ-1487: add a churn-score field to a Spark retention pipeline and expose it through the API.
 
 The two directories here **are** the two-location model, not just a grouping:
 
-- **[`local/`](local/)** — a ticket's `./.loop/`. Unique to PROJ-1487, thrown
-  away when the ticket is done.
-- **[`toolbox/`](toolbox/)** — the portable `~/.config/loop/`. Reused across every
-  ticket, untouched by this one.
+- **[`local/`](local/)** — a ticket's `./.loop/`. Unique to PROJ-1487, thrown away when the ticket is done.
+- **[`toolbox/`](toolbox/)** — the portable `~/.config/loop/`. Reused across every ticket, untouched by this one.
 
-A stage's `:playbook` resolves local-first, then toolbox, so `local/` wins on a
-name clash. Everything referenced here is present: no file points at a playbook,
-skill, or script that doesn't exist.
+A stage's `:playbook` resolves local-first, then toolbox, so `local/` wins on a name clash. Everything referenced here is present: no file points at a playbook, skill, or script that doesn't exist.
 
-See [Where configuration lives](../docs/03-customizing.md#where-configuration-lives)
-for the rules these directories illustrate.
+See [Where configuration lives](../docs/03-customizing.md#where-configuration-lives) for the rules these directories illustrate.
 
 ## Verify it
 
-This is a static smoke test — it needs only Rust and Cargo, and never invokes pi,
-staging, or any external service. It stages both locations in a disposable
-sandbox, validates the machine, then folds the recorded ledger:
+This is a static smoke test — it needs only Rust and Cargo, and never invokes pi, staging, or any external service. It stages both locations in a disposable sandbox, validates the machine, then folds the recorded ledger:
 
 ```sh
 fixture="$(mktemp -d)"
@@ -56,14 +48,12 @@ PROJ-1487 — 6 states, 10 transitions, no problems found
 }
 ```
 
-Actually *running* this machine would additionally need pi, the `warehouse` MCP
-server in your own `~/.pi/agent/mcp.json`, and the Spark and staging credentials
-the example's skills reach for.
+Actually _running_ this machine would additionally need pi, the `warehouse` MCP server in your own `~/.pi/agent/mcp.json`, and the Spark and staging credentials the example's skills reach for.
 
 ## `local/` — the per-ticket `./.loop/`
 
 | File | What it is |
-|---|---|
+| --- | --- |
 | [`machine.fnl`](local/machine.fnl) | The ticket machine — what `loop run` loads. Six states, ten transitions, two declared loops. |
 | [`task.md`](local/task.md) | The ticket, as prose. Reaches playbooks as `$TASK`. |
 | [`plan.md`](local/plan.md) | The plan. Reaches playbooks as `$PLAN`. |
@@ -73,12 +63,12 @@ the example's skills reach for.
 ## `toolbox/` — the reusable `~/.config/loop/`
 
 | Entry | What it is |
-|---|---|
+| --- | --- |
 | [`config.fnl`](toolbox/config.fnl) | Global defaults: provider, worker/judge/navigator models, budgets, context. |
 | [`playbooks/implement.md`](toolbox/playbooks/implement.md) | Generic implement stage. |
 | [`playbooks/review.md`](toolbox/playbooks/review.md) | Adversarial review, four-angle fan-out. |
 | [`playbooks/qa.md`](toolbox/playbooks/qa.md) | Grounded, evidence-backed QA. Reused by `qa-staging`. |
-| [`playbooks/debug-spark.md`](toolbox/playbooks/debug-spark.md) | Diagnose a *real* pipeline failure and fix it. |
+| [`playbooks/debug-spark.md`](toolbox/playbooks/debug-spark.md) | Diagnose a _real_ pipeline failure and fix it. |
 | [`playbooks/open-pr.md`](toolbox/playbooks/open-pr.md) | Assemble the PR body from the ledger and open it. |
 | [`skills/spark-build/`](toolbox/skills/spark-build) | Build and unit-check the pipeline. `build.sh` also backs two edge checks. |
 | [`skills/spark-run/`](toolbox/skills/spark-run) | Run a job. `classify.sh` owns the transient-vs-real taxonomy and backs all three edges out of `qa-staging`. |
@@ -93,23 +83,12 @@ the example's skills reach for.
 
 ## What is loop's own, and what isn't
 
-`ext/*.ts` are loop's own code. They are compiled into the binary and written
-here automatically; you never author them, and hand edits are reverted on the
-next `loop init` or `loop run`.
+`ext/*.ts` are loop's own code. They are compiled into the binary and written here automatically; you never author them, and hand edits are reverted on the next `loop init` or `loop run`.
 
-Everything else in `toolbox/` is ordinary content you write. Skills use pi's own
-loader — loop resolves a name to a path and passes `--skill <path>`, and never
-parses the format. There is no `mcp.json` here on purpose: a state's `:mcp` names
-servers out of *your* `~/.pi/agent/mcp.json`, and the stage connects them itself.
+Everything else in `toolbox/` is ordinary content you write. Skills use pi's own loader — loop resolves a name to a path and passes `--skill <path>`, and never parses the format. There is no `mcp.json` here on purpose: a state's `:mcp` names servers out of _your_ `~/.pi/agent/mcp.json`, and the stage connects them itself.
 
 ## Suggested reading order
 
-1. [`local/machine.fnl`](local/machine.fnl) — skim it for the shape of the graph.
-   The three-way fail routing out of `qa-staging` is the part worth slowing down
-   for: a transient flake retries in place with backoff, a real failure spawns
-   the debugger, a pass moves on — and each branch is decided by one script's
-   exit code rather than by an agent's judgment.
+1. [`local/machine.fnl`](local/machine.fnl) — skim it for the shape of the graph. The three-way fail routing out of `qa-staging` is the part worth slowing down for: a transient flake retries in place with backoff, a real failure spawns the debugger, a pass moves on — and each branch is decided by one script's exit code rather than by an agent's judgment.
 2. `loop diagram` on it, to see that graph drawn.
-3. [`local/ledger.jsonl`](local/ledger.jsonl) top to bottom, next to
-   [How a run works](../docs/02-how-it-works.md). The trace is the fastest way to
-   feel how the pieces move.
+3. [`local/ledger.jsonl`](local/ledger.jsonl) top to bottom, next to [How a run works](../docs/02-how-it-works.md). The trace is the fastest way to feel how the pieces move.

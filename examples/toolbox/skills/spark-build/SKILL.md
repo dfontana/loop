@@ -5,13 +5,10 @@ description: Build and unit-check the Spark pipeline for the current working tre
 
 # Build the pipeline
 
-Run `./build.sh` from this skill's directory. It compiles the pipeline and runs
-the fast unit checks, printing the tail of `build.log` on failure.
+Run `./build.sh` from this skill's directory. It compiles the pipeline and runs the fast unit checks, printing the tail of `build.log` on failure.
 
 ```
 bash "$(dirname "$0")/build.sh"
 ```
 
-A non-zero exit means the tree is red. Fix it before you transition — the
-harness runs its own build check on the way out of this stage, so a red tree
-will fail the edge regardless of what you report.
+A non-zero exit means the tree is red. Fix it before you transition — the harness runs its own build check on the way out of this stage, so a red tree will fail the edge regardless of what you report.

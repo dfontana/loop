@@ -12,4 +12,5 @@ the plan is addressed", and a Judge can only check that against a list.
 3.
 
 ## Out of scope
+
 -

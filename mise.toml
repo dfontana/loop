@@ -1,0 +1,27 @@
+[tools]
+rust = { version = "1.88.0", components = ["rustfmt", "clippy"] }
+lua = "5.4.8"
+"npm:prettier" = "3.9.6"
+
+[tools."http:fennel"]
+version = "1.5.3"
+url = "https://fennel-lang.org/downloads/fennel-{{ version }}"
+bin = "fennel"
+
+[tasks.test]
+description = "Build the workspace and run all Rust tests"
+run = [
+    "cargo build --workspace",
+    "cargo test --workspace",
+]
+
+[tasks.format]
+description = "Format Rust and Markdown sources"
+run = [
+    "cargo fmt",
+    "prettier --write --prose-wrap never '**/*.md'",
+]
+
+[tasks.lint]
+description = "Run all linters"
+run = "cargo clippy"
