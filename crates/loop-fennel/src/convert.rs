@@ -71,9 +71,12 @@
 //!  :default-mcp []
 //!  :pi-extensions ["mcp" "review-model-selector"]
 //!  :budgets {:usd 15 :wallclock-s 7200 :max-transitions 60}
-//!  :context "digest" :digest-last-n 8
+//!  :digest-last-n 8
 //!  :transition-mode "constrained"}
 //! ```
+//!
+//! `:provider` is the base every role falls back to: a role table that names
+//! its own wins, one that doesn't inherits this.
 //!
 //! Every key is optional; whatever is absent keeps its [`loop_core::Config::defaults`]
 //! value. Kebab-case in Fennel maps to snake_case in Rust (`:max-invocations` →
@@ -83,9 +86,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use loop_core::{
-    Budgets, Check, Config, ContextMode, CoreError, DEFAULT_CHECK_TIMEOUT_S, Defaults, LoopSpec,
-    Machine, ModelChoice, ModelSpec, OnExhausted, OnFail, PlaybookRef, QaCase, Result, State,
-    StateId, Thinking, Transition, TransitionMode,
+    Budgets, Check, Config, CoreError, DEFAULT_CHECK_TIMEOUT_S, Defaults, LoopSpec, Machine,
+    ModelChoice, ModelSpec, OnExhausted, OnFail, PlaybookRef, QaCase, Result, State, StateId,
+    Thinking, Transition, TransitionMode,
 };
 
 // ── small Lua table readers ────────────────────────────────────────────────
@@ -625,9 +628,17 @@ pub fn machine_from_table(
 /// Overlay an evaluated config table onto [`Config::defaults`].
 pub fn config_from_table(table: &mlua::Table, base: Config) -> Result<Config> {
     let provider = get_str(table, "provider")?.unwrap_or(base.provider);
-    let worker = model_spec_overlay(table, "worker", &base.worker)?;
-    let judge = model_spec_overlay(table, "judge", &base.judge)?;
-    let navigator = model_spec_overlay(table, "navigator", &base.navigator)?;
+    // The top-level `:provider` is the base of all three role chains, not a
+    // stored-and-ignored default: it is applied *under* each role table, so a
+    // role naming its own still wins and a toolbox switching providers only
+    // has to say so once.
+    let with_provider = |spec: &ModelSpec| ModelSpec {
+        provider: provider.clone(),
+        ..spec.clone()
+    };
+    let worker = model_spec_overlay(table, "worker", &with_provider(&base.worker))?;
+    let judge = model_spec_overlay(table, "judge", &with_provider(&base.judge))?;
+    let navigator = model_spec_overlay(table, "navigator", &with_provider(&base.navigator))?;
     let navigator_max_invocations =
         parse_navigator_max_invocations(table, base.navigator_max_invocations)?;
     let default_skills = get_str_vec(table, "default-skills")?.unwrap_or(base.default_skills);
@@ -643,18 +654,16 @@ pub fn config_from_table(table: &mlua::Table, base: Config) -> Result<Config> {
         },
     };
 
-    let context = match get_str(table, "context")? {
-        None => base.context,
-        Some(s) => match s.as_str() {
-            "digest" => ContextMode::Digest,
-            "full" => ContextMode::Full,
-            other => {
-                return Err(CoreError::machine(format!(
-                    "unknown `:context` value `{other}`"
-                )));
-            }
-        },
-    };
+    // `:context` was a two-valued knob whose second value was never wired to
+    // anything. Rather than leave it accepted-and-ignored, say so where the
+    // author will see it.
+    if get_value(table, "context")? != mlua::Value::Nil {
+        return Err(CoreError::machine(
+            "`:context` was removed — the rolling digest is the only continuity channel between \
+             stages; interpolate `$LEDGER_DIGEST` in a playbook and tune `:digest-last-n`"
+                .to_string(),
+        ));
+    }
 
     let digest_last_n = get_u32(table, "digest-last-n")?
         .map(|n| n as usize)
@@ -672,7 +681,6 @@ pub fn config_from_table(table: &mlua::Table, base: Config) -> Result<Config> {
         default_mcp,
         pi_extensions,
         budgets,
-        context,
         digest_last_n,
         transition_mode,
         pi_bin: base.pi_bin,

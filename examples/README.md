@@ -49,7 +49,7 @@ PROJ-1487 — 6 states, 10 transitions, no problems found
   "navigator_invocations": 0,
   "status": "done",
   "totals": {
-    "cost_usd": 3.44,
+    "cost_usd": 3.58,
     "transitions": 10,
     "wallclock_s": 3414
   }

@@ -40,6 +40,7 @@ impl CliStage<'_> {
         cycle: u32,
         attempt: u32,
         entry_addendum: Option<&str>,
+        crashed: bool,
     ) -> Result<Context> {
         let events = self.events()?;
         let folded =
@@ -56,6 +57,7 @@ impl CliStage<'_> {
             prev_state,
             cycle,
             attempt,
+            crashed,
             ledger_digest: digest::render(&events, self.config.digest_last_n),
             entry_addendum: entry_addendum.map(str::to_string),
             qa_cases: self.machine.qa_cases.clone(),
@@ -125,6 +127,7 @@ impl StageBuilder for CliStage<'_> {
         cycle: u32,
         attempt: u32,
         entry_addendum: Option<&str>,
+        crashed: bool,
     ) -> Result<StagePlan> {
         let state = self
             .machine
@@ -142,7 +145,7 @@ impl StageBuilder for CliStage<'_> {
         let skill_paths = self.toolbox.resolve_skills(&skills, &self.machine.dir)?;
         let mcp = self.machine.resolve_mcp(state, &self.config.default_mcp);
 
-        let context = self.context(state_id, cycle, attempt, entry_addendum)?;
+        let context = self.context(state_id, cycle, attempt, entry_addendum, crashed)?;
         let vars = context.to_map();
         let body = render::substitute(&playbook.body, &vars);
         let system_prompt_path = self.toolbox.write_rendered(&context, &body, "system")?;
@@ -173,7 +176,6 @@ impl StageBuilder for CliStage<'_> {
             transition_mode: self.machine.transition_mode,
             mcp,
             ext_paths: vec![self.ext.transition.clone()],
-            pi_extensions: self.config.pi_extensions.clone(),
             cwd: self.config.paths.project_dir.clone(),
             session_id: Some(self.session_id(state_id, cycle, attempt)),
             env,
@@ -240,7 +242,7 @@ impl loop_core::CheckRunner for CliStage<'_> {
         cycle: u32,
         attempt: u32,
     ) -> Result<loop_core::CheckOutcome> {
-        let context = self.context(from, cycle, attempt, None)?;
+        let context = self.context(from, cycle, attempt, None, false)?;
         let cmd = render::substitute(&check.cmd, &context.to_map());
         let env: Vec<(String, String)> = [
             ("TICKET_ID", context.ticket_id.clone()),

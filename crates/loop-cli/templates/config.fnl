@@ -4,6 +4,7 @@
 ;; A per-ticket .loop/machine.fnl overrides anything here, and may only
 ;; *tighten* the budgets, never loosen them.
 
+;; The provider every role falls back to; a role naming its own wins.
 {:provider "anthropic"
 
  ;; The Worker: does the actual stage work. A machine state overrides this.
@@ -29,17 +30,19 @@
  ;; off. Usually empty for the same reason :default-skills is.
  :default-mcp []
 
- ;; Installed pi-extension packages activated per spawn. These are NOT files
- ;; loop ships — they live in your pi extension settings. `mcp` has to be here
- ;; for any :mcp list to mean anything; `loop validate` says so if it isn't.
+ ;; What you have installed in pi, declared so `loop validate` can catch a
+ ;; mismatch. This does NOT turn anything on: pi has no flag for enabling an
+ ;; installed extension by name, and a worker spawn simply leaves pi's own
+ ;; discovery alone. `mcp` has to be listed for any :mcp list to mean
+ ;; anything; `loop validate` says so if it isn't.
  :pi-extensions ["mcp" "review-model-selector"]
 
  ;; Hard stops the harness enforces. Not suggestions to the agent.
  :budgets {:usd 15 :wallclock-s 7200 :max-transitions 60}
 
- ;; How much prior context each stage sees: "digest" (a rolling summary the
- ;; harness assembles) or "full" (every worker output verbatim; expensive).
- :context "digest"
+ ;; How many recent committed transitions the rolling digest lists. That
+ ;; digest is the whole continuity channel between stages, and it only
+ ;; reaches an agent where a playbook interpolates $LEDGER_DIGEST.
  :digest-last-n 8
 
  ;; "constrained" — the transition tool's `to` is an enum of the current

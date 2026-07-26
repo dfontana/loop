@@ -44,6 +44,9 @@ enum Command {
         /// Stop after this many transitions, on top of the machine's budget.
         #[arg(long)]
         max_transitions: Option<u32>,
+        /// Echo each pi spawn's stderr as it runs.
+        #[arg(long, short = 'v')]
+        verbose: bool,
     },
     /// Pretty-print the folded ledger: where the run is and how it got there.
     Status {
@@ -54,6 +57,9 @@ enum Command {
     Resume {
         #[arg(long)]
         max_transitions: Option<u32>,
+        /// Echo each pi spawn's stderr as it runs.
+        #[arg(long, short = 'v')]
+        verbose: bool,
     },
     /// Check the environment: pi on PATH, toolbox staged, machine present.
     Doctor,
@@ -78,8 +84,14 @@ fn try_main() -> anyhow::Result<()> {
         Command::Init { ticket, template } => commands::init(paths, &ticket, &template),
         Command::Validate => commands::validate(paths),
         Command::Diagram => commands::diagram(paths),
-        Command::Run { max_transitions } => commands::run(paths, max_transitions, false),
-        Command::Resume { max_transitions } => commands::run(paths, max_transitions, true),
+        Command::Run {
+            max_transitions,
+            verbose,
+        } => commands::run(paths, max_transitions, false, verbose),
+        Command::Resume {
+            max_transitions,
+            verbose,
+        } => commands::run(paths, max_transitions, true, verbose),
         Command::Status { json } => commands::status(paths, json),
         Command::Doctor => commands::doctor(paths),
     }

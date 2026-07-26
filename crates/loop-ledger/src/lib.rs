@@ -27,11 +27,20 @@ pub struct Ledger {
     /// Kept open in append mode across calls: every write lands at EOF (even
     /// under concurrent writers) and we avoid an open/close per event.
     file: File,
+    /// Run time already on the ledger when this handle opened it. Zero for a
+    /// fresh run; on `loop resume` it is the last line's `elapsed_s`.
+    elapsed_offset_s: u64,
+    /// When this handle opened, for the live half of the accumulator.
+    opened_at: std::time::Instant,
 }
 
 impl Ledger {
     /// Open or create the ledger at `path`, creating parent directories and
     /// repairing a torn trailing line left by a crash mid-write.
+    ///
+    /// Also reads the run clock forward: whatever the last whole line says the
+    /// run has already burned becomes this handle's offset, so a resumed run
+    /// keeps counting rather than starting a fresh time budget.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
         if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
@@ -44,11 +53,29 @@ impl Ledger {
             .append(true)
             .open(&path)
             .io_ctx(format!("opening ledger {}", path.display()))?;
-        Ok(Self { path, file })
+        let mut ledger = Self {
+            path,
+            file,
+            elapsed_offset_s: 0,
+            opened_at: std::time::Instant::now(),
+        };
+        ledger.elapsed_offset_s = ledger
+            .read_all()?
+            .last()
+            .map(|e| e.elapsed_s)
+            .unwrap_or_default();
+        ledger.opened_at = std::time::Instant::now();
+        Ok(ledger)
     }
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Run seconds accumulated before this handle opened. The engine starts
+    /// its own budget clock here so the two agree on what "elapsed" means.
+    pub fn elapsed_offset_s(&self) -> u64 {
+        self.elapsed_offset_s
     }
 
     /// Whether any events have been written — i.e. a run has started here.
@@ -79,7 +106,10 @@ impl LedgerSink for Ledger {
     /// unparseable fragment of it) — [`Ledger::read_all`] treats that trailing
     /// fragment as a crash artifact, not corruption.
     fn append(&mut self, payload: EventPayload) -> Result<Event> {
-        let event = Event::now(payload);
+        let event = Event::stamped(
+            payload,
+            self.elapsed_offset_s + self.opened_at.elapsed().as_secs(),
+        );
         let mut line = serde_json::to_string(&event)?;
         line.push('\n');
         self.file
@@ -257,7 +287,6 @@ mod tests {
                 artifacts: vec![ArtifactRef {
                     name: "diff".into(),
                     path: ".loop/artifacts/implement-1-diff.patch".into(),
-                    sha256: "deadbeef".into(),
                 }],
                 usage: Usage {
                     tokens: 100,
@@ -279,6 +308,10 @@ mod tests {
                 criteria: GuardOutcome::Pass,
                 check_output: Some("build: OK".into()),
                 judge_rationale: Some("Looks fine.".into()),
+                usage: Usage {
+                    tokens: 900,
+                    cost_usd: 0.02,
+                },
             },
             EventPayload::NavigatorInvoked {
                 from: "implement".into(),
@@ -505,6 +538,46 @@ mod tests {
         let err = ledger.read_all().unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("corrupt"), "unexpected message: {msg}");
+    }
+
+    /// The run clock has to survive the process that was keeping it. A second
+    /// handle over the same file — which is exactly what `loop resume` opens —
+    /// must pick the accumulator up from the last line rather than restart it,
+    /// or every resumed run gets a fresh wallclock budget.
+    #[test]
+    fn a_reopened_ledger_resumes_the_run_clock() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ledger.jsonl");
+        {
+            let mut ledger = Ledger::open(&path).unwrap();
+            assert_eq!(ledger.elapsed_offset_s(), 0);
+            // Forge a line claiming an hour of run time, the way a long first
+            // session would have left it.
+            let mut line = serde_json::to_string(&Event {
+                ts: "2026-07-24T00:00:00.000Z".into(),
+                elapsed_s: 3600,
+                payload: EventPayload::Note {
+                    text: "an hour in".into(),
+                },
+            })
+            .unwrap();
+            line.push('\n');
+            ledger.file.write_all(line.as_bytes()).unwrap();
+            ledger.file.sync_data().unwrap();
+        }
+
+        let mut resumed = Ledger::open(&path).unwrap();
+        assert_eq!(resumed.elapsed_offset_s(), 3600);
+        let event = resumed
+            .append(EventPayload::Note {
+                text: "after resume".into(),
+            })
+            .unwrap();
+        assert!(
+            event.elapsed_s >= 3600,
+            "the resumed run must keep counting from 3600, got {}",
+            event.elapsed_s
+        );
     }
 
     #[test]

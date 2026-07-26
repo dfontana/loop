@@ -134,6 +134,8 @@ pub fn validate(paths: Paths) -> Result<()> {
         &|r| toolbox.resolve_playbook(r, &machine.dir).is_ok(),
         &|name| toolbox.resolve_skill(name, &machine.dir).is_ok(),
         config.pi_extensions.iter().any(|e| e == "mcp"),
+        &config.default_skills,
+        &config.default_mcp,
     );
 
     let errors = diagnostics
@@ -171,7 +173,12 @@ pub fn diagram(paths: Paths) -> Result<()> {
     Ok(())
 }
 
-pub fn run(paths: Paths, max_transitions: Option<u32>, resuming: bool) -> Result<()> {
+pub fn run(
+    paths: Paths,
+    max_transitions: Option<u32>,
+    resuming: bool,
+    verbose: bool,
+) -> Result<()> {
     // The VM is only needed to *load* the machine. It used to have to outlive
     // the run because it held the `when` guard closures; the IR is plain data
     // now, so it can be dropped here.
@@ -199,8 +206,12 @@ pub fn run(paths: Paths, max_transitions: Option<u32>, resuming: bool) -> Result
     }
 
     let mut ledger = Ledger::open(&ledger_path)?;
+    // Read before the engine borrows the ledger: the time budget bounds the
+    // run, so a resume starts its clock at what the interrupted session
+    // already burned rather than at zero.
+    let elapsed_offset_s = ledger.elapsed_offset_s();
     let artifacts = ArtifactStore::new(paths.artifacts_dir(), &paths.project_dir);
-    let runner = PiRunner::new(&config);
+    let runner = PiRunner::new(&config).verbose(verbose);
     let stage = CliStage {
         machine: &machine,
         config: &config,
@@ -218,6 +229,7 @@ pub fn run(paths: Paths, max_transitions: Option<u32>, resuming: bool) -> Result
         artifacts: &artifacts,
         stage: &stage,
         started_at: None,
+        elapsed_offset_s,
     };
     let outcome = engine.run()?;
 
@@ -246,8 +258,24 @@ pub fn status(paths: Paths, json: bool) -> Result<()> {
     use loop_core::LedgerSink;
     let ledger = Ledger::open(paths.ledger_file())?;
     let events = ledger.read_all()?;
+    // An empty ledger still has to answer in the mode it was asked in: this
+    // branch used to print prose in both, so `loop status --json` on a fresh
+    // project handed a parser a sentence.
     if events.is_empty() {
-        println!("no run yet — `loop run` starts one");
+        if json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "current": null,
+                    "status": null,
+                    "cycles": {},
+                    "totals": loop_core::Totals::default(),
+                    "navigator_invocations": 0,
+                }))?
+            );
+        } else {
+            println!("no run yet — `loop run` starts one");
+        }
         return Ok(());
     }
     // Fold against the machine's real loop heads when the machine still loads,
@@ -332,19 +360,23 @@ pub fn doctor(paths: Paths) -> Result<()> {
         &format!("`{}` on PATH", config.pi_bin),
         "install pi, or set LOOP_PI_BIN",
     );
+    // Every label names the path actually tested. Printing `~/.config/loop/…`
+    // while checking somewhere else is worst precisely when you are running
+    // doctor to find out where loop is looking.
     check(
         paths.config_file().exists(),
-        "~/.config/loop/config.fnl",
+        &paths.config_file().display().to_string(),
         "run `loop init <TICKET>` to scaffold the toolbox",
     );
+    let transition_tool = paths.ext_dir().join("transition-tool.ts");
     check(
-        paths.ext_dir().join("transition-tool.ts").exists(),
-        "vendored ext materialized",
-        "run `loop init` to write them",
+        transition_tool.exists(),
+        &transition_tool.display().to_string(),
+        "run `loop init` to write the vendored ext",
     );
     check(
         paths.machine_file().exists(),
-        ".loop/machine.fnl",
+        &paths.machine_file().display().to_string(),
         "run `loop init <TICKET>` in this project",
     );
 

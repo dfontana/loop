@@ -238,9 +238,9 @@ fn resume_after_a_torn_write_re_enters_and_completes() {
 
     // A run killed by SIGKILL partway through writing `worker_output`.
     fx.write_ledger(&[
-        r#"{"ts":"2026-07-24T22:00:00.000Z","type":"run_started","ticket":"TINY-1","machine_hash":"x","budgets":{"usd":null,"wallclock_s":null,"max_transitions":null}}"#.into(),
-        r#"{"ts":"2026-07-24T22:00:01.000Z","type":"state_entered","state":"implement","cycle":1,"attempt":1,"session_id":null,"model":"claude-sonnet-5","thinking":"medium","skills":[],"mcp":[]}"#.into(),
-        r#"{"ts":"2026-07-24T22:00:02.000Z","type":"worker_ou"#.into(),
+        r#"{"ts":"2026-07-24T22:00:00.000Z","elapsed_s":0,"type":"run_started","ticket":"TINY-1","machine_hash":"x","budgets":{"usd":null,"wallclock_s":null,"max_transitions":null}}"#.into(),
+        r#"{"ts":"2026-07-24T22:00:01.000Z","elapsed_s":41,"type":"state_entered","state":"implement","cycle":1,"attempt":1,"session_id":null,"model":"claude-sonnet-5","thinking":"medium","skills":[],"mcp":[]}"#.into(),
+        r#"{"ts":"2026-07-24T22:00:02.000Z","elapsed_s":95,"type":"worker_ou"#.into(),
     ]);
 
     // `status` must survive the torn tail — you reach for it precisely here.
@@ -403,6 +403,76 @@ fn a_failing_check_overrules_a_worker_that_claims_success() {
 
 /// A two-state machine with no toolbox dependencies, for the tests that care
 /// about harness mechanics rather than the shipped template's shape.
+/// `--json` has to be JSON in every state the command can be in, including the
+/// one you hit first. The empty-ledger message used to print before the mode
+/// branch, so `loop status --json` on a fresh project handed a parser prose.
+#[test]
+fn status_json_is_parseable_on_an_empty_ledger() {
+    let fx = Fixture::new(r#"{"steps":[]}"#);
+    fx.run(&["init", "TINY-1"]);
+    fx.machine(TINY_MACHINE);
+
+    let out = fx.run(&["status", "--json"]);
+    assert!(out.status.success(), "{}", combined(&out));
+    let parsed: serde_json::Value = serde_json::from_str(&stdout(&out))
+        .unwrap_or_else(|e| panic!("not JSON: {e}: {}", stdout(&out)));
+    assert!(parsed["current"].is_null());
+    assert!(parsed["status"].is_null());
+    assert_eq!(parsed["totals"]["transitions"], 0);
+
+    // The human view still says something a human wants to read.
+    let human = fx.run(&["status"]);
+    assert!(stdout(&human).contains("no run yet"), "{}", stdout(&human));
+}
+
+/// The time budget bounds the *run*, not the process. A resumed run used to
+/// get a brand-new wallclock allowance, so an hour-long run could be resumed
+/// into a second hour under a one-hour budget, indefinitely.
+#[test]
+fn a_resumed_run_keeps_the_wallclock_it_had_already_spent() {
+    let fx = Fixture::new(
+        r#"{"steps":[
+          {"match":{"role":"worker"},"repeat":true,"summary":"did the work",
+           "usage":{"tokens":10,"cost_usd":0.01},
+           "transition":{"to":"done","rationale":"done"}},
+          {"match":{"role":"judge"},"repeat":true,"verdict":{"pass":true,"rationale":"done"}}
+        ]}"#,
+    );
+    fx.run(&["init", "TINY-1"]);
+    fx.machine(TINY_MACHINE);
+
+    // An interrupted run that had already burned an hour.
+    fx.write_ledger(&[
+        r#"{"ts":"2026-07-24T22:00:00.000Z","elapsed_s":0,"type":"run_started","ticket":"TINY-1","machine_hash":"x","budgets":{"usd":null,"wallclock_s":null,"max_transitions":null}}"#.into(),
+        r#"{"ts":"2026-07-24T23:00:00.000Z","elapsed_s":3600,"type":"state_entered","state":"implement","cycle":1,"attempt":1,"session_id":null,"model":"claude-sonnet-5","thinking":"medium","skills":[],"mcp":[]}"#.into(),
+    ]);
+
+    // `status` reports the run's clock, not zero, before anything resumes.
+    let status = fx.run(&["status", "--json"]);
+    let parsed: serde_json::Value = serde_json::from_str(&stdout(&status)).unwrap();
+    assert_eq!(parsed["totals"]["wallclock_s"], 3600);
+
+    let resume = fx.run(&["resume"]);
+    assert!(resume.status.success(), "{}", combined(&resume));
+
+    let events = fx.ledger();
+    // Everything the resumed process appended — the two pre-existing lines are
+    // the fixture's own — carries the clock forward instead of restarting it.
+    for e in events.iter().skip(2) {
+        assert!(
+            e["elapsed_s"].as_u64().unwrap() >= 3600,
+            "the resumed run must keep counting from what it had spent: {e}"
+        );
+    }
+    assert_eq!(events.last().unwrap()["status"], "done");
+    assert!(
+        events.last().unwrap()["totals"]["wallclock_s"]
+            .as_u64()
+            .unwrap()
+            >= 3600
+    );
+}
+
 const TINY_MACHINE: &str = r#"
 {:ticket "TINY-1"
  :task "Make the thing."

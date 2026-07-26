@@ -88,7 +88,10 @@ impl RunState {
 /// - `transition_committed` sets `current = to`; the caller tells cycles apart
 ///   via [`fold_with_loop_heads`] — plain `fold` counts a re-entry of any state
 ///   as a cycle bump for that state, which is the machine-agnostic reading.
-/// - `worker_output` and `navigator_invoked` accumulate `totals` and counters.
+/// - `worker_output`, `guard_checked` (the Judge's spend), and
+///   `navigator_invoked` accumulate `totals` and counters.
+/// - every event carries `elapsed_s`, so `totals.wallclock_s` is the last
+///   value seen rather than something only `run_finished` knows.
 /// - `run_finished` sets `status`; nothing after it is read.
 /// - `resume` is derived from the tail — see [`ResumePoint`].
 ///
@@ -122,6 +125,11 @@ pub fn fold_with_loop_heads(events: &[Event], is_loop_head: &dyn Fn(&str) -> boo
     let mut tail = Tail::Initial;
 
     for e in events {
+        // Wallclock is carried on the envelope rather than derived from `ts`,
+        // so it survives a resume without charging the run for the hours it
+        // spent stopped. Monotone by construction: every append stamps the
+        // accumulator, so the last line seen is the total so far.
+        rs.totals.wallclock_s = e.elapsed_s;
         match &e.payload {
             EventPayload::RunStarted { .. } => {}
             EventPayload::StateEntered { state, cycle, .. } => {
@@ -174,7 +182,9 @@ pub fn fold_with_loop_heads(events: &[Event], is_loop_head: &dyn Fn(&str) -> boo
                     proposal,
                 };
             }
-            EventPayload::GuardChecked { .. } => {}
+            EventPayload::GuardChecked { usage, .. } => {
+                rs.totals.cost_usd += usage.cost_usd;
+            }
             EventPayload::NavigatorInvoked { from, usage, .. } => {
                 rs.navigator_invocations += 1;
                 *rs.navigator_by_state.entry(from.clone()).or_insert(0) += 1;
@@ -287,7 +297,6 @@ mod tests {
             artifacts: vec![ArtifactRef {
                 name: "diff".into(),
                 path: format!(".loop/artifacts/{state}-{cycle}-diff.patch"),
-                sha256: "abc123".into(),
             }],
             usage: Usage {
                 tokens: 100,
@@ -315,6 +324,7 @@ mod tests {
             criteria: GuardOutcome::Skip,
             check_output: None,
             judge_rationale: None,
+            usage: Usage::default(),
         })
     }
 
@@ -541,6 +551,7 @@ mod entry_head_tests {
     fn ev(payload: EventPayload) -> Event {
         Event {
             ts: "2026-07-24T00:00:00.000Z".into(),
+            elapsed_s: 0,
             payload,
         }
     }

@@ -23,12 +23,18 @@ pub struct StagePlan {
 
 pub trait StageBuilder {
     /// Render the playbook, write it out, and assemble the spawn spec.
+    ///
+    /// `crashed` marks a re-entry that follows a stage which died mid-flight
+    /// rather than a clean arrival, and reaches the playbook as `$CRASHED`. A
+    /// stage doing something non-idempotent — opening a PR, kicking a deploy —
+    /// is the reason it is worth telling apart from a first attempt.
     fn build_stage(
         &self,
         state: &StateId,
         cycle: u32,
         attempt: u32,
         entry_addendum: Option<&str>,
+        crashed: bool,
     ) -> Result<StagePlan>;
 
     /// Assemble the Judge spawn for a `criteria` guard. The digest passed on

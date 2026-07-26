@@ -50,6 +50,11 @@ pub struct Engine<'a> {
     pub stage: &'a dyn StageBuilder,
     /// Wall-clock start, for the budget check. `None` starts it at `run()`.
     pub started_at: Option<std::time::Instant>,
+    /// Run seconds this ledger had already accumulated before this process
+    /// opened it — `Ledger::elapsed_offset_s`. The time budget bounds the
+    /// *run*, not the process, so a resume has to start counting from what the
+    /// interrupted session burned rather than from zero.
+    pub elapsed_offset_s: u64,
 }
 
 /// How many times a stage may die mid-flight before the run escalates rather
@@ -154,7 +159,7 @@ impl Engine<'_> {
     }
 
     fn elapsed_s(&self) -> u64 {
-        self.started_at.map(|t| t.elapsed().as_secs()).unwrap_or(0)
+        self.elapsed_offset_s + self.started_at.map(|t| t.elapsed().as_secs()).unwrap_or(0)
     }
 
     fn totals_now(&self, rs: &RunState) -> Totals {
@@ -414,6 +419,7 @@ impl Engine<'_> {
                     criteria: GuardOutcome::Skip,
                     check_output: None,
                     judge_rationale: None,
+                    usage: loop_core::Usage::default(),
                 })?;
                 return self.escalate(rs, from);
             }
@@ -447,6 +453,7 @@ impl Engine<'_> {
             criteria: report.criteria,
             check_output: report.check_output.clone(),
             judge_rationale: report.judge_rationale.clone(),
+            usage: report.usage,
         })?;
 
         if !report.passed() {
@@ -462,7 +469,7 @@ impl Engine<'_> {
         &mut self,
         rs: &RunState,
         state: StateId,
-        _crashed: bool,
+        crashed: bool,
     ) -> Result<Option<Outcome>> {
         if self.machine.is_terminal(&state) {
             // Not every terminal is a success. Landing on the escalation state
@@ -492,9 +499,9 @@ impl Engine<'_> {
         let events = self.ledger.read_all()?;
         let entry_addendum = pending_entry_addendum(&events, &state);
 
-        let plan = self
-            .stage
-            .build_stage(&state, cycle, attempt, entry_addendum.as_deref())?;
+        let plan =
+            self.stage
+                .build_stage(&state, cycle, attempt, entry_addendum.as_deref(), crashed)?;
 
         self.ledger.append(EventPayload::StateEntered {
             state: state.clone(),
@@ -525,12 +532,20 @@ impl Engine<'_> {
         // `loop resume` behave identically to this in-process retry.
         if !result.exit_ok {
             let attempts_so_far = rs.attempts_of(&state, cycle) + 1;
+            let mut detail = format!(
+                "worker process failed (attempt {attempts_so_far} of {MAX_CRASH_ATTEMPTS})"
+            );
+            // Whatever the spawn said on its way out. Without it the ledger
+            // records that a stage died and nothing about why, and debugging
+            // means reproducing the spawn by hand.
+            if !result.stderr_tail.trim().is_empty() {
+                detail.push_str("; pi stderr tail:\n");
+                detail.push_str(&result.stderr_tail);
+            }
             self.ledger.append(EventPayload::Error {
                 state: Some(state.clone()),
                 kind: ErrorKind::Transient,
-                detail: format!(
-                    "worker process failed (attempt {attempts_so_far} of {MAX_CRASH_ATTEMPTS})"
-                ),
+                detail,
             })?;
             if attempts_so_far >= MAX_CRASH_ATTEMPTS {
                 self.ledger.append(EventPayload::Note {
@@ -547,10 +562,31 @@ impl Engine<'_> {
         // Capture artifacts *before* `worker_output` — if a crash lands between
         // them, re-entry redoes the stage and nothing already-durable is lost
         // (docs/02-how-it-works.md).
+        //
+        // A claim is worker-authored, so an unusable one — a path that was
+        // never written, a typo, a file outside the project root — is an
+        // ordinary event, not a harness fault. Record it, drop that one claim,
+        // and let the stage's other artifacts through: the missing evidence
+        // shows up where it actually matters, at the guard that wanted it,
+        // and routes through the edge's `on_fail` like any other shortfall.
+        // Propagating the error instead killed the run process outright and
+        // left the ledger tail at `state_entered`.
         let mut artifacts = Vec::new();
         if let Some(proposal) = &result.proposal {
             for claim in &proposal.artifacts {
-                artifacts.push(self.artifacts.capture(&state, cycle, claim)?);
+                match self.artifacts.capture(&state, cycle, claim) {
+                    Ok(art) => artifacts.push(art),
+                    Err(e) => {
+                        self.ledger.append(EventPayload::Error {
+                            state: Some(state.clone()),
+                            kind: ErrorKind::Transient,
+                            detail: format!(
+                                "dropped artifact claim `{}` -> `{}`: {e}",
+                                claim.name, claim.path
+                            ),
+                        })?;
+                    }
+                }
             }
         }
 
@@ -612,21 +648,35 @@ fn last_worker_output_for(events: &[Event], state: &str) -> (String, Vec<Artifac
 }
 
 /// The Navigator's entry-prompt addendum for the state it just routed into,
-/// stashed in its `navigator_invoked` event — the one immediately preceding
-/// the `transition_committed` that landed us here.
+/// stashed in its `navigator_invoked` event.
+///
+/// Scans back from the commit through *that commit's routing episode* — the
+/// run of events since the previous commit or state entry — rather than
+/// looking only at the immediately preceding line. The Navigator's event is
+/// not always adjacent: a routed target with a guard on the edge puts a
+/// `guard_checked` between the two, which is the ordinary case, and reading
+/// only `commit_idx - 1` meant the note survived exactly when it was useless
+/// (a route to the terminal escalation state, which never renders a playbook).
+///
+/// The episode bound is what keeps this from reaching back into an earlier
+/// cycle and re-delivering a stale note the run has long since moved past.
 fn pending_entry_addendum(events: &[Event], state: &str) -> Option<String> {
     let commit_idx = events.iter().rposition(
         |e| matches!(&e.payload, EventPayload::TransitionCommitted { to, .. } if to == state),
     )?;
-    if commit_idx == 0 {
-        return None;
+    for e in events[..commit_idx].iter().rev() {
+        match &e.payload {
+            EventPayload::NavigatorInvoked {
+                chosen_to,
+                entry_prompt,
+                ..
+            } if chosen_to == state => return entry_prompt.clone(),
+            // The start of this episode: anything older belongs to a previous
+            // decision and its addendum was either already delivered or was
+            // never meant for this entry.
+            EventPayload::TransitionCommitted { .. } | EventPayload::StateEntered { .. } => break,
+            _ => {}
+        }
     }
-    match &events[commit_idx - 1].payload {
-        EventPayload::NavigatorInvoked {
-            chosen_to,
-            entry_prompt,
-            ..
-        } if chosen_to == state => entry_prompt.clone(),
-        _ => None,
-    }
+    None
 }

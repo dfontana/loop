@@ -461,11 +461,9 @@ name = "loop-ledger"
 version = "0.1.0"
 dependencies = [
  "chrono",
- "hex",
  "loop-core",
  "serde",
  "serde_json",
- "sha2",
  "tempfile",
 ]
 

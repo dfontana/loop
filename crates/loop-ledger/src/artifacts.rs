@@ -1,11 +1,16 @@
-//! Artifact capture: temp-file + atomic rename + sha256, so a crash never
-//! leaves a half-written file a later stage might read.
+//! Artifact capture: temp-file + atomic rename, so a crash never leaves a
+//! half-written file a later stage might read.
+//!
+//! What capture buys is a *snapshot*. The worker names a file in the working
+//! tree; the store copies it under a `<state>-<cycle>-<name>` key, and that
+//! copy is what `$ARTIFACT_DIFF` and the digest's artifact table point at, so
+//! cycle two rewriting `diff.patch` does not retroactively change what cycle
+//! one handed off. Nothing here hashes: no consumer ever checked a hash, and
+//! recording one would assert an integrity guarantee the system does not make.
 
 use std::fs;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
-
-use sha2::{Digest, Sha256};
 
 use loop_core::{ArtifactClaim, ArtifactRef, ArtifactSink, CoreError, IoContext, Result};
 
@@ -26,35 +31,6 @@ impl ArtifactStore {
 
     pub fn root(&self) -> &Path {
         &self.root
-    }
-
-    /// Verify a previously captured artifact still matches its recorded hash.
-    pub fn verify(&self, art: &ArtifactRef) -> Result<bool> {
-        let path = self.resolve_recorded_path(&art.path);
-        let bytes = match fs::read(&path) {
-            Ok(b) => b,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-            Err(e) => {
-                return Err(CoreError::io(
-                    format!("reading artifact {}", path.display()),
-                    e,
-                ));
-            }
-        };
-        Ok(sha256_hex(&bytes) == art.sha256)
-    }
-
-    /// `art.path` is stored project-relative where possible (see `capture`);
-    /// tolerate an absolute path too, since nothing stops a caller from
-    /// building an `ArtifactRef` by hand for a test or a `verify` from another
-    /// project layout.
-    fn resolve_recorded_path(&self, recorded: &str) -> PathBuf {
-        let p = Path::new(recorded);
-        if p.is_absolute() {
-            p.to_path_buf()
-        } else {
-            self.project_root.join(p)
-        }
     }
 
     /// Resolve a worker's claimed source path against the project root and
@@ -88,13 +64,11 @@ impl ArtifactStore {
 }
 
 impl ArtifactSink for ArtifactStore {
-    /// Copy a worker-claimed file into the store as `<state>-<cycle>-<name>`,
-    /// writing a sibling `.sha256`.
+    /// Copy a worker-claimed file into the store as `<state>-<cycle>-<name>`.
     fn capture(&self, state: &str, cycle: u32, claim: &ArtifactClaim) -> Result<ArtifactRef> {
         let source = self.resolve_claimed_source(&claim.path)?;
         let bytes =
             fs::read(&source).io_ctx(format!("reading artifact source {}", source.display()))?;
-        let hash = sha256_hex(&bytes);
 
         // `state` and `claim.name` both come from the worker's `transition`
         // call (untrusted) — sanitize before they become path components, so
@@ -109,14 +83,9 @@ impl ArtifactSink for ArtifactStore {
         let dest_path = self.root.join(&dest_name);
         write_atomic(&self.root, &dest_path, &bytes)?;
 
-        let sidecar_name = format!("{dest_name}.sha256");
-        let sidecar_path = self.root.join(&sidecar_name);
-        write_atomic(&self.root, &sidecar_path, hash.as_bytes())?;
-
         Ok(ArtifactRef {
             name: claim.name.clone(),
             path: relativize(&self.project_root, &dest_path),
-            sha256: hash,
         })
     }
 }
@@ -171,13 +140,6 @@ fn write_atomic(dir: &Path, dest: &Path, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
-/// Hex sha256 of a byte slice.
-pub fn sha256_hex(bytes: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(bytes);
-    hex::encode(hasher.finalize())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -189,20 +151,7 @@ mod tests {
     }
 
     #[test]
-    fn sha256_hex_matches_known_vectors() {
-        // Standard NIST-style test vectors for SHA-256.
-        assert_eq!(
-            sha256_hex(b""),
-            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-        );
-        assert_eq!(
-            sha256_hex(b"hello world"),
-            "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
-        );
-    }
-
-    #[test]
-    fn capture_hashes_content_and_writes_sidecar() {
+    fn capture_copies_the_claimed_file_into_the_store() {
         let project = tempfile::tempdir().unwrap();
         fs::create_dir_all(project.path().join("work")).unwrap();
         let src = project.path().join("work").join("diff.patch");
@@ -216,52 +165,63 @@ mod tests {
         let art = store.capture("implement", 1, &claim).unwrap();
 
         assert_eq!(art.name, "diff");
-        assert_eq!(art.sha256, sha256_hex(b"some diff content"));
         assert_eq!(art.path, ".loop/artifacts/implement-1-diff");
 
         let dest = project.path().join(&art.path);
         assert_eq!(fs::read(&dest).unwrap(), b"some diff content");
-
-        let sidecar = project
-            .path()
-            .join(".loop/artifacts/implement-1-diff.sha256");
-        assert_eq!(fs::read_to_string(&sidecar).unwrap(), art.sha256);
-
-        assert!(store.verify(&art).unwrap());
     }
 
+    /// The point of copying rather than recording the claimed path: the
+    /// snapshot keeps meaning what it meant when the stage handed it off, even
+    /// after a later cycle rewrites the file it came from.
     #[test]
-    fn verify_detects_tampering() {
+    fn a_captured_snapshot_survives_the_source_being_rewritten() {
         let project = tempfile::tempdir().unwrap();
         let src = project.path().join("diff.patch");
-        fs::write(&src, b"original").unwrap();
+        fs::write(&src, b"cycle one").unwrap();
+
         let store = store_in(project.path());
-        let art = store
+        let claim = ArtifactClaim {
+            name: "diff".into(),
+            path: "diff.patch".into(),
+        };
+        let first = store.capture("implement", 1, &claim).unwrap();
+
+        fs::write(&src, b"cycle two").unwrap();
+        let second = store.capture("implement", 2, &claim).unwrap();
+
+        assert_ne!(first.path, second.path);
+        assert_eq!(
+            fs::read(project.path().join(&first.path)).unwrap(),
+            b"cycle one"
+        );
+        assert_eq!(
+            fs::read(project.path().join(&second.path)).unwrap(),
+            b"cycle two"
+        );
+    }
+
+    /// A claim naming a file that isn't there is the common worker mistake, so
+    /// it has to come back as an ordinary `Err` the engine can record — not a
+    /// panic and not something that escapes to kill the run.
+    #[test]
+    fn a_claim_naming_a_missing_file_is_an_error_not_a_panic() {
+        let project = tempfile::tempdir().unwrap();
+        let store = store_in(project.path());
+        let err = store
             .capture(
                 "implement",
                 1,
                 &ArtifactClaim {
                     name: "diff".into(),
-                    path: "diff.patch".into(),
+                    path: "nope/never-written.patch".into(),
                 },
             )
-            .unwrap();
-
-        let dest = project.path().join(&art.path);
-        fs::write(&dest, b"tampered!").unwrap();
-        assert!(!store.verify(&art).unwrap());
-    }
-
-    #[test]
-    fn verify_missing_file_returns_false_not_error() {
-        let project = tempfile::tempdir().unwrap();
-        let store = store_in(project.path());
-        let art = ArtifactRef {
-            name: "diff".into(),
-            path: ".loop/artifacts/implement-1-diff".into(),
-            sha256: "whatever".into(),
-        };
-        assert!(!store.verify(&art).unwrap());
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("never-written.patch"),
+            "the error must name the claim: {err}"
+        );
     }
 
     #[test]

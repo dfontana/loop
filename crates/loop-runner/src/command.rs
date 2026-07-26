@@ -227,7 +227,6 @@ mod tests {
             transition_mode: TransitionMode::Constrained,
             mcp: vec!["linear".into()],
             ext_paths: vec![PathBuf::from("/tmp/ext/transition-tool.ts")],
-            pi_extensions: vec!["mcp".into()],
             cwd: PathBuf::from("/tmp/project"),
             session_id: Some("PROJ-1487-implement-1".into()),
             env: vec![("TICKET_ID".into(), "PROJ-1487".into())],

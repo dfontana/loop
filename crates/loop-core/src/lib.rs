@@ -14,7 +14,7 @@ pub mod machine;
 pub mod runner;
 pub mod sink;
 
-pub use config::{Config, ContextMode, Paths};
+pub use config::{Config, Paths};
 pub use context::Context;
 pub use error::{CoreError, IoContext, Result};
 pub use event::{

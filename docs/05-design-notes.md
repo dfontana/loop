@@ -2,8 +2,8 @@
 
 Every other doc in this set describes what `loop` does and how to drive it. This
 one is the argument: why the system is shaped this way, what each choice costs,
-and which parts are still wrong. If you are trying to change `loop` rather than
-use it, start here.
+what was tried and taken back out, and which limits come with it. If you are
+trying to change `loop` rather than use it, start here.
 
 ## The problem
 
@@ -73,7 +73,7 @@ injected tools](02-how-it-works.md#the-three-injected-tools).)
 **The Judge does not share the Worker's context.** It is a separate process with
 its own model, `--no-session`, no builtin tools, no extensions, no skills, and
 exactly one tool to call. It is handed the Worker's summary and the artifact
-paths and hashes as *evidence* — not the Worker's proposed target, not its
+paths as *evidence* — not the Worker's proposed target, not its
 argument for advancing, and no ability to go look at anything else. It judges
 what it was given, against criteria written by you rather than by the stage it is
 judging. Be honest about the boundary: the summary is still Worker-authored, so
@@ -115,9 +115,9 @@ deliberately low: a Navigator that keeps firing is not a routing problem, it is 
 machine whose graph does not match the work, and escalating to a human is the
 correct answer to that.
 
-The cost we accept here: the Judge's tokens are not counted against the run's
-dollar budget (gap 4 below), so a chatty criteria tier is spend you only see
-after the fact.
+The Judge's tokens land on its `guard_checked` event and count against the run's
+dollar budget like any other spend, which is the only way a criteria-heavy
+machine can be bounded by the same number that bounds a Worker-heavy one.
 
 ## Why tools instead of prose
 
@@ -185,8 +185,17 @@ and the failure is not a crash, it is a run that resumes at the wrong point.
 The event schema is a compatibility surface with no version marker — no `seq`,
 no run id, no schema field; ordering is file order. Today that is fine because
 nothing has shipped and back-compat shims were deliberately deleted rather than
-carried (see below). It will stop being fine the first time someone has a ledger
-they care about, and a version field is cheaper to add now than to infer later.
+carried (see below): a schema change is simply a change, and old ledgers stop
+loading. It will stop being fine the first time someone has a ledger they care
+about, and a version field is cheaper to add then than to infer later.
+
+The envelope carries one field beyond `ts` and the payload: `elapsed_s`, the
+run's accumulated wallclock. It is there because time is the one budget the
+ledger cannot reconstruct — timestamps include the hours a run sat interrupted,
+so a resumed run computing elapsed from `ts` would be instantly over budget,
+and a resumed run computing it from its own process start would have no budget
+at all. Carrying the accumulator forward on every append is what makes
+`:wallclock-s` bound the run rather than the session.
 
 And resume granularity is per-event, which means an interrupted stage re-runs
 from the top at the next attempt number rather than picking up mid-work. That is
@@ -313,6 +322,21 @@ current design is a correction rather than a first draft.
   before an early schema change would still fold. Nothing had shipped, so no such
   ledger existed; it was deleted rather than carried forward as a permanent
   apology.
+- **`:context "full"`.** A config key with two values, one of which was never
+  wired to anything: the digest path was unconditional, so `full` silently got
+  you `digest`. Rather than implement a second continuity channel nobody had
+  asked for, the key is gone and setting it is an error that points at
+  `$LEDGER_DIGEST`. The rolling digest is the channel; `:digest-last-n` is the
+  knob.
+- **Artifact hashing.** Captures recorded a sha256 and wrote a `.sha256`
+  sidecar. Nothing ever checked either: the Judge cannot open a file, and no
+  consumption path re-verified. A hash nobody checks is not integrity, it is a
+  claim about integrity — so it went, and what remains is the property capture
+  actually provides, which is a *snapshot* under a stable per-cycle name.
+- **A `pi_extensions` field on the Worker spec.** It was assembled per spawn and
+  read by nothing, because pi has no flag for enabling an installed extension by
+  name. The config key survives as a declaration the linter reads; the plumbing
+  that pretended to act on it does not.
 
 ## Prior art
 
@@ -373,58 +397,42 @@ plan→implement→review→fix loop into a user-authored machine and the coordi
 out of the session into a CLI with a ledger — so control flow becomes
 inspectable, budgetable, and resumable across crashes.
 
-## Known gaps
+## Limits we accept
 
-Verified defects and limitations in the current implementation. They are grouped
-by kind but numbered continuously; none of them is a feature.
+Not defects — consequences of choices made above, listed so nobody has to
+rediscover them by being surprised.
 
-1. **Unimplemented — `:context "full"`.** The context mode is parsed and stored
-   but never read; the digest path is unconditional. Setting `full` changes
-   nothing, so a stage that needs more history has to interpolate it from the
-   playbook.
-2. **Unimplemented — `:pi-extensions` activates nothing.** It is stored but never
-   turned into a spawn flag; extension loading is pi's ambient discovery. Its
-   only real effect is one `loop validate` diagnostic, so treat it as a
-   declaration, not a switch.
-3. **Bug — `$ENTRY_ADDENDUM` is usually dropped.** The lookup requires the
-   Navigator event to sit immediately before the commit, but a guarded route
-   inserts a guard event between them. It survives only when the target is the
-   escalation state, which is terminal — so in practice the Navigator's
-   get-back-on-track note never reaches a stage.
-4. **Accepted — Judge cost is invisible to the dollar budget.** Guard events
-   carry no usage, so criteria-heavy machines spend more than the budget
-   accounts for.
-5. **Accepted — wallclock resets on `loop resume`.** The clock is per-process, so
-   a resumed run gets a fresh time budget regardless of how long the original
-   ran.
-6. **Bug — `status --json` can print non-JSON.** An empty ledger produces a
-   human-readable "no run yet" line in both modes, which breaks any script that
-   pipes the JSON output into a parser.
-7. **Bug — a bad artifact path kills the run process.** If a Worker claims a path
-   that does not exist, canonicalization fails and the error propagates out of
-   the engine: no error event, no run-finished event, ledger tail left at state
-   entry. A later `resume` re-runs the stage, so it is recoverable, but the
-   process death is unhandled.
-8. **Bug — `loop doctor` hardcodes one config path in its label.** Under a
-   custom config directory the check reports a path it did not test, which is
-   actively misleading when you are debugging exactly that.
-9. **Gap — `loop validate` does not check global default skills.** Skills that
-   come from the global config are validated as an empty list, so a typo there
-   surfaces at run time instead of at lint time.
-10. **Gap — artifact hashes are never re-verified.** The store can verify a
-    recorded hash, but nothing calls it at consumption time; a later stage
-    reading an artifact path gets whatever is on disk now.
-11. **Accepted — pi's stderr is discarded.** The verbose path is hardcoded off,
-    so a pi crash surfaces as a non-zero exit and a transient error event with
-    no diagnostic text. Debugging a spawn failure means reproducing it by hand.
-12. **Gap — the crash flag on resume is ignored.** A stage re-entered after a
-    crash is treated identically to a clean entry, so there is no way for a
-    playbook to know it is a retry-after-death rather than a normal attempt.
-13. **Dead code — the local-skills path helper has no caller.** Skills resolve
-    against the machine directory; the helper is a leftover and a trap for anyone
-    reading resolution order from the paths module.
-14. **Gap — `config.fnl`'s top-level `:provider` has no reader.** The `--provider`
-    flag is always taken from the per-role model spec, and the resolution chain
-    bottoms out at `:worker` / `:judge` / `:navigator` rather than at the
-    top-level key. Setting it alone changes nothing; see
-    [`config.fnl`](03-customizing.md#configfnl--global-defaults).
+**A stage is the unit of recovery.** Nothing checkpoints inside a stage, so an
+interrupted one re-runs from the top at the next attempt number. That is what
+makes **stage idempotency an authoring requirement**: an `open-pr` stage checks
+for an existing PR, a deploy is keyed on something stable. The harness helps as
+much as it honestly can — `$CRASHED` tells a playbook it is re-entering after a
+death — but it cannot make a non-idempotent stage safe.
+
+**Budgets are sampled between stages.** The check happens at stage entry, before
+a spawn. A single Worker that runs for three hours under a two-hour
+`:wallclock-s` is not interrupted; it is noticed when it finishes. Bounding
+*within* a stage would mean killing an agent mid-edit, which trades a budget
+overrun for a corrupted working tree.
+
+**The ledger has no version marker.** No `seq`, no run id, no schema field;
+ordering is file order. A schema change is just a change, and ledgers written
+before it stop loading. That is a deliberate pre-launch position, not an
+oversight — see the note under [the ledger](#why-an-append-only-ledger).
+
+**`loop validate`'s terminal-reachability ignores `on_fail: route` edges.** The
+reverse walk covers declared `:transitions` only, so a state whose only way
+forward is a guard-failure route reads as having no path to a terminal. Cycle
+detection already special-cases routes; reachability does not, and the
+false positive is louder than the false negative would be.
+
+**Skills scope instructions, not capability.** Covered in full above: a stage
+that was not given the deploy skill can still deploy, because `bash` is not
+withheld. The containment is the Judge and Navigator spawns and the
+harness-run `check`, not the skill list.
+
+**Artifacts are snapshots, not verified evidence.** The harness copies what a
+Worker claims and records the path. It does not hash, re-verify, or inspect the
+contents, and the Judge — having no tools — cannot open one. An artifact is a
+durable hand-off between stages and a record for a human. What actually gates a
+transition is a `check`'s exit code and the Judge's reading of the summary.

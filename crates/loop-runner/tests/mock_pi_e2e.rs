@@ -128,7 +128,6 @@ fn mock_pi_drives_worker_judge_navigator_and_a_crash() {
         transition_mode: TransitionMode::Constrained,
         mcp: vec![],
         ext_paths: vec![tmp.path().join("transition-tool.ts")],
-        pi_extensions: vec![],
         cwd: tmp.path().to_path_buf(),
         session_id: Some("PROJ-1-implement-1".into()),
         env: vec![],

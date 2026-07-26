@@ -27,7 +27,7 @@ fn run_with_checks(
 ) -> Outcome {
     let cfg = config();
     let artifacts = FakeArtifacts;
-    let stage = FakeStageBuilder { machine };
+    let stage = FakeStageBuilder::new(machine);
     let mut engine = Engine {
         machine,
         config: &cfg,
@@ -37,6 +37,7 @@ fn run_with_checks(
         artifacts: &artifacts,
         stage: &stage,
         started_at: None,
+        elapsed_offset_s: 0,
     };
     engine.run().expect("engine run should not error")
 }
@@ -666,7 +667,7 @@ fn wallclock_budget_aborts() {
     let mut ledger = FakeLedger::default();
     let cfg = config();
     let artifacts = FakeArtifacts;
-    let stage = FakeStageBuilder { machine: &m };
+    let stage = FakeStageBuilder::new(&m);
     let checks = FakeChecks::default();
     let mut engine = Engine {
         machine: &m,
@@ -677,6 +678,7 @@ fn wallclock_budget_aborts() {
         artifacts: &artifacts,
         stage: &stage,
         started_at: Some(std::time::Instant::now() - std::time::Duration::from_secs(10)),
+        elapsed_offset_s: 0,
     };
     let outcome = engine.run().unwrap();
     assert_eq!(outcome.status, RunStatus::Aborted);
@@ -749,7 +751,7 @@ fn validate_catches_missing_entry_state() {
     let mut m = base_machine();
     m.entry = "nope".into();
     m.terminals.insert("done".into());
-    let diags = crate::validate(&m, &always_resolves, &|_| true, true);
+    let diags = crate::validate(&m, &always_resolves, &|_| true, true, &[], &[]);
     assert!(diags.iter().any(|d| d.message.contains("entry state")));
 }
 
@@ -759,7 +761,7 @@ fn validate_catches_dangling_transition_targets() {
     m.entry = "a".into();
     m.states.insert("a".into(), state("a"));
     m.transitions.push(edge("a", "nowhere"));
-    let diags = crate::validate(&m, &always_resolves, &|_| true, true);
+    let diags = crate::validate(&m, &always_resolves, &|_| true, true, &[], &[]);
     assert!(
         diags
             .iter()
@@ -775,7 +777,7 @@ fn validate_catches_unreachable_state() {
     m.states.insert("a".into(), state("a"));
     m.states.insert("island".into(), state("island"));
     m.transitions.push(edge("a", "done"));
-    let diags = crate::validate(&m, &always_resolves, &|_| true, true);
+    let diags = crate::validate(&m, &always_resolves, &|_| true, true, &[], &[]);
     assert!(diags.iter().any(|d| d.message.contains("unreachable")));
 }
 
@@ -787,7 +789,7 @@ fn validate_catches_no_path_to_terminal() {
     m.states.insert("a".into(), state("a"));
     m.states.insert("dead_end".into(), state("dead_end"));
     m.transitions.push(edge("a", "dead_end"));
-    let diags = crate::validate(&m, &always_resolves, &|_| true, true);
+    let diags = crate::validate(&m, &always_resolves, &|_| true, true, &[], &[]);
     assert!(
         diags
             .iter()
@@ -802,7 +804,7 @@ fn validate_catches_unresolved_playbook() {
     m.terminals.insert("done".into());
     m.states.insert("a".into(), state("a"));
     m.transitions.push(edge("a", "done"));
-    let diags = crate::validate(&m, &never_resolves, &|_| true, true);
+    let diags = crate::validate(&m, &never_resolves, &|_| true, true, &[], &[]);
     assert!(diags.iter().any(|d| d.message.contains("does not resolve")));
 }
 
@@ -815,7 +817,7 @@ fn validate_catches_loop_head_never_re_entered() {
     m.transitions.push(edge("a", "done"));
     m.loops
         .push(loop_spec("orphan", &["a"], 3, OnExhausted::Escalate));
-    let diags = crate::validate(&m, &always_resolves, &|_| true, true);
+    let diags = crate::validate(&m, &always_resolves, &|_| true, true, &[], &[]);
     assert!(diags.iter().any(|d| d.message.contains("never re-entered")));
 }
 
@@ -827,7 +829,7 @@ fn validate_catches_escalation_state_not_a_terminal() {
     m.escalation_state = Some("a".into());
     m.states.insert("a".into(), state("a"));
     m.transitions.push(edge("a", "done"));
-    let diags = crate::validate(&m, &always_resolves, &|_| true, true);
+    let diags = crate::validate(&m, &always_resolves, &|_| true, true, &[], &[]);
     assert!(
         diags
             .iter()
@@ -846,7 +848,7 @@ fn validate_rejects_duplicate_edges_between_the_same_pair() {
     m.states.insert("a".into(), state("a"));
     m.transitions.push(judged_edge("a", "done", "first"));
     m.transitions.push(judged_edge("a", "done", "second"));
-    let diags = crate::validate(&m, &always_resolves, &|_| true, true);
+    let diags = crate::validate(&m, &always_resolves, &|_| true, true, &[], &[]);
     assert!(
         diags
             .iter()
@@ -870,11 +872,71 @@ fn validate_reports_a_skill_that_does_not_resolve() {
     m.transitions
         .push(judged_edge("qa-staging", "done", "looks correct"));
 
-    let diags = crate::validate(&m, &always_resolves, &|name| name != "contract-check", true);
+    let diags = crate::validate(
+        &m,
+        &always_resolves,
+        &|name| name != "contract-check",
+        true,
+        &[],
+        &[],
+    );
     assert!(
         diags
             .iter()
             .any(|d| d.severity == crate::Severity::Error && d.message.contains("contract-check")),
+        "got: {diags:?}"
+    );
+}
+
+/// A stage loads the union of the config's `:default-skills`, the machine's,
+/// and the state's — so that union is what has to lint. Checking only the
+/// machine's layer left a typo in the global toolbox config to surface as a
+/// failed spawn mid-run, which is the one place `validate` exists to prevent.
+#[test]
+fn validate_checks_skills_that_come_from_the_global_config() {
+    let mut m = base_machine();
+    m.entry = "implement".into();
+    m.terminals.insert("done".into());
+    m.states.insert("implement".into(), state("implement"));
+    m.transitions
+        .push(judged_edge("implement", "done", "looks correct"));
+
+    let defaults = vec!["hose-typo".to_string()];
+    let diags = crate::validate(
+        &m,
+        &always_resolves,
+        &|name| name != "hose-typo",
+        true,
+        &defaults,
+        &[],
+    );
+    let d = diags
+        .iter()
+        .find(|d| d.message.contains("hose-typo"))
+        .unwrap_or_else(|| panic!("expected a diagnostic for the default skill: {diags:?}"));
+    assert_eq!(d.severity, crate::Severity::Error);
+    assert!(
+        d.message.contains("config.fnl"),
+        "the diagnostic must say where the name came from: {}",
+        d.message
+    );
+}
+
+/// Same reasoning for MCP: a `:default-mcp` server with no `mcp` extension in
+/// the spawn is the identical misconfiguration, just declared one layer up.
+#[test]
+fn validate_checks_mcp_servers_that_come_from_the_global_config() {
+    let mut m = base_machine();
+    m.entry = "implement".into();
+    m.terminals.insert("done".into());
+    m.states.insert("implement".into(), state("implement"));
+    m.transitions
+        .push(judged_edge("implement", "done", "looks correct"));
+
+    let default_mcp = vec!["warehouse".to_string()];
+    let diags = crate::validate(&m, &always_resolves, &|_| true, false, &[], &default_mcp);
+    assert!(
+        diags.iter().any(|d| d.message.contains("MCP servers")),
         "got: {diags:?}"
     );
 }
@@ -894,7 +956,7 @@ fn validate_reports_named_mcp_servers_without_the_mcp_extension() {
     m.transitions
         .push(judged_edge("qa-staging", "done", "looks correct"));
 
-    let diags = crate::validate(&m, &always_resolves, &|_| true, false);
+    let diags = crate::validate(&m, &always_resolves, &|_| true, false, &[], &[]);
     assert!(
         diags
             .iter()
@@ -904,7 +966,7 @@ fn validate_reports_named_mcp_servers_without_the_mcp_extension() {
 
     // With the extension present, an unverifiable server name is not an error:
     // loop never reads the user's mcp.json and has nothing to check it against.
-    let ok = crate::validate(&m, &always_resolves, &|_| true, true);
+    let ok = crate::validate(&m, &always_resolves, &|_| true, true, &[], &[]);
     assert!(!ok.iter().any(|d| d.message.contains("MCP")), "got: {ok:?}");
 }
 
@@ -920,7 +982,7 @@ fn validate_warns_on_an_edge_with_no_check_and_no_criteria() {
     m.states.insert("a".into(), state("a"));
     m.transitions.push(edge("a", "done"));
 
-    let diags = crate::validate(&m, &always_resolves, &|_| true, true);
+    let diags = crate::validate(&m, &always_resolves, &|_| true, true, &[], &[]);
     assert!(
         diags.iter().any(|d| d.severity == crate::Severity::Warning
             && d.message.contains("committed unexamined")),
@@ -938,7 +1000,7 @@ fn validate_does_not_warn_on_a_guarded_edge() {
     m.transitions
         .push(judged_edge("a", "done", "the work is done"));
 
-    let diags = crate::validate(&m, &always_resolves, &|_| true, true);
+    let diags = crate::validate(&m, &always_resolves, &|_| true, true, &[], &[]);
     assert!(
         !diags
             .iter()
@@ -971,7 +1033,7 @@ fn validate_counts_an_on_fail_route_as_loop_head_re_entry() {
         on_exhausted: OnExhausted::Escalate,
     });
 
-    let diags = crate::validate(&m, &always_resolves, &|_| true, true);
+    let diags = crate::validate(&m, &always_resolves, &|_| true, true, &[], &[]);
     assert!(
         !diags.iter().any(|d| d.message.contains("never re-entered")),
         "got: {diags:?}"
@@ -1074,4 +1136,272 @@ fn a_stage_that_always_crashes_escalates_after_the_cap() {
         ledger.payloads_of("state_entered").len(),
         crate::MAX_CRASH_ATTEMPTS as usize
     );
+}
+
+// ── what actually reaches the stage ──────────────────────────────────────
+
+/// Runs a machine and hands back the contexts every stage was built with, so a
+/// test can assert on what the playbook would have seen.
+fn run_capturing_stages(
+    machine: &loop_core::Machine,
+    runner: &FakeRunner,
+    ledger: &mut FakeLedger,
+) -> (Outcome, Vec<loop_core::Context>) {
+    let cfg = config();
+    let artifacts = FakeArtifacts;
+    let checks = FakeChecks::default();
+    let stage = FakeStageBuilder::new(machine);
+    let outcome = {
+        let mut engine = Engine {
+            machine,
+            config: &cfg,
+            runner,
+            checks: &checks,
+            ledger,
+            artifacts: &artifacts,
+            stage: &stage,
+            started_at: None,
+            elapsed_offset_s: 0,
+        };
+        engine.run().expect("engine run should not error")
+    };
+    let contexts = stage.contexts.borrow().clone();
+    (outcome, contexts)
+}
+
+/// The Navigator's get-back-on-track note has to survive the ordinary route:
+/// through a guarded edge, which puts a `guard_checked` between the
+/// `navigator_invoked` and the commit. Reading only the line before the commit
+/// meant the note arrived exactly when it could not be used — on the route to
+/// the terminal escalation state, which never renders a playbook.
+#[test]
+fn the_navigators_addendum_reaches_the_state_it_routed_into() {
+    let mut m = base_machine();
+    m.entry = "implement".into();
+    m.terminals.insert("done".into());
+    m.states.insert("implement".into(), state("implement"));
+    m.states.insert("debug".into(), state("debug"));
+    m.transitions.push(judged_edge(
+        "implement",
+        "debug",
+        "a real failure to diagnose",
+    ));
+    m.transitions.push(edge("debug", "done"));
+
+    let runner = FakeRunner::default();
+    runner.script_worker("implement", worker_result(proposal_blocked("I am lost")));
+    runner.script_navigator(choice_with_addendum(
+        "debug",
+        "the migration is half-applied; start there",
+    ));
+    runner.script_judge(verdict(true, "routing to debug is right"));
+    runner.script_worker("debug", worker_result(proposal_to("done", "fixed")));
+
+    let mut ledger = FakeLedger::default();
+    let (outcome, contexts) = run_capturing_stages(&m, &runner, &mut ledger);
+
+    assert_eq!(outcome.status, RunStatus::Done);
+    let debug_ctx = contexts
+        .iter()
+        .find(|c| c.state == "debug")
+        .expect("debug stage was built");
+    assert_eq!(
+        debug_ctx.entry_addendum.as_deref(),
+        Some("the migration is half-applied; start there"),
+    );
+    // And it is delivered once: the next stage's entry must not re-serve a
+    // note from a decision the run has already moved past.
+    let implement_ctx = contexts
+        .iter()
+        .find(|c| c.state == "implement")
+        .expect("implement stage was built");
+    assert_eq!(implement_ctx.entry_addendum, None);
+}
+
+/// A re-entry after a crash is a different situation from a first attempt —
+/// the stage may have already opened the PR it is about to open again — so the
+/// playbook gets told.
+#[test]
+fn a_re_entry_after_a_crash_is_marked_for_the_playbook() {
+    let mut m = base_machine();
+    m.entry = "ship".into();
+    m.terminals.insert("done".into());
+    m.states.insert("ship".into(), state("ship"));
+    m.transitions.push(edge("ship", "done"));
+
+    let runner = FakeRunner::default();
+    let mut crashed = worker_result(proposal_to("done", "unused"));
+    crashed.exit_ok = false;
+    crashed.proposal = None;
+    runner.script_worker("ship", crashed);
+    runner.script_worker("ship", worker_result(proposal_to("done", "pr is up")));
+
+    let mut ledger = FakeLedger::default();
+    let (outcome, contexts) = run_capturing_stages(&m, &runner, &mut ledger);
+
+    assert_eq!(outcome.status, RunStatus::Done);
+    let crashed_flags: Vec<bool> = contexts.iter().map(|c| c.crashed).collect();
+    assert_eq!(
+        crashed_flags,
+        vec![false, true],
+        "the first entry is clean; the retry follows a death"
+    );
+    assert_eq!(contexts[1].to_map()["CRASHED"], "1");
+    assert_eq!(contexts[0].to_map()["CRASHED"], "");
+}
+
+// ── artifact claims ──────────────────────────────────────────────────────
+
+/// A worker naming a file it never wrote is an ordinary mistake, and the run
+/// has to absorb it: record the drop, keep the claims that did resolve, and
+/// let the guard that wanted the evidence be the thing that fails. Propagating
+/// the capture error instead killed the `loop run` process outright, leaving
+/// the ledger tail at `state_entered`.
+#[test]
+fn an_unresolvable_artifact_claim_is_recorded_and_dropped_not_fatal() {
+    let mut m = base_machine();
+    m.entry = "implement".into();
+    m.terminals.insert("done".into());
+    m.states.insert("implement".into(), state("implement"));
+    m.transitions.push(edge("implement", "done"));
+
+    let runner = FakeRunner::default();
+    let mut proposal = proposal_to("done", "wrote the diff");
+    proposal.artifacts = vec![
+        loop_core::ArtifactClaim {
+            name: "diff".into(),
+            path: "diff.patch".into(),
+        },
+        loop_core::ArtifactClaim {
+            name: "notes".into(),
+            path: "never-written.md".into(),
+        },
+    ];
+    runner.script_worker("implement", worker_result(proposal));
+
+    let mut ledger = FakeLedger::default();
+    let artifacts = RefusingArtifacts {
+        refuse: "never-written.md",
+    };
+    let cfg = config();
+    let checks = FakeChecks::default();
+    let stage = FakeStageBuilder::new(&m);
+    let outcome = {
+        let mut engine = Engine {
+            machine: &m,
+            config: &cfg,
+            runner: &runner,
+            checks: &checks,
+            ledger: &mut ledger,
+            artifacts: &artifacts,
+            stage: &stage,
+            started_at: None,
+            elapsed_offset_s: 0,
+        };
+        engine.run().expect("a bad claim must not fail the run")
+    };
+
+    assert_eq!(outcome.status, RunStatus::Done);
+    match ledger.payloads_of("worker_output")[0] {
+        loop_core::EventPayload::WorkerOutput { artifacts, .. } => {
+            let names: Vec<&str> = artifacts.iter().map(|a| a.name.as_str()).collect();
+            assert_eq!(names, vec!["diff"], "the good claim still lands");
+        }
+        _ => unreachable!(),
+    }
+    let errors = ledger.payloads_of("error");
+    assert_eq!(errors.len(), 1);
+    match errors[0] {
+        loop_core::EventPayload::Error { detail, .. } => {
+            assert!(detail.contains("never-written.md"), "got: {detail}");
+            assert!(detail.contains("notes"), "got: {detail}");
+        }
+        _ => unreachable!(),
+    }
+}
+
+// ── the Judge's spend ────────────────────────────────────────────────────
+
+/// Criteria are not free, and a machine that leans on them was spending real
+/// money the `:usd` budget could not see. The verdict's usage lands on the
+/// guard event, which is what the fold adds up.
+#[test]
+fn the_judges_usage_lands_on_the_guard_event_and_in_the_totals() {
+    let mut m = base_machine();
+    m.entry = "implement".into();
+    m.terminals.insert("done".into());
+    m.states.insert("implement".into(), state("implement"));
+    m.transitions
+        .push(judged_edge("implement", "done", "the plan is addressed"));
+
+    let runner = FakeRunner::default();
+    runner.script_worker(
+        "implement",
+        worker_result_costing(proposal_to("done", "did it"), 1.0),
+    );
+    runner.script_judge(loop_core::Verdict {
+        pass: true,
+        rationale: "addressed".into(),
+        usage: loop_core::Usage {
+            tokens: 500,
+            cost_usd: 0.25,
+        },
+    });
+
+    let mut ledger = FakeLedger::default();
+    let outcome = run(&m, &runner, &mut ledger);
+
+    match ledger.payloads_of("guard_checked")[0] {
+        loop_core::EventPayload::GuardChecked { usage, .. } => {
+            assert_eq!(usage.cost_usd, 0.25);
+            assert_eq!(usage.tokens, 500);
+        }
+        _ => unreachable!(),
+    }
+    assert!(
+        (outcome.totals.cost_usd - 1.25).abs() < 1e-9,
+        "the run's cost must include the judge: {}",
+        outcome.totals.cost_usd
+    );
+}
+
+/// A judge-heavy machine has to be able to blow the dollar budget on judging
+/// alone, or the guardrail is not a guardrail.
+#[test]
+fn judge_spend_alone_can_exhaust_the_usd_budget() {
+    let mut m = base_machine();
+    m.entry = "a".into();
+    m.terminals.insert("done".into());
+    m.budgets.usd = Some(0.30);
+    m.states.insert("a".into(), state("a"));
+    m.states.insert("b".into(), state("b"));
+    m.transitions.push(judged_edge("a", "b", "good enough"));
+    m.transitions.push(judged_edge("b", "done", "good enough"));
+
+    let runner = FakeRunner::default();
+    // Free workers; every dollar on this run comes from the criteria tier.
+    runner.script_worker("a", worker_result_costing(proposal_to("b", "on"), 0.0));
+    runner.script_worker("b", worker_result_costing(proposal_to("done", "on"), 0.0));
+    for _ in 0..2 {
+        runner.script_judge(loop_core::Verdict {
+            pass: true,
+            rationale: "fine".into(),
+            usage: loop_core::Usage {
+                tokens: 100,
+                cost_usd: 0.4,
+            },
+        });
+    }
+
+    let mut ledger = FakeLedger::default();
+    let outcome = run(&m, &runner, &mut ledger);
+
+    assert_eq!(outcome.status, RunStatus::Aborted);
+    let errors = ledger.payloads_of("error");
+    match errors.last().expect("a budget error") {
+        loop_core::EventPayload::Error { detail, .. } => {
+            assert!(detail.contains("budget_usd exceeded"), "got: {detail}");
+        }
+        _ => unreachable!(),
+    }
 }

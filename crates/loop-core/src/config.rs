@@ -7,17 +7,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::machine::{Budgets, ModelSpec, TransitionMode};
 
-/// How much prior context a stage's prompt carries.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum ContextMode {
-    /// A rolling summary the harness assembles (default).
-    #[default]
-    Digest,
-    /// Every `worker_output` verbatim. Expensive.
-    Full,
-}
-
 /// The XDG paths loop reads and writes. Split so nothing generated is ever
 /// written into the directory a human hand-edits.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -79,11 +68,13 @@ impl Paths {
     pub fn machine_file(&self) -> PathBuf {
         self.loop_dir().join("machine.fnl")
     }
+    /// The one local-first directory loop creates for you. Playbooks and
+    /// skills both resolve against the *machine's* own directory rather than
+    /// this path (they may differ under `-C`), so there is deliberately no
+    /// sibling `local_skills()` helper to mislead anyone reading resolution
+    /// order out of this module — see `Toolbox::resolve_skill`.
     pub fn local_playbooks(&self) -> PathBuf {
         self.loop_dir().join("playbooks")
-    }
-    pub fn local_skills(&self) -> PathBuf {
-        self.loop_dir().join("skills")
     }
     pub fn ledger_file(&self) -> PathBuf {
         self.loop_dir().join("ledger.jsonl")
@@ -140,6 +131,10 @@ pub fn expand_tilde(p: &Path) -> PathBuf {
 /// The contents of `config.fnl`, with defaults applied.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Config {
+    /// The provider every role falls back to. Each role spec below carries its
+    /// own resolved `provider`; this is the value they take when their table
+    /// does not name one, which is what makes setting it alone switch the
+    /// whole toolbox.
     pub provider: String,
     /// Default Worker model when a state doesn't specify one.
     pub worker: ModelSpec,
@@ -158,7 +153,6 @@ pub struct Config {
     pub pi_extensions: Vec<String>,
 
     pub budgets: Budgets,
-    pub context: ContextMode,
     /// How many recent transitions the digest includes verbatim.
     pub digest_last_n: usize,
     pub transition_mode: TransitionMode,
@@ -199,7 +193,6 @@ impl Config {
                 wallclock_s: Some(7200),
                 max_transitions: Some(60),
             },
-            context: ContextMode::Digest,
             digest_last_n: 8,
             transition_mode: TransitionMode::Constrained,
             pi_bin: std::env::var("LOOP_PI_BIN").unwrap_or_else(|_| "pi".into()),

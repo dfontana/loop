@@ -9,12 +9,18 @@ use serde::{Deserialize, Serialize};
 use crate::machine::{Budgets, StateId};
 
 /// A reference to a captured artifact on disk.
+///
+/// A snapshot, not a live path: the harness copies the worker's claimed file
+/// into the store under a `<state>-<cycle>-<name>` key, so a later stage
+/// reading `$ARTIFACT_DIFF` gets the diff *that* cycle produced rather than
+/// whatever the working tree holds now. There is no content hash — nothing
+/// consumed one, and a hash nobody checks is a claim about integrity the
+/// system does not actually make.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ArtifactRef {
     pub name: String,
     /// Project-relative, e.g. `.loop/artifacts/implement-1-diff.patch`.
     pub path: String,
-    pub sha256: String,
 }
 
 /// What a worker declares it produced, before the harness hashes it.
@@ -87,20 +93,38 @@ pub enum Actor {
     Harness,
 }
 
-/// One ledger line: `ts` plus a flattened, `type`-tagged payload.
+/// One ledger line: `ts`, the run's accumulated wallclock, and a flattened,
+/// `type`-tagged payload.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Event {
     /// ISO-8601, UTC.
     pub ts: String,
+    /// Seconds of *run* time accumulated when this line was written, summed
+    /// across every process that has driven this ledger.
+    ///
+    /// `ts` alone cannot answer that question: the gap between the last event
+    /// of an interrupted run and the first event of its `loop resume` is
+    /// wall-clock time during which nothing was running, and charging it to a
+    /// time budget would put any run left overnight instantly over. So each
+    /// append carries the accumulator forward, and a resuming process picks up
+    /// from the last line rather than from zero.
+    pub elapsed_s: u64,
     #[serde(flatten)]
     pub payload: EventPayload,
 }
 
 impl Event {
-    /// Stamp a payload with the current time.
+    /// Stamp a payload with the current time and no accumulated run time —
+    /// for tests and for callers building events outside a live run.
     pub fn now(payload: EventPayload) -> Self {
+        Self::stamped(payload, 0)
+    }
+
+    /// Stamp a payload with the current time and the run's elapsed seconds.
+    pub fn stamped(payload: EventPayload, elapsed_s: u64) -> Self {
         Self {
             ts: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            elapsed_s,
             payload,
         }
     }
@@ -159,6 +183,11 @@ pub enum EventPayload {
         /// piece of evidence on this line the worker did not author.
         check_output: Option<String>,
         judge_rationale: Option<String>,
+        /// What the Judge spawn cost, when the `criteria` tier ran. Zero
+        /// otherwise. Recorded here rather than nowhere, so a criteria-heavy
+        /// machine's spend is visible to the `:usd` budget instead of showing
+        /// up only on the invoice.
+        usage: Usage,
     },
     /// Only when a proposal was invalid or `blocked`.
     NavigatorInvoked {

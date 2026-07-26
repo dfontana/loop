@@ -26,7 +26,9 @@ $LEDGER_DIGEST
    - **Notes for the reviewer** — anything the loop surfaced worth a human's eye.
 2. Run the `open-pr` skill with the title and that body file.
    It is idempotent — if a PR already exists for this branch it updates it, so
-   this is safe on crash-resume.
+   this is safe on crash-resume. Crashed-and-re-entered flag for this attempt:
+   `$CRASHED` (empty on a clean entry). When it is set, check for an existing PR
+   before assuming this is the first try.
 3. Finish with `transition(to="done", rationale="PR #<n> open with populated
    description", artifacts=[{name:"pr", path:"<url file>"}])`.
 

@@ -222,8 +222,7 @@ impl ArtifactSink for FakeArtifacts {
     fn capture(&self, state: &str, cycle: u32, claim: &ArtifactClaim) -> Result<ArtifactRef> {
         Ok(ArtifactRef {
             name: claim.name.clone(),
-            path: claim.path.clone(),
-            sha256: format!("fake-sha-{state}-{cycle}-{}", claim.name),
+            path: format!(".loop/artifacts/{state}-{cycle}-{}", claim.name),
         })
     }
 }
@@ -294,6 +293,19 @@ impl AgentRunner for FakeRunner {
 
 pub struct FakeStageBuilder<'m> {
     pub machine: &'m Machine,
+    /// The context handed to every stage this builder assembled, in order —
+    /// how a test asserts on what actually reached the playbook rather than on
+    /// what the engine meant to send.
+    pub contexts: RefCell<Vec<Context>>,
+}
+
+impl<'m> FakeStageBuilder<'m> {
+    pub fn new(machine: &'m Machine) -> Self {
+        Self {
+            machine,
+            contexts: RefCell::new(Vec::new()),
+        }
+    }
 }
 
 impl<'m> StageBuilder for FakeStageBuilder<'m> {
@@ -303,6 +315,7 @@ impl<'m> StageBuilder for FakeStageBuilder<'m> {
         cycle: u32,
         attempt: u32,
         entry_addendum: Option<&str>,
+        crashed: bool,
     ) -> Result<StagePlan> {
         let st = self
             .machine
@@ -328,7 +341,6 @@ impl<'m> StageBuilder for FakeStageBuilder<'m> {
             transition_mode: self.machine.transition_mode,
             mcp,
             ext_paths: Vec::new(),
-            pi_extensions: Vec::new(),
             cwd: PathBuf::new(),
             session_id: None,
             env: Vec::new(),
@@ -339,8 +351,10 @@ impl<'m> StageBuilder for FakeStageBuilder<'m> {
             cycle,
             attempt,
             entry_addendum: entry_addendum.map(|s| s.to_string()),
+            crashed,
             ..Context::default()
         };
+        self.contexts.borrow_mut().push(context.clone());
         Ok(StagePlan {
             spec,
             context,
@@ -420,6 +434,7 @@ pub fn worker_result(proposal: Proposal) -> WorkerResult {
         },
         session_id: None,
         exit_ok: true,
+        stderr_tail: String::new(),
     }
 }
 
@@ -460,4 +475,22 @@ pub fn choice_with_addendum(to: &str, addendum: &str) -> Choice {
 #[allow(dead_code)]
 pub fn zero_totals() -> Totals {
     Totals::default()
+}
+
+/// An artifact sink that refuses one particular claimed path, standing in for
+/// the real store's "that file is not there" / "that escapes the project root".
+pub struct RefusingArtifacts {
+    pub refuse: &'static str,
+}
+
+impl ArtifactSink for RefusingArtifacts {
+    fn capture(&self, state: &str, cycle: u32, claim: &ArtifactClaim) -> Result<ArtifactRef> {
+        if claim.path == self.refuse {
+            return Err(CoreError::other(format!(
+                "resolving claimed artifact path {}",
+                claim.path
+            )));
+        }
+        FakeArtifacts.capture(state, cycle, claim)
+    }
 }

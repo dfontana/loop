@@ -17,7 +17,12 @@ pub trait LedgerSink {
 
 /// Captured stage outputs.
 pub trait ArtifactSink {
-    /// Copy a worker-claimed file into the store, returning its hashed
-    /// reference. Rejects paths that escape the project root.
+    /// Copy a worker-claimed file into the store, returning a reference to the
+    /// snapshot. Rejects paths that escape the project root.
+    ///
+    /// The claim is worker-authored and therefore routinely wrong — a path
+    /// that never existed, a typo, a file the stage deleted before it called
+    /// `transition`. Every such failure is an ordinary `Err` the engine
+    /// records and moves past, never a reason to take the run down.
     fn capture(&self, state: &str, cycle: u32, claim: &ArtifactClaim) -> Result<ArtifactRef>;
 }

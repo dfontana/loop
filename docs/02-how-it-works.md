@@ -73,8 +73,9 @@ folded status is already finished, it returns immediately. If there is no
    every other state gets `1`. `attempt` is the count of prior attempts at this
    state in this cycle, plus one.
 4. **Look up a pending Navigator addendum** — the `entry_prompt` the Navigator
-   wrote when it redirected the run here. (In practice this is almost always
-   empty; see [`choose`](#choose).)
+   wrote when it redirected the run here, found by scanning back from the
+   commit through that routing decision's own events. It reaches the playbook
+   as `$ENTRY_ADDENDUM`.
 5. **Build the stage.** Resolve the playbook, resolve the skill list, and render
    the prompt by substituting `$VAR` template variables into the playbook body.
 6. **Append `state_entered`** — state, cycle, attempt, model, thinking, the
@@ -83,10 +84,11 @@ folded status is already finished, it returns immediately. If there is no
 8. **If the process itself failed** (non-zero exit, spawn error), append a
    transient `error` and return; the fold will re-enter the state. After
    `MAX_CRASH_ATTEMPTS = 3` consecutive crashes the engine appends a `note` and
-   escalates. Note that pi's stderr is discarded, so a crash gives you an exit
-   code and nothing else.
-9. **Capture artifacts** claimed in the `transition` call — hash, copy, sidecar.
-   This happens *before* the output event is written.
+   escalates. The `error` carries the tail of pi's stderr, so a spawn failure
+   leaves a diagnosis rather than just an exit code.
+9. **Capture artifacts** claimed in the `transition` call — copy into the
+   store. This happens *before* the output event is written. A claim that
+   cannot be resolved is recorded as an `error` and dropped; the rest proceed.
 10. **Append `worker_output`** — the last non-empty assistant message as the
     summary, the captured artifact refs, and token/cost usage.
 11. **If no proposal was emitted**, synthesize one:
@@ -122,7 +124,10 @@ durable before the sleep starts.
 Every role is the same binary: `pi`, spawned as `pi --print --mode json` with
 stdin closed and stdout piped and parsed line by line. The binary comes from
 `LOOP_PI_BIN` (default `pi`). The working directory is always your project
-directory. **pi's stderr is discarded** in all three cases.
+directory. **stderr is drained and its last 20 lines are kept** in all three
+cases — folded into the `error` event on a Worker crash, and into the
+fail-closed rationale of a Judge or Navigator that produced no marker.
+`loop run --verbose` echoes it live as well.
 
 They differ in what they are allowed to do.
 
@@ -186,7 +191,7 @@ has exactly one tool — `verdict` — and no others. It cannot read a file, run
 bash, or reach an MCP server. **It judges only what it is handed**, which is:
 
 - the Worker's summary, trimmed
-- each artifact as `- <name> (<absolute path>) sha256:<hash>`
+- each artifact as `- <name> (<absolute path>)`
 - when a `:check` ran, its output under a literally-prefixed block:
   `Output of the harness's own check for this transition (the worker did not produce this, and it exited zero):`
 
@@ -250,7 +255,7 @@ The Worker's only injected tool. Calling it ends the stage.
 \* The tool throws if neither `to` nor `blocked` is given.
 
 Returns the text `LOOP_TRANSITION {json}`. Calling it causes: the artifacts to
-be captured and hashed, `worker_output` and `transition_proposed` to be
+be captured, `worker_output` and `transition_proposed` to be
 appended, and the routing pass to begin.
 
 **Constrained vs. open.** The schema of `to` depends on `LOOP_TRANSITION_MODE`,
@@ -288,14 +293,12 @@ The Navigator's only tool.
 | `to` | enum of `LOOP_REACHABLE` plus the literal `"escalate"` |
 | `entry_prompt` | string — a get-back-on-track note for the next stage |
 
-Returns `LOOP_CHOICE {json}`. `entry_prompt` is meant to become
-`$ENTRY_ADDENDUM` in the next stage's prompt.
-
-> **Gap:** `$ENTRY_ADDENDUM` is usually dropped. Picking it up requires the
-> `navigator_invoked` event to sit immediately before the commit, but a guarded
-> route inserts `guard_checked` between them. It survives only when the target
-> is the escalation state — which is terminal, so it is never actually
-> consumed. Treat the addendum as non-functional today.
+Returns `LOOP_CHOICE {json}`. `entry_prompt` becomes `$ENTRY_ADDENDUM` in the
+next stage's prompt: the harness finds it by scanning back from the commit
+through the events of that one routing decision, so it survives the
+`guard_checked` a guarded route puts in between. The scan stops at the previous
+commit or state entry, which is what keeps a note from an earlier cycle out of
+a later stage's prompt.
 
 **Fail-closed on a missing marker.** If a role's process finishes without
 emitting a usable marker, the harness does not guess:
@@ -303,7 +306,7 @@ emitting a usable marker, the harness does not guess:
 | Role | Missing marker becomes |
 |---|---|
 | Worker | no proposal → the engine synthesizes `blocked: true` → the Navigator fires |
-| Judge | `{pass: false, rationale: "judge returned no usable verdict"}` |
+| Judge | `{pass: false, rationale: "judge returned no usable verdict"}`, plus the stderr tail |
 | Navigator | `{to: "escalate"}` |
 
 A **non-zero exit invalidates a Judge or Navigator marker even if one was
@@ -435,7 +438,8 @@ It fires on:
 The Navigator's cap (`:max-invocations`, default 5) applies **both run-wide and
 per source state**. Hitting either limit means no Navigator spawn at all — the
 run escalates immediately. A Navigator spawn that returns no usable
-`LOOP_CHOICE` is coerced to `{to: "escalate", entry_prompt: None}`.
+`LOOP_CHOICE` is coerced to `{to: "escalate"}`, with the spawn's stderr tail as
+the addendum so the escalation says why.
 
 **Landing on the escalation state reports `Failed`, not `Done`** — even though
 it is a terminal like any other. That is the whole reason it is declared
@@ -462,14 +466,10 @@ with a detail string plus `run_finished{status: aborted}`. **A budget breach is
 always `Aborted`, never `Failed`.**
 
 Budgets are sampled at exactly two points: the top of stage entry — before any
-process is spawned — and on a crash-resumed guard check. Which produces four
-honest caveats:
+process is spawned — and on a crash-resumed guard check. Which produces two
+honest caveats (Worker, Judge, and Navigator spend all count toward `:usd`, and
+`:wallclock-s` accumulates across resumes):
 
-- **Judge cost is never counted.** `guard_checked` carries no usage field, so
-  every Judge call is invisible to the `:usd` budget. On a machine with criteria
-  on every edge, your real spend is above what `loop status` reports.
-- **`wallclock_s` is measured per process.** `loop resume` restarts the clock at
-  zero. A run resumed three times has three independent 2-hour allowances.
 - **Retries are free against `max_transitions`,** which counts committed
   transitions only.
 - **Budgets are sampled between stages.** A single long Worker spawn can blow
@@ -496,17 +496,23 @@ Ordering is file order.
 |---|---|---|
 | `run_started` | `ticket`, `machine_hash`, `budgets{usd,wallclock_s,max_transitions}` | first step of a run |
 | `state_entered` | `state`, `cycle`, `attempt`, `session_id`, `model`, `thinking`, `skills[]`, `mcp[]` | immediately before spawning the Worker |
-| `worker_output` | `state`, `cycle`, `summary`, `artifacts[{name,path,sha256}]`, `usage{tokens,cost_usd}` | after a clean Worker exit, after artifact capture |
+| `worker_output` | `state`, `cycle`, `summary`, `artifacts[{name,path}]`, `usage{tokens,cost_usd}` | after a clean Worker exit, after artifact capture |
 | `transition_proposed` | `from`, `to` (nullable), `blocked`, `rationale`, `by` (`worker`\|`navigator`\|`harness`) | right after `worker_output` |
-| `guard_checked` | `from`, `to`, `structural`, `check`, `criteria` (each `pass`\|`fail`\|`skip`), `check_output`, `judge_rationale` | after the guard tiers run |
+| `guard_checked` | `from`, `to`, `structural`, `check`, `criteria` (each `pass`\|`fail`\|`skip`), `check_output`, `judge_rationale`, `usage{tokens,cost_usd}` (the Judge's, zero when no criteria ran) | after the guard tiers run |
 | `navigator_invoked` | `from`, `proposal`, `chosen_to`, `entry_prompt`, `usage` | when the Navigator fires |
 | `transition_committed` | `from`, `to`, `cycle` | after guards pass, or on a route or escalation |
-| `error` | `state`, `kind` (`transient`\|`fatal`), `detail` | budget breach, loop exhausted, Worker crash |
+| `error` | `state`, `kind` (`transient`\|`fatal`), `detail` | budget breach, loop exhausted, Worker crash, dropped artifact claim |
 | `note` | `text` | 3 crashes → escalating; otherwise a human annotation slot |
 | `run_finished` | `status` (`done`\|`failed`\|`aborted`), `terminal_state`, `totals{cost_usd,wallclock_s,transitions}` | terminal |
 
+Every line also carries `elapsed_s`: the run's accumulated wallclock at the
+moment it was written, summed across every process that has driven this ledger.
+That is what lets `loop resume` keep counting instead of handing the run a
+fresh time budget — `ts` alone cannot, since the gap between an interrupted run
+and its resume is time during which nothing was running.
+
 **Durability.** The file is opened once with append mode and held open. Each
-append stamps `ts`, writes the line and its newline in a single `write_all`,
+append stamps `ts` and `elapsed_s`, writes the line and its newline in a single `write_all`,
 then `sync_data()` — an fsync per event. Lines are never rewritten. A power cut
 loses at most the event currently being written.
 
@@ -526,10 +532,8 @@ the top on every engine step. Deleting the ledger starts over; there is nothing
 else to clean up. The fold `break`s at `run_finished`, so nothing written after
 a terminal event is ever read.
 
-One consequence to know before you read `status --json`:
-**`totals.wallclock_s` is never accumulated during the fold.** It stays 0 until
-`run_finished` overwrites totals wholesale. Live elapsed time comes from the
-engine, not the ledger.
+`totals.wallclock_s` folds out of the last event's `elapsed_s`, so it is
+meaningful for a run in progress and not only after `run_finished`.
 
 ## Inspecting a run
 
@@ -582,7 +586,7 @@ run_finished Done
   "navigator_invocations": 0,
   "status": "done",
   "totals": {
-    "cost_usd": 3.44,
+    "cost_usd": 3.58,
     "transitions": 10,
     "wallclock_s": 3414
   }
@@ -592,13 +596,13 @@ run_finished Done
 (Real output from [the worked example](../examples/), a finished run. Keys come
 out alphabetically ordered.)
 
-`status` is `null` while the run is in progress. `totals.wallclock_s` is **0 for
-a run in progress** — see the fold note above. There is no resume point, no
-artifact list, and no ticket id in JSON mode; for those, read the ledger.
+`status` is `null` while the run is in progress; `totals.wallclock_s` is live.
+There is no resume point, no artifact list, and no ticket id in JSON mode; for
+those, read the ledger.
 
-> **Gap:** if the ledger has zero events, *both* modes print the plain-text line
-> ``no run yet — `loop run` starts one`` and return. **`--json` can therefore
-> emit non-JSON.** Guard your scripts against it.
+On a ledger with zero events, `--json` emits the same five keys with nulls and
+zeroes — the plain-text ``no run yet — `loop run` starts one`` belongs to the
+human mode only, so JSON output is always parseable.
 
 ### `loop diagram`
 
@@ -703,8 +707,9 @@ jq -s 'map(select(.type=="worker_output"))
               cost: (map(.usage.cost_usd) | add)})' .loop/ledger.jsonl
 ```
 
-Remember that this total excludes the Judge entirely — `guard_checked` carries
-no usage — so it is a lower bound on real spend.
+That total covers the Workers only. `guard_checked` carries the Judge's
+`usage` too, so a full accounting sums `worker_output`, `guard_checked`, and
+`navigator_invoked` — which is exactly what the fold and the digest do.
 
 ### Artifacts
 
@@ -715,27 +720,28 @@ harness captures them **before** `worker_output` is appended.
    the root and the source are canonicalized, and the source must start with the
    root. That single comparison rejects absolute escapes, `..` walks, and
    out-of-tree symlinks.
-2. The bytes are sha256'd.
-3. The destination is `<project>/.loop/artifacts/<state>-<cycle>-<name>`, with
+2. The destination is `<project>/.loop/artifacts/<state>-<cycle>-<name>`, with
    every component sanitized (non-`[A-Za-z0-9._-]` → `-`).
-4. It is written atomically — temp file, fsync, rename — alongside a
-   `<dest>.sha256` sidecar.
-5. The ledger records `{name (unsanitized), path (project-relative), sha256}`.
+3. It is written atomically — temp file, fsync, rename.
+4. The ledger records `{name (unsanitized), path (project-relative)}`.
 
-Later stages see each artifact as `$ARTIFACT_<NAME>` (the name uppercased) and
-in the digest's `## Artifacts` section. The Judge is handed absolute paths and
-hashes — though, having no tools, it cannot open them.
+The copy is the point: it is a **snapshot**, so cycle two rewriting
+`diff.patch` does not change what cycle one handed off. Later stages see each
+artifact as `$ARTIFACT_<NAME>` (the name uppercased) and in the digest's
+`## Artifacts` section. The Judge is handed the absolute paths — though, having
+no tools, it cannot open them. Nothing is hashed: no consumer ever checked a
+hash, and recording one would assert an integrity guarantee loop does not make.
 
 Two sharp edges:
 
 - **The extension is not preserved.** A claim named `diff` pointing at
   `changes.patch` lands at `.loop/artifacts/implement-1-diff` — no `.patch`. If
   you need the extension, put it in the claim's name.
-- **A claimed path that does not exist kills the run process.** The
-  canonicalization error propagates out of the engine: no `error` event, no
-  `run_finished`, just a dead `loop run`. The ledger tail is left at
-  `state_entered`, so a later `loop resume` re-runs the whole stage. Nothing
-  re-verifies an artifact's hash at consumption time either.
+- **An unusable claim is dropped, not fatal.** A path that was never written,
+  or one that escapes the project root, produces an `error` event naming the
+  claim; that one artifact is omitted and the stage's others are captured
+  normally. The run continues, and the missing evidence surfaces at whichever
+  guard wanted it.
 
 ### The rendered prompt
 
@@ -767,10 +773,7 @@ digest** — only the MCP connect instructions when the stage names servers, the
 You are entering **review**, cycle 2. (previous state: implement)
 ```
 
-with the Navigator's addendum appended after a blank line when one survived.
-
-> **Gap:** `:context "full"` is parsed and stored but never read. The digest path
-> is unconditional. Do not rely on `full` doing anything.
+with the Navigator's addendum appended after a blank line when it routed here.
 
 ## Resuming an interrupted run
 
@@ -806,6 +809,6 @@ before they act: "if the PR already exists, update it"; "if the migration is
 already applied, skip it". The ledger digest is available to the playbook via
 `$LEDGER_DIGEST`, and `$ATTEMPT` tells the agent which try this is.
 
-(The engine does record whether a re-entry followed a crash, but that flag is
-currently ignored — a crashed re-entry is behaviorally identical to a clean
-one.)
+A re-entry after a crash is marked: the playbook sees `$CRASHED` as `1`
+(empty on a clean entry), which is the hook for "check whether I already opened
+that PR" without having to infer it from `$ATTEMPT`.

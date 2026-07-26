@@ -48,7 +48,8 @@ pub fn render(events: &[Event], last_n: usize) -> String {
                     artifacts.insert(a.name.clone(), a.path.clone());
                 }
             }
-            EventPayload::NavigatorInvoked { usage, .. } => {
+            EventPayload::NavigatorInvoked { usage, .. }
+            | EventPayload::GuardChecked { usage, .. } => {
                 cost_usd += usage.cost_usd;
                 tokens += usage.tokens;
             }
@@ -144,7 +145,7 @@ pub fn worker_digest_for_judge(summary: &str, artifacts: &[ArtifactRef]) -> Stri
     if !artifacts.is_empty() {
         out.push_str("\n\nArtifacts:\n");
         for a in artifacts {
-            let _ = writeln!(out, "- {} ({}) sha256:{}", a.name, a.path, a.sha256);
+            let _ = writeln!(out, "- {} ({})", a.name, a.path);
         }
     }
     out
@@ -261,13 +262,38 @@ mod tests {
             artifacts: vec![ArtifactRef {
                 name: "diff".into(),
                 path: ".loop/artifacts/implement-1-diff".into(),
-                sha256: "deadbeef".into(),
             }],
             usage: Usage::default(),
         }));
 
         let digest = render(&events, 8);
         assert!(digest.contains("diff: .loop/artifacts/implement-1-diff"));
+    }
+
+    /// The Judge's spend is on `guard_checked`, and the digest's totals line
+    /// is where a human reading a stage's prompt sees what the run has cost.
+    /// Leaving it out understated a criteria-heavy machine by the whole
+    /// criteria tier.
+    #[test]
+    fn totals_include_the_judges_spend() {
+        let mut events = sample_events(1);
+        events.push(ev(EventPayload::GuardChecked {
+            from: "state0".into(),
+            to: "state1".into(),
+            structural: loop_core::GuardOutcome::Pass,
+            check: loop_core::GuardOutcome::Skip,
+            criteria: loop_core::GuardOutcome::Pass,
+            check_output: None,
+            judge_rationale: Some("meets every criterion".into()),
+            usage: Usage {
+                tokens: 900,
+                cost_usd: 0.4,
+            },
+        }));
+
+        let digest = render(&events, 8);
+        assert!(digest.contains("$0.50"), "got: {digest}");
+        assert!(digest.contains("910 tokens"), "got: {digest}");
     }
 
     #[test]
@@ -301,7 +327,6 @@ mod tests {
         let artifacts = vec![ArtifactRef {
             name: "report".into(),
             path: ".loop/artifacts/qa-1-report".into(),
-            sha256: "abc123".into(),
         }];
         let digest = worker_digest_for_judge("Ran the QA suite against staging.", &artifacts);
         assert!(digest.contains("Ran the QA suite"));

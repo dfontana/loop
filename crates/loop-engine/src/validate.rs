@@ -51,6 +51,10 @@ impl Diagnostic {
 /// - Every state has a path to some terminal (else the run can only exhaust).
 /// - Every state's `playbook` resolves (checked by the caller supplying
 ///   `resolve`, since resolution is filesystem work).
+/// - The skills and MCP servers each state *actually loads*, which is the
+///   union with `config.fnl`'s `:default-skills` / `:default-mcp` — not just
+///   the names the machine writes. Linting the machine's layer alone left a
+///   typo in the global toolbox config to surface as a failed stage mid-run.
 /// - Every loop's states exist and its head is a state some edge re-enters.
 /// - `escalation_state`, if set, is a terminal.
 /// - Every skill a state names resolves (same caller-supplied filesystem seam).
@@ -67,6 +71,8 @@ pub fn validate(
     resolve: &dyn Fn(&PlaybookRef) -> bool,
     resolve_skill: &dyn Fn(&str) -> bool,
     mcp_enabled: bool,
+    default_skills: &[String],
+    default_mcp: &[String],
 ) -> Vec<Diagnostic> {
     let mut out = Vec::new();
 
@@ -156,18 +162,27 @@ pub fn validate(
                 format!("playbook for state `{id}` does not resolve in the toolbox"),
             ));
         }
-        for name in machine.resolve_skills(state, &[]) {
+        // The effective list, config defaults included — that union is what
+        // the spawn loads, so it is what has to resolve.
+        for name in machine.resolve_skills(state, default_skills) {
             if !resolve_skill(&name) {
+                let source = if default_skills.contains(&name) {
+                    " (from `:default-skills` in config.fnl)"
+                } else {
+                    ""
+                };
                 out.push(Diagnostic::error(
                     id.clone(),
-                    format!("skill `{name}` on state `{id}` does not resolve in the toolbox"),
+                    format!(
+                        "skill `{name}` on state `{id}`{source} does not resolve in the toolbox"
+                    ),
                 ));
             }
         }
         // The names themselves are unverifiable here — they belong to the
         // user's `mcp.json`. What *is* checkable is whether the tool that
         // connects them will exist in the spawn at all.
-        if !mcp_enabled && !machine.resolve_mcp(state, &[]).is_empty() {
+        if !mcp_enabled && !machine.resolve_mcp(state, default_mcp).is_empty() {
             out.push(Diagnostic::error(
                 id.clone(),
                 format!(

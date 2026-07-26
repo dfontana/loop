@@ -39,9 +39,13 @@ pub struct WorkerSpec {
     pub reachable: Vec<StateId>,
     pub transition_mode: TransitionMode,
     /// `-e` paths: loop's own vendored ext (`transition-tool.ts`).
+    ///
+    /// There is no companion list of *installed* pi-extensions to enable: pi
+    /// has no flag for that. A worker spawn simply omits `--no-extensions` and
+    /// gets pi's ambient discovery, which is why `config.fnl`'s
+    /// `:pi-extensions` is a declaration the linter reads rather than a switch
+    /// this struct could carry.
     pub ext_paths: Vec<PathBuf>,
-    /// Installed pi-extension names to keep enabled.
-    pub pi_extensions: Vec<String>,
     /// Where pi runs — the project root.
     pub cwd: PathBuf,
     /// Deterministic id, so a crashed stage's transcript is findable.
@@ -72,6 +76,10 @@ pub struct WorkerResult {
     pub session_id: Option<String>,
     /// False when pi exited non-zero.
     pub exit_ok: bool,
+    /// The tail of the spawn's stderr. Empty when it said nothing. A crashed
+    /// stage produces no `worker_output`, so without this a failed spawn would
+    /// reach the ledger as an exit code and nothing else.
+    pub stderr_tail: String,
 }
 
 /// What the Judge sees: the criteria, a digest of the worker's output,

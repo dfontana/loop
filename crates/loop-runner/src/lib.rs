@@ -9,7 +9,7 @@
 //! TASK T4 implements this crate (and `mock-pi`, which lets everything else be
 //! tested without an API key).
 
-use std::io::BufReader;
+use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
@@ -25,12 +25,26 @@ pub mod stream;
 pub use check::exec_check;
 pub use stream::{StreamOutcome, parse_stream};
 
+/// How many trailing stderr lines to keep from a spawn. A pi crash puts its
+/// diagnosis in the last few lines; keeping a bounded tail means a process
+/// that logs a gigabyte still costs one small buffer.
+const STDERR_TAIL_LINES: usize = 20;
+
 /// Spawns real `pi` subprocesses.
 pub struct PiRunner {
     pi_bin: String,
-    /// Streamed to stderr as the run proceeds, so a human watching `loop run`
-    /// sees the worker working. Off in tests.
+    /// Echo each spawn's stderr as it arrives, so a human watching `loop run
+    /// --verbose` sees the worker working. Off by default and in tests — but
+    /// the tail is captured either way, so a crash is diagnosable without it.
     pub verbose: bool,
+}
+
+/// One spawn's result: what the stream said, whether it exited clean, and the
+/// tail of what it complained about on the way.
+struct SpawnOutcome {
+    stream: StreamOutcome,
+    exit_ok: bool,
+    stderr_tail: String,
 }
 
 impl PiRunner {
@@ -41,24 +55,26 @@ impl PiRunner {
         }
     }
 
+    pub fn verbose(mut self, verbose: bool) -> Self {
+        self.verbose = verbose;
+        self
+    }
+
     pub fn pi_bin(&self) -> &str {
         &self.pi_bin
     }
 
     /// Spawn `cmd`, stream-parse its stdout, and wait for it to exit.
     ///
-    /// stdin is closed (these are non-interactive `--print` spawns); stderr
-    /// is inherited when `verbose` so a human watching `loop run` sees
-    /// progress, and discarded otherwise — never piped-but-unread, which
-    /// risks a deadlock if pi ever writes enough to fill the pipe buffer.
-    fn spawn_and_parse(&self, mut cmd: Command, role: &str) -> Result<(StreamOutcome, bool)> {
+    /// stdin is closed (these are non-interactive `--print` spawns). stderr is
+    /// piped and drained by its own thread — never piped-but-unread, which
+    /// would deadlock the moment pi writes enough to fill the pipe buffer, and
+    /// never discarded, which is what used to reduce a failed spawn to a bare
+    /// non-zero exit code with nothing to debug from.
+    fn spawn_and_parse(&self, mut cmd: Command, role: &str) -> Result<SpawnOutcome> {
         cmd.stdin(Stdio::null());
         cmd.stdout(Stdio::piped());
-        cmd.stderr(if self.verbose {
-            Stdio::inherit()
-        } else {
-            Stdio::null()
-        });
+        cmd.stderr(Stdio::piped());
 
         let mut child = cmd
             .spawn()
@@ -68,17 +84,55 @@ impl PiRunner {
             .stdout
             .take()
             .ok_or_else(|| CoreError::agent(role, "pi spawn had no stdout pipe"))?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| CoreError::agent(role, "pi spawn had no stderr pipe"))?;
+
+        // Drained concurrently with stdout: both pipes have to be read while
+        // the child is alive, or whichever we ignore fills and blocks it.
+        let verbose = self.verbose;
+        let drain = std::thread::spawn(move || {
+            let mut tail: std::collections::VecDeque<String> = std::collections::VecDeque::new();
+            for line in BufReader::new(stderr)
+                .lines()
+                .map_while(std::io::Result::ok)
+            {
+                if verbose {
+                    eprintln!("{line}");
+                }
+                if tail.len() == STDERR_TAIL_LINES {
+                    tail.pop_front();
+                }
+                tail.push_back(line);
+            }
+            tail.into_iter().collect::<Vec<_>>().join("\n")
+        });
 
         // Parsing never fails the run on a bad line (see stream.rs); reading
         // stdout to EOF is exactly what tolerates a crash-truncated stream.
-        let outcome = parse_stream(BufReader::new(stdout))?;
+        let stream = parse_stream(BufReader::new(stdout))?;
 
         let status = child
             .wait()
             .map_err(|e| CoreError::agent(role, format!("failed waiting for pi: {e}")))?;
+        let stderr_tail = drain.join().unwrap_or_default();
 
-        Ok((outcome, status.success()))
+        Ok(SpawnOutcome {
+            stream,
+            exit_ok: status.success(),
+            stderr_tail,
+        })
     }
+}
+
+/// Append a spawn's stderr tail to a message, when it had anything to say.
+/// The label matters: this is the subprocess talking, not the harness.
+fn with_stderr(message: &str, stderr_tail: &str) -> String {
+    if stderr_tail.trim().is_empty() {
+        return message.to_string();
+    }
+    format!("{message}; pi stderr tail:\n{stderr_tail}")
 }
 
 impl AgentRunner for PiRunner {
@@ -96,16 +150,20 @@ impl AgentRunner for PiRunner {
     /// - `exit_ok` reflects the process exit code only; a non-zero exit
     ///   doesn't stop us from returning whatever partial summary/usage the
     ///   stream did contain before it was cut off.
+    /// - `stderr_tail` travels beside them, because on a non-zero exit the
+    ///   engine writes an `error` event and drops the summary entirely — the
+    ///   tail is the only place a spawn failure can leave a diagnosis.
     fn run_worker(&self, spec: &WorkerSpec) -> Result<WorkerResult> {
         let cmd = command::worker_command(&self.pi_bin, spec);
-        let (outcome, exit_ok) = self.spawn_and_parse(cmd, "worker")?;
-        let proposal = outcome.proposal()?;
+        let out = self.spawn_and_parse(cmd, "worker")?;
+        let proposal = out.stream.proposal()?;
         Ok(WorkerResult {
-            summary: outcome.summary,
+            summary: out.stream.summary,
             proposal,
-            usage: outcome.usage,
-            session_id: outcome.session_id,
-            exit_ok,
+            usage: out.stream.usage,
+            session_id: out.stream.session_id,
+            exit_ok: out.exit_ok,
+            stderr_tail: out.stderr_tail,
         })
     }
 
@@ -116,21 +174,24 @@ impl AgentRunner for PiRunner {
     /// work through (docs/05-design-notes.md).
     fn run_judge(&self, spec: &JudgeSpec) -> Result<Verdict> {
         let cmd = command::judge_command(&self.pi_bin, spec);
-        let (outcome, exit_ok) = self.spawn_and_parse(cmd, "judge")?;
+        let out = self.spawn_and_parse(cmd, "judge")?;
 
-        if exit_ok {
-            if let Some(payload) = outcome.marker(LOOP_VERDICT_MARKER) {
+        if out.exit_ok {
+            if let Some(payload) = out.stream.marker(LOOP_VERDICT_MARKER) {
                 if let Ok(mut verdict) = serde_json::from_str::<Verdict>(payload) {
-                    verdict.usage = outcome.usage;
+                    verdict.usage = out.stream.usage;
                     return Ok(verdict);
                 }
             }
         }
 
+        // The fail-closed rationale is what a human reads when a guard fails
+        // for a reason that has nothing to do with the work, so it carries
+        // whatever the spawn managed to say before giving up.
         Ok(Verdict {
             pass: false,
-            rationale: "judge returned no usable verdict".to_string(),
-            usage: outcome.usage,
+            rationale: with_stderr("judge returned no usable verdict", &out.stderr_tail),
+            usage: out.stream.usage,
         })
     }
 
@@ -140,12 +201,12 @@ impl AgentRunner for PiRunner {
     /// non-zero exit — escalates rather than stalling the run.
     fn run_navigator(&self, spec: &NavigatorSpec) -> Result<Choice> {
         let cmd = command::navigator_command(&self.pi_bin, spec);
-        let (outcome, exit_ok) = self.spawn_and_parse(cmd, "navigator")?;
+        let out = self.spawn_and_parse(cmd, "navigator")?;
 
-        if exit_ok {
-            if let Some(payload) = outcome.marker(LOOP_CHOICE_MARKER) {
+        if out.exit_ok {
+            if let Some(payload) = out.stream.marker(LOOP_CHOICE_MARKER) {
                 if let Ok(mut choice) = serde_json::from_str::<Choice>(payload) {
-                    choice.usage = outcome.usage;
+                    choice.usage = out.stream.usage;
                     return Ok(choice);
                 }
             }
@@ -153,8 +214,11 @@ impl AgentRunner for PiRunner {
 
         Ok(Choice {
             to: "escalate".to_string(),
-            entry_prompt: None,
-            usage: outcome.usage,
+            entry_prompt: Some(with_stderr(
+                "the navigator spawn produced no usable choice, so the harness escalated",
+                &out.stderr_tail,
+            )),
+            usage: out.stream.usage,
         })
     }
 }

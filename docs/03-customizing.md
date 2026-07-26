@@ -41,7 +41,7 @@ plan.md                    prose, referenced by :plan
 playbooks/                 local playbooks; win over the toolbox on a name clash
 skills/                    local skills; win over the toolbox on a name clash
 ledger.jsonl               the append-only run log
-artifacts/                 <state>-<cycle>-<name> plus .sha256 sidecars
+artifacts/                 snapshots, named <state>-<cycle>-<name>
 ```
 
 `loop init` creates `machine.fnl`, `task.md`, `plan.md`, and an empty
@@ -88,7 +88,7 @@ internally (`:max-invocations` → `navigator_max_invocations`).
 
 | Key | Type | Default | Effect |
 |---|---|---|---|
-| `:provider` | string | `"anthropic"` | The default provider name. The flag pi actually receives comes from the `:provider` field of the role spec below, so set it there when you mean to change a role. |
+| `:provider` | string | `"anthropic"` | The provider every role falls back to. A role table naming its own wins; otherwise this is what pi receives. |
 | `:worker` | `{:model :thinking :provider}` | `claude-sonnet-5` / `medium` / `anthropic` | Base of the Worker model chain — the last layer, filled in only where nothing more specific spoke. |
 | `:judge` | same | `claude-haiku-4-5` / `low` / `anthropic` | The Judge model. Not layered — a machine may overlay it, a state may not. |
 | `:navigator` | same, plus `:max-invocations` | `claude-haiku-4-5` / `low` / `anthropic`, cap `5` | The Navigator model, and how many times it may fire. |
@@ -96,7 +96,6 @@ internally (`:max-invocations` → `navigator_max_invocations`).
 | `:default-mcp` | `[string]` | `[]` | MCP servers named in every stage. |
 | `:pi-extensions` | `[string]` | `["mcp" "review-model-selector"]` | A declaration of what you have installed. Drives one `loop validate` diagnostic — see below. |
 | `:budgets` | `{:usd :wallclock-s :max-transitions}` | `15.0` / `7200` / `60` | Hard stops the harness enforces between stages. |
-| `:context` | `"digest"` \| `"full"` | `"digest"` | **`"full"` is not implemented** — see below. |
 | `:digest-last-n` | int | `8` | How many recent committed transitions the digest lists. |
 | `:transition-mode` | `"constrained"` \| `"open"` | `"constrained"` | The schema of the injected `transition` tool's `to` parameter. |
 
@@ -135,27 +134,29 @@ A realistic file:
  ;; Hard stops. Not suggestions to the agent.
  :budgets {:usd 15 :wallclock-s 7200 :max-transitions 60}
 
- :context "digest"
  :digest-last-n 8
 
  :transition-mode "constrained"}
 ```
 
-### Two keys that do less than they look like they do
+### `:pi-extensions` is a declaration, not a switch
 
-**`:context "full"` is parsed but not implemented.** The value is accepted and
-stored, and then never read — the digest path is unconditional. Setting `full`
-gets you exactly `digest`. What a stage sees of prior work is the rolling
-digest, and only where the playbook interpolates `$LEDGER_DIGEST`.
+loop never turns this list into a command-line flag, because pi has none to
+turn: there is no way to enable an *installed* extension by name. The Worker is
+simply spawned without `--no-extensions`, so pi's own ambient discovery loads
+whatever you have, list or no list.
 
-**`:pi-extensions` does not activate anything.** loop never turns this list
-into a command-line flag. The Worker is spawned *without* `--no-extensions`, so
-pi's own ambient discovery loads whatever you have installed, list or no list.
-The one thing the key does is drive a `loop validate` diagnostic: if a state
-names `:mcp` servers and `"mcp"` is not in `:pi-extensions`, validate errors
-with *state `{id}` names MCP servers, but `mcp` is not in `:pi-extensions` — the
-stage would be told to call a tool it does not have*. Treat it as a declaration
-that lets the linter catch a mismatch, not as a switch.
+What the key does is let the linter catch a mismatch. If a state names `:mcp`
+servers and `"mcp"` is not in `:pi-extensions`, `loop validate` errors with
+*state `{id}` names MCP servers, but `mcp` is not in `:pi-extensions` — the
+stage would be told to call a tool it does not have*. Declare what you have
+installed and the lint is worth something; leave it stale and it isn't.
+
+**`:context` was removed.** It took `"digest"` or `"full"`, and `"full"` was
+never wired to anything. A config that still sets it fails to load, with a
+pointer to `$LEDGER_DIGEST` and `:digest-last-n` — the rolling digest is the
+only continuity channel between stages, and it only reaches an agent where a
+playbook interpolates it.
 
 ---
 
@@ -517,8 +518,9 @@ complete set of variables — there are no others.
 | `$PREV_STATE` | The `from` of the most recent committed transition. **Empty string** when there is none. |
 | `$CYCLE` | Cycle number. |
 | `$ATTEMPT` | Attempt number within the cycle. |
+| `$CRASHED` | `1` when this entry follows a stage that died mid-flight (a resumed crash, or an in-process retry after the Worker process failed). **Empty** on a clean entry. |
 | `$LEDGER_DIGEST` | The rendered rolling digest — totals, the last `:digest-last-n` committed transitions, and every artifact. |
-| `$ENTRY_ADDENDUM` | The Navigator's get-back-on-track note. **Empty** when the Navigator did not fire. In practice this is almost always empty even when it did — see the note below. |
+| `$ENTRY_ADDENDUM` | The Navigator's get-back-on-track note for this state. **Empty** when the Navigator did not route here. |
 | `$QA_CASES` | Markdown bullets, `- **{id}** — {desc}` per case. **Empty** when `:qa-cases` is absent. |
 | `$ARTIFACT_<NAME>` | Project-relative path of a captured artifact. `<NAME>` is the artifact's claimed name, uppercased: a claim named `diff` becomes `$ARTIFACT_DIFF`. |
 
@@ -545,11 +547,10 @@ Substitution rules:
 - No `${...}` braces, no conditionals, no loops. It is pure textual
   substitution — there is no expression language here.
 
-`$ENTRY_ADDENDUM` deserves a warning: the addendum is only picked up when the
-`navigator_invoked` event sits immediately before the commit, and a guarded
-route inserts a `guard_checked` event between them. It survives only when the
-target is the escalation state, which is terminal and therefore never renders a
-playbook. Write your playbooks so they do not depend on it.
+`$CRASHED` is the one variable worth branching on: a stage that opens a PR,
+posts a comment, or kicks a deploy is re-run from the top after a crash, and
+this is how it knows to look for its own half-finished work first. `$ATTEMPT`
+does not distinguish a crash from a guard failure sending the stage back.
 
 ### Separate: the four environment variables
 
@@ -602,10 +603,9 @@ them. `examples/toolbox/playbooks/review.md` being the same file a state names
 as a skill is a normal thing to do when the review procedure is worth loading
 into another stage.
 
-> `loop validate` checks skills named by the machine and its states. It does
-> **not** check `:default-skills` from `config.fnl`; those resolve for the first
-> time at run time, so a typo there surfaces as a failed stage rather than a
-> lint error.
+> `loop validate` checks the whole union — `:default-skills` from `config.fnl`
+> included — because the union is what a spawn actually loads. A name that came
+> from the global config says so in the diagnostic.
 
 ---
 

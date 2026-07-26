@@ -150,14 +150,16 @@ Clean run (zero diagnostics of any severity):
   is skipped entirely when `entry` is undefined.
 - MCP server names are never checked — loop never reads `~/.pi/agent/mcp.json`.
 
-### Two semantics gaps
+### One semantics gap
 
 - **Terminal-reachability ignores `on_fail: route` edges.** The reverse BFS
   covers declared `:transitions` only, so a state whose only way forward is a
   guard-failure route is reported as having no path to a terminal.
-- **`:default-skills` from `config.fnl` are not checked.** Validate passes an
-  empty default list; only `machine.defaults.skills` and per-state `:skills` are
-  resolved.
+
+Skills and MCP servers are checked as the **effective union** — `config.fnl`'s
+`:default-skills` / `:default-mcp`, the machine's `:defaults`, and the state's
+own — because that union is what a spawn loads. A diagnostic for a name that
+came from the global config says so.
 
 ## `loop diagram`
 
@@ -195,6 +197,7 @@ loop run [--max-transitions <N>]
 | Flag | Type | Default | Meaning |
 |---|---|---|---|
 | `--max-transitions <N>` | u32 | machine budget | "Stop after this many transitions, on top of the machine's budget." |
+| `-v`, `--verbose` | bool | false | Echo each pi spawn's stderr as it runs. |
 
 Loads config + machine, materializes `ext/*.ts`, opens the ledger, and steps the
 engine until the run reaches a terminal or trips a guardrail.
@@ -254,6 +257,7 @@ loop resume [--max-transitions <N>]
 | Flag | Type | Default | Meaning |
 |---|---|---|---|
 | `--max-transitions <N>` | u32 | machine budget | Same tightening-only semantics as [`loop run`](#loop-run). |
+| `-v`, `--verbose` | bool | false | Same as [`loop run`](#loop-run). |
 
 Identical to `loop run` in every respect except the resume flag — same loading,
 same budget merge, same final line, same exit behavior. The only difference is
@@ -266,8 +270,9 @@ nothing to resume: <project>/.loop/ledger.jsonl is empty
 Where the run picks back up is derived by folding the ledger tail; see
 [resume points](02-how-it-works.md#resuming-an-interrupted-run).
 
-Note that `wallclock-s` is measured per process, so `resume` restarts that clock
-at zero.
+`wallclock-s` bounds the run, not the process: every ledger line carries the
+run's accumulated `elapsed_s`, and a resume picks the clock up from the last
+one. Resuming does not buy a fresh time budget.
 
 ## `loop status`
 
@@ -313,7 +318,7 @@ Exactly five keys:
   "navigator_invocations": 0,
   "status": "done",
   "totals": {
-    "cost_usd": 3.44,
+    "cost_usd": 3.58,
     "transitions": 10,
     "wallclock_s": 3414
   }
@@ -323,14 +328,12 @@ Exactly five keys:
 Keys are emitted in alphabetical order, not the order listed in the table above.
 No resume point, no artifacts, no ticket id in JSON mode.
 
-**Two quirks:**
+On a ledger with zero events the same five keys come out with nulls and zeroes
+— the human-readable ``no run yet — `loop run` starts one`` belongs to the
+default mode only, so `--json` is always parseable.
 
-1. **`--json` can emit non-JSON.** The empty-ledger message above is printed
-   before the mode branch, so `loop status --json` on a fresh project prints
-   ``no run yet — `loop run` starts one`` and exits 0. Parsers must handle it.
-2. **`totals.wallclock_s` is `0` for a run in progress.** The fold never
-   accumulates elapsed time; totals are overwritten wholesale only when
-   `run_finished` is appended.
+`totals.wallclock_s` folds out of the last event's `elapsed_s`, so it is
+meaningful mid-run and accumulates across resumes rather than restarting.
 
 ### Human mode
 
@@ -382,9 +385,12 @@ Four existence checks, no parsing. Output per check:
 | # | Label | Hint on failure |
 |---|---|---|
 | 1 | `` `{pi_bin}` on PATH `` | `install pi, or set LOOP_PI_BIN` |
-| 2 | `~/.config/loop/config.fnl` | ``run `loop init <TICKET>` to scaffold the toolbox`` |
-| 3 | `vendored ext materialized` | ``run `loop init` to write them`` |
-| 4 | `.loop/machine.fnl` | ``run `loop init <TICKET>` in this project`` |
+| 2 | `{config_dir}/config.fnl` | ``run `loop init <TICKET>` to scaffold the toolbox`` |
+| 3 | `{config_dir}/ext/transition-tool.ts` | ``run `loop init` to write the vendored ext`` |
+| 4 | `{project}/.loop/machine.fnl` | ``run `loop init <TICKET>` in this project`` |
+
+Every label is the path actually tested, so under `LOOP_CONFIG_DIR` or `-C` you
+can read off where loop is looking.
 
 `{pi_bin}` is `LOOP_PI_BIN` or `pi`. A `pi_bin` containing `/` is tested as a
 path; otherwise each `PATH` entry is probed for a file of that name.
@@ -395,9 +401,8 @@ All four pass → blank line, then `all good`, exit 0. Otherwise exit 1 with
 ### What doctor does not check
 
 - It never loads or evaluates `config.fnl` — check 2 is a bare file-existence
-  test, and its label is a **hardcoded literal**. Under `LOOP_CONFIG_DIR` the
-  label still reads `~/.config/loop/config.fnl` while the check probes the
-  overridden path.
+  test. A file that exists but does not parse passes doctor and fails
+  everything else; `loop validate` is what reads it.
 - It never parses `machine.fnl` — check 4 only asks whether the file exists. Use
   [`loop validate`](#loop-validate) for the graph.
 - It never resolves playbooks or skills.

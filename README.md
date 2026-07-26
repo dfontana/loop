@@ -102,7 +102,8 @@ Working, and under active development. The Rust workspace in `crates/` drives
 toolbox lives in `~/.config/loop/`; generated renders go to
 `~/.local/state/loop/`.
 
-Known gaps are tracked honestly in
-[design notes](docs/05-design-notes.md#known-gaps) rather than left for you to
-discover — read that section before relying on `:context "full"`,
-`:pi-extensions`, or the dollar budget.
+The limits that come with the design — stage-level recovery, budgets sampled
+between stages, skills that scope instructions rather than capability — are
+written down in
+[design notes](docs/05-design-notes.md#limits-we-accept) rather than left for
+you to discover.
