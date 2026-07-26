@@ -37,19 +37,17 @@
  :states
  {:implement {:playbook "implement"
               :thinking "high"
-              :tools ["edit" "write"]
               :description "Implement the plan; keep the build green."}
 
   :review {:playbook "review"
            :thinking "high"
-           :tools ["agent" "select_review_model"]
            :description "Adversarial review of the diff; find real defects."}
 
-  ;; No edit/write: a stage that validates must not be able to quietly fix
-  ;; what it is judging.
+  ;; The gate on the way out of this stage is a `:check` the harness runs
+  ;; itself, so it does not matter what this stage can reach — a stage cannot
+  ;; edit its way past a command it does not run.
   :test {:playbook "qa"
          :thinking "high"
-         :exclude-tools ["edit" "write"]
          :description "Run the test suite and report a grounded pass/fail."}
 
   :open-pr {:playbook "open-pr"

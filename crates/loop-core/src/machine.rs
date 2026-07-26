@@ -131,9 +131,8 @@ impl ModelChoice {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Defaults {
     pub model: ModelChoice,
-    /// Added to every state's allowlist.
-    pub tools: Vec<String>,
-    pub exclude_tools: Vec<String>,
+    /// Loaded into every stage, on top of whatever the state names.
+    pub skills: Vec<String>,
 }
 
 /// A node in the graph.
@@ -144,11 +143,10 @@ pub struct State {
     /// The state's own overrides, as authored. Resolve with
     /// [`Machine::resolve_model`].
     pub model: ModelChoice,
-    /// The state's own allowlist, as authored. Resolve with
-    /// [`Machine::resolve_tools`].
-    pub tools: Vec<String>,
-    /// Maps to pi's `--exclude-tools`.
-    pub exclude_tools: Vec<String>,
+    /// Skills loaded into this stage, by name. Resolved to paths by
+    /// `loop-toolbox` and passed to pi as `--skill`. Resolve the *set* with
+    /// [`Machine::resolve_skills`].
+    pub skills: Vec<String>,
     /// One line on what this stage is for. Fed to the Navigator so it can route.
     pub description: Option<String>,
 }
@@ -187,7 +185,8 @@ pub struct Check {
     pub timeout_s: u64,
 }
 
-/// The default check timeout, matching the `scoped-tools` convention.
+/// The default check timeout. Generous enough for a compile, short enough
+/// that a wedged command doesn't stall the run for long.
 pub const DEFAULT_CHECK_TIMEOUT_S: u64 = 120;
 
 impl Check {
@@ -340,23 +339,24 @@ impl Machine {
     }
 
     /// Union of the global baseline, the machine defaults, and the state's own
-    /// allowlist, order-preserving and deduplicated. `transition` is always
-    /// appended — a worker that cannot end its stage is a hung run.
-    pub fn resolve_tools(&self, state: &State, config_default: &[String]) -> Vec<String> {
+    /// skills, order-preserving and deduplicated.
+    ///
+    /// There is no exclude list and no subtraction. A skill is a prompt plus a
+    /// script the agent runs through bash — loading one grants nothing bash
+    /// did not already grant, so "removing" one would only hide instructions,
+    /// never a capability. What a stage may *do* is decided by the tools pi
+    /// gives it, not here.
+    pub fn resolve_skills(&self, state: &State, config_default: &[String]) -> Vec<String> {
         let mut out: Vec<String> = Vec::new();
-        for t in config_default
+        for s in config_default
             .iter()
-            .chain(self.defaults.tools.iter())
-            .chain(state.tools.iter())
-            .chain(std::iter::once(&"transition".to_string()))
+            .chain(self.defaults.skills.iter())
+            .chain(state.skills.iter())
         {
-            if !out.iter().any(|x| x == t) {
-                out.push(t.clone());
+            if !out.iter().any(|x| x == s) {
+                out.push(s.clone());
             }
         }
-        let excluded =
-            |t: &String| state.exclude_tools.contains(t) || self.defaults.exclude_tools.contains(t);
-        out.retain(|t| t == "transition" || !excluded(t));
         out
     }
 

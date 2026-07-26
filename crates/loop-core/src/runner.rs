@@ -21,10 +21,10 @@ pub struct WorkerSpec {
     pub cycle: u32,
     pub attempt: u32,
     pub model: ModelSpec,
-    /// The `--tools` allowlist, `transition` already included.
-    pub tools: Vec<String>,
-    /// Maps to `--exclude-tools`.
-    pub exclude_tools: Vec<String>,
+    /// Resolved skill directories/files, passed as `--skill <path>`. The
+    /// spawn also gets `--no-skills`, so this list is exactly what loads —
+    /// nothing is picked up by ambient discovery.
+    pub skill_paths: Vec<PathBuf>,
     /// Rendered playbook, passed as `--append-system-prompt @path`.
     pub system_prompt_path: PathBuf,
     /// The short positional kickoff message.
@@ -42,8 +42,8 @@ pub struct WorkerSpec {
     pub cwd: PathBuf,
     /// Deterministic id, so a crashed stage's transcript is findable.
     pub session_id: Option<String>,
-    /// Context-namespace values exported to the spawn (so `valueFromCmd` in a
-    /// scoped-tool can read `$TICKET_ID` / `$CYCLE`).
+    /// Context-namespace values exported to the spawn, so a skill's script can
+    /// read `$TICKET_ID` / `$CYCLE` and key its idempotency on them.
     pub env: Vec<(String, String)>,
 }
 

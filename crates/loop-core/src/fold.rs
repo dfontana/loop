@@ -274,7 +274,7 @@ mod tests {
             session_id: None,
             model: "m".into(),
             thinking: "low".into(),
-            tools: vec![],
+            skills: vec![],
         })
     }
 
@@ -552,7 +552,7 @@ mod entry_head_tests {
             session_id: None,
             model: "m".into(),
             thinking: "low".into(),
-            tools: vec![],
+            skills: vec![],
         })
     }
 

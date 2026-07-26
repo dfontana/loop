@@ -247,7 +247,7 @@ mod tests {
                 session_id: Some("sess-1".into()),
                 model: "claude-sonnet-5".into(),
                 thinking: "high".into(),
-                tools: vec!["read".into(), "edit".into(), "transition".into()],
+                skills: vec!["spark-build".into()],
             },
             EventPayload::WorkerOutput {
                 state: "implement".into(),
@@ -364,7 +364,7 @@ mod tests {
                 session_id: None,
                 model: "m".into(),
                 thinking: "high".into(),
-                tools: vec![],
+                skills: vec![],
             })
             .unwrap();
         ledger
@@ -423,7 +423,7 @@ mod tests {
                 session_id: Some("sess-1".into()),
                 model: "m".into(),
                 thinking: "high".into(),
-                tools: vec![],
+                skills: vec![],
             })
             .unwrap();
         // Crash here: no worker_output follows.

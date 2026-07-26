@@ -37,43 +37,42 @@
  :states
  {:implement {:playbook "implement"
               :thinking "high"
-              :tools ["edit" "write"]
               :description "Implement the plan; keep the build green."}
 
   :review {:playbook "review"
            :thinking "high"
-           :tools ["agent" "select_review_model"]
            :description "Adversarial review of the diff; find real defects."}
 
-  ;; No edit/write: a stage that validates must not be able to quietly fix
-  ;; what it is judging.
+  ;; The gate on the way out of this stage is a `:check` the harness runs
+  ;; itself, so it does not matter what this stage can reach — a stage cannot
+  ;; edit its way past a command it does not run.
   :test {:playbook "qa"
          :thinking "high"
-         :exclude-tools ["edit" "write"]
          :description "Run the test suite and report a grounded pass/fail."}
 
   :open-pr {:playbook "open-pr"
             :thinking "low"
             :description "Open or update the pull request for this branch."}}
 
- ;; Every gate here is a `:criteria` judged by the independent Judge agent,
- ;; because that is the only kind of gate that works on a fresh install with an
- ;; empty ~/.config/loop/tools/.
+ ;; Two kinds of gate, and the difference matters.
  ;;
- ;; UPGRADE THIS. A `:when` guard over a var a real tool emitted is strictly
- ;; better than a Judge's opinion (docs/07 #2): the tool asserts the fact from
- ;; an exit code, and no amount of model optimism can fake it. As soon as you
- ;; have a scoped-tool that runs your suite and prints
+ ;; A `:check` is a command the HARNESS runs, in its own subprocess, after the
+ ;; stage exits. Exit 0 passes the edge. It is the only signal here a worker
+ ;; cannot author — everything else on the ledger passed through the worker's
+ ;; session first — so put a check on any edge where a mechanical fact settles
+ ;; the question. `test -f`, `cargo test`, `curl | schema-validate`.
  ;;
- ;;   LOOP_VARS {"test":{"result":"pass"}}
+ ;; A `:criteria` is judged by an independent cheap agent that sees the stage's
+ ;; output, its artifacts, and the check's stdout — never the worker's own
+ ;; claim that it succeeded. Use it for what no exit code can decide: "every
+ ;; item in the plan is addressed", "this is a real fix, not a workaround".
  ;;
- ;; add it to the `test` state's :tools and replace that stage's criteria with
+ ;; They compose. The check is a precondition; the criteria is the semantic
+ ;; layer on top. A failed check is not appealable to the Judge.
  ;;
- ;;   {:from "test" :to "open-pr" :when (fn [v] (= v.test.result "pass"))}
- ;;   {:from "test" :to "implement" :when (fn [v] (= v.test.result "fail"))}
- ;;
- ;; `loop validate` warns when a `:when` gates on a scope nothing looks able to
- ;; emit, which is the other half of this trade.
+ ;; UPGRADE THIS. `:criteria "the suite passed"` is a stopgap — swap in the
+ ;; command that actually runs your suite as a `:check` and let the criteria
+ ;; cover only what the exit code can't.
  :transitions
  [{:from "implement" :to "review"
    :criteria "Every item in the plan is addressed in the diff, the build is green, and no TODO/FIXME markers remain in the changed files."
@@ -86,6 +85,9 @@
    :on-fail {:route "implement"}}
 
   {:from "test" :to "open-pr"
+   ;; Replace with the command that runs your suite — then the gate stops
+   ;; depending on the stage reporting honestly.
+   ;; :check "cargo test --quiet"
    :criteria "The test suite was actually run in this stage (the output is present, not asserted), and it passed. A suite that was not run is a fail."
    :on-fail {:route "implement"}}
 

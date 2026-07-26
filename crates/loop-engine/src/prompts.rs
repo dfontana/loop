@@ -15,6 +15,10 @@ use loop_core::{
 pub struct StagePlan {
     pub spec: WorkerSpec,
     pub context: Context,
+    /// The skill *names* the stage resolved, for the ledger. `spec.skill_paths`
+    /// carries the paths pi actually loads; the names are what a human reading
+    /// `state_entered` recognizes.
+    pub skills: Vec<String>,
 }
 
 pub trait StageBuilder {

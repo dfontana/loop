@@ -57,15 +57,14 @@ pub fn state(id: &str) -> State {
         id: id.into(),
         playbook: PlaybookRef::Inline("test playbook".into()),
         model: ModelChoice::default(),
-        tools: Vec::new(),
-        exclude_tools: Vec::new(),
+        skills: Vec::new(),
         description: None,
     }
 }
 
-pub fn state_with_tools(id: &str, tools: &[&str]) -> State {
+pub fn state_with_skills(id: &str, skills: &[&str]) -> State {
     State {
-        tools: tools.iter().map(|s| s.to_string()).collect(),
+        skills: skills.iter().map(|s| s.to_string()).collect(),
         ..state(id)
     }
 }
@@ -304,15 +303,16 @@ impl<'m> StageBuilder for FakeStageBuilder<'m> {
         let model = self
             .machine
             .resolve_model(st, &ModelChoice::default(), &model_spec());
-        let tools = self.machine.resolve_tools(st, &[]);
+        let skills = self.machine.resolve_skills(st, &[]);
         let spec = WorkerSpec {
             ticket: self.machine.ticket.clone(),
             state: state.clone(),
             cycle,
             attempt,
             model,
-            tools,
-            exclude_tools: st.exclude_tools.clone(),
+            // The fake resolves a skill name to a stand-in path; nothing here
+            // touches the filesystem.
+            skill_paths: skills.iter().map(PathBuf::from).collect(),
             system_prompt_path: PathBuf::from("/dev/null"),
             entry_message: format!("enter {state} cycle {cycle} attempt {attempt}"),
             reachable: self.machine.neighbors(state),
@@ -332,7 +332,11 @@ impl<'m> StageBuilder for FakeStageBuilder<'m> {
             entry_addendum: entry_addendum.map(|s| s.to_string()),
             ..Context::default()
         };
-        Ok(StagePlan { spec, context })
+        Ok(StagePlan {
+            spec,
+            context,
+            skills,
+        })
     }
 
     fn build_judge(

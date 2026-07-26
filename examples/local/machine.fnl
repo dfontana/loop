@@ -6,7 +6,7 @@
 ;; The ticket's unique files are just this machine + its prose (task.md,
 ;; plan.md) + any bespoke local playbook (playbooks/validate-contract.md) + the
 ;; ledger it produces. Everything else it references — generic playbooks,
-;; tools — lives in the portable toolbox at ~/.config/loop/ and is reused
+;; skills — lives in the portable toolbox at ~/.config/loop/ and is reused
 ;; untouched.
 ;;
 ;;   loop validate   → lints the graph + resolves every reference
@@ -31,7 +31,7 @@
  ;; Sits under every state and over ~/.config/loop/config.fnl. A state's own
  ;; :model/:thinking wins; so does its playbook's frontmatter.
  :defaults {:provider "anthropic" :model "claude-sonnet-5" :thinking "medium"
-            :tools ["read" "bash"]}
+            :skills []}
 
  ;; Hard stops the harness enforces. May only tighten the global budgets.
  :budgets {:usd 8 :wallclock-s 5400 :max-transitions 40}
@@ -53,45 +53,58 @@
  :states
  {:implement {:playbook "implement"        ; toolbox
               :thinking "high"
-              :tools ["edit" "write" "spark_build"]
+              :skills ["spark-build"]
               :description "Implement the plan; keep the build green."}
 
   :review {:playbook "review"              ; this playbook == the run-review skill
            :thinking "high"
-           :tools ["agent" "select_review_model"]
            :description "Adversarial review of the diff; find real defects."}
 
-  ;; No edit/write: a validation stage must not be able to quietly fix what
-  ;; it is judging (docs/07 #1).
+  ;; What keeps this stage from grading its own homework is not what it can
+  ;; reach — it is that the edges out of it are gated on `:check` commands the
+  ;; harness runs itself, and on a Judge that never sees this stage's own
+  ;; claims (docs/07 #1).
   :qa-staging {:playbook "qa"
                :thinking "high"
-               :tools ["staging_deploy" "spark_run" "fetch_job_output"]
-               :exclude-tools ["edit" "write"]
+               :skills ["staging-deploy" "spark-run"]
                :description "Deploy to staging, run the pipeline, grade it."}
 
   :debug {:playbook "debug-spark"
           :thinking "high"
-          :tools ["edit" "spark_build" "use_playbook"]   ; may consult debug-transient
+          :skills ["spark-build" "debug-transient"]
           :description "Diagnose a real pipeline failure and fix it."}
 
   :validate-contract {:playbook "validate-contract"      ; LOCAL: ./.loop/playbooks/
                       :thinking "medium"
-                      :tools ["staging_deploy" "contract_check"]
+                      :skills ["staging-deploy" "contract-check"]
                       :description "Confirm the API contract matches the OpenAPI schema."}
 
   :open-pr {:playbook "open-pr"
             :thinking "low"
-            :tools ["open_pr"]
+            :skills ["open-pr"]
             :description "Open or update the pull request for this branch."}}
 
  ;; ── Transitions ───────────────────────────────────────────────────────────
- ;; Only these edges exist (the structural guard). Then :criteria, judged by an
- ;; independent cheap agent that sees the stage's output and artifacts but never
- ;; the worker's own claim that it succeeded.
+ ;; Three tiers, cheapest first.
+ ;;
+ ;;  1. structural — only these edges exist at all.
+ ;;  2. :check     — a command the HARNESS runs, in its own subprocess, after
+ ;;                  the stage exits. Exit 0 passes. The one signal here a
+ ;;                  worker cannot author, because it never touches the
+ ;;                  worker's session. A failed check is not appealable.
+ ;;  3. :criteria  — an independent cheap Judge, which sees the stage's output,
+ ;;                  its artifacts, and the check's stdout — but never the
+ ;;                  worker's own claim that it succeeded.
+ ;;
+ ;; Note the same scripts appear here and in the states' :skills. That is the
+ ;; point: the agent and the harness run identical code, so an agent cannot
+ ;; pass a gate the harness would fail.
+ ;;
  ;; :on-fail is "retry" | "abort" | {:route "state"}.
  :transitions
  [{:from "implement" :to "review"
-   :criteria "The plan's four items are all addressed in the diff, the build is green, and no TODO/FIXME markers remain in changed files."
+   :check "bash ~/.config/loop/skills/spark-build/build.sh"
+   :criteria "The plan's four items are all addressed in the diff, and no TODO/FIXME markers remain in changed files."
    :on-fail "retry"}
 
   {:from "review" :to "implement"
@@ -101,25 +114,28 @@
 
   ;; The three-way fail routing: a transient flake retries in place with
   ;; backoff and touches no code, a real failure spawns the debugger, a pass
-  ;; moves on (docs/07 #4). What separates the first two is *where* the failure
-  ;; came from, which is why each edge states it as a criterion.
+  ;; moves on (docs/07 #4). Each edge asserts its own branch of one script's
+  ;; taxonomy, so "transient" is decided by a versioned regex set and an exit
+  ;; code rather than by a tired agent that would rather retry than debug.
   {:from "qa-staging" :to "qa-staging"
-   :criteria "The pipeline run failed for infrastructure reasons — a lost executor, preemption, a shuffle/fetch failure, throttling, or a timeout — and not because of a defect in the code under test."
+   :check "bash ~/.config/loop/skills/spark-run/classify.sh --expect transient"
    :backoff-s 30
    :on-fail "abort"}
   {:from "qa-staging" :to "debug"
-   :criteria "The pipeline run failed deterministically: a schema, contract, assertion, or logic error in the code under test."}
+   :check "bash ~/.config/loop/skills/spark-run/classify.sh --expect real"}
   {:from "qa-staging" :to "validate-contract"
-   :criteria "The pipeline run completed successfully and its output sample satisfies the QA cases."}
+   :check "bash ~/.config/loop/skills/spark-run/classify.sh --expect pass"
+   :criteria "The output sample satisfies every QA case, not just the job's exit status."}
 
   {:from "debug" :to "qa-staging"
-   :criteria "A concrete fix was applied and the build is green."
+   :check "bash ~/.config/loop/skills/spark-build/build.sh"
+   :criteria "A concrete fix to the diagnosed failure was applied — not a retry, a widened assertion, or a disabled check."
    :on-fail "retry"}
 
   {:from "validate-contract" :to "implement"
    :criteria "The staging response does not match the committed OpenAPI schema."}
   {:from "validate-contract" :to "open-pr"
-   :criteria "The staging response matches the committed OpenAPI schema."}
+   :check "bash ~/.config/loop/skills/contract-check/check.sh /accounts/42"}
 
   {:from "open-pr" :to "done"
    :criteria "A pull request exists for this branch with a populated description."}]

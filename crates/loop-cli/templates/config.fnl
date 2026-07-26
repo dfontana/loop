@@ -17,13 +17,15 @@
              ;; ping-ponging between two states.
              :max-invocations 5}
 
- ;; Baseline tools every stage gets before its own allowlist is added.
- :default-tools ["read" "bash"]
+ ;; Skills loaded into every stage, before the machine's and the state's.
+ ;; Usually empty: skills are situational, so most belong on the states that
+ ;; need them rather than on everything.
+ :default-skills []
 
  ;; Installed pi-extension packages activated per spawn. These are NOT files
- ;; loop ships — they live in your pi extension settings. loop points
- ;; scoped-tools and mcp at the staged agent dir via PI_AGENT_DIR.
- :pi-extensions ["scoped-tools" "mcp" "review-model-selector"]
+ ;; loop ships — they live in your pi extension settings. loop points `mcp` at
+ ;; the staged agent dir via PI_AGENT_DIR, where it finds mcp.json.
+ :pi-extensions ["mcp" "review-model-selector"]
 
  ;; Hard stops the harness enforces. Not suggestions to the agent.
  :budgets {:usd 15 :wallclock-s 7200 :max-transitions 60}

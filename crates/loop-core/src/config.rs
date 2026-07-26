@@ -22,7 +22,7 @@ pub enum ContextMode {
 /// written into the directory a human hand-edits.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Paths {
-    /// `~/.config/loop` — authored: config.fnl, playbooks/, tools/, machines/, ext/.
+    /// `~/.config/loop` — authored: config.fnl, playbooks/, skills/, machines/, ext/.
     pub config_dir: PathBuf,
     /// `~/.local/state/loop` — generated and disposable.
     pub state_dir: PathBuf,
@@ -56,8 +56,13 @@ impl Paths {
     pub fn toolbox_playbooks(&self) -> PathBuf {
         self.config_dir.join("playbooks")
     }
-    pub fn toolbox_tools(&self) -> PathBuf {
-        self.config_dir.join("tools")
+    pub fn toolbox_skills(&self) -> PathBuf {
+        self.config_dir.join("skills")
+    }
+    /// `~/.config/loop/mcp.json`, staged into the agent dir for the `mcp`
+    /// pi-extension.
+    pub fn toolbox_mcp(&self) -> PathBuf {
+        self.config_dir.join("mcp.json")
     }
     pub fn toolbox_machines(&self) -> PathBuf {
         self.config_dir.join("machines")
@@ -85,6 +90,9 @@ impl Paths {
     }
     pub fn local_playbooks(&self) -> PathBuf {
         self.loop_dir().join("playbooks")
+    }
+    pub fn local_skills(&self) -> PathBuf {
+        self.loop_dir().join("skills")
     }
     pub fn ledger_file(&self) -> PathBuf {
         self.loop_dir().join("ledger.jsonl")
@@ -148,10 +156,10 @@ pub struct Config {
     pub navigator: ModelSpec,
     pub navigator_max_invocations: u32,
 
-    /// Baseline tools every stage gets before its own allowlist is added.
-    pub default_tools: Vec<String>,
+    /// Skills loaded into every stage, before the machine's and the state's.
+    pub default_skills: Vec<String>,
     /// Installed pi-extension package names activated per spawn
-    /// (`scoped-tools`, `mcp`, `review-model-selector`).
+    /// (`mcp`, `review-model-selector`).
     pub pi_extensions: Vec<String>,
 
     pub budgets: Budgets,
@@ -188,12 +196,8 @@ impl Config {
                 thinking: crate::machine::Thinking::Low,
             },
             navigator_max_invocations: 5,
-            default_tools: vec!["read".into(), "bash".into()],
-            pi_extensions: vec![
-                "scoped-tools".into(),
-                "mcp".into(),
-                "review-model-selector".into(),
-            ],
+            default_skills: Vec::new(),
+            pi_extensions: vec!["mcp".into(), "review-model-selector".into()],
             budgets: Budgets {
                 usd: Some(15.0),
                 wallclock_s: Some(7200),

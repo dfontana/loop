@@ -11,7 +11,7 @@
 //!  :qa-cases [{:id "pipeline" :desc "…"}
 //!             {:id "contract" :desc "…"}]
 //!
-//!  :defaults {:model "claude-sonnet-5" :thinking "medium" :tools ["read" "bash"]}
+//!  :defaults {:model "claude-sonnet-5" :thinking "medium" :skills ["jj"]}
 //!  :budgets  {:usd 8 :wallclock-s 5400 :max-transitions 40}
 //!  :judge     {:model "claude-haiku-4-5" :thinking "low"}
 //!  :navigator {:model "claude-haiku-4-5" :thinking "low" :max-invocations 5}
@@ -23,11 +23,10 @@
 //!
 //!  :states
 //!  {:implement  {:playbook "implement" :thinking "high"
-//!                :tools ["edit" "write" "spark_build"]
+//!                :skills ["spark-build"]
 //!                :description "Implement the plan; keep the build green."}
 //!   :qa-staging {:playbook "qa" :thinking "high"
-//!                :tools ["staging_deploy" "spark_run" "fetch_job_output"]
-//!                :exclude-tools ["edit" "write"]}}
+//!                :skills ["staging-deploy" "spark-run"]}}
 //!
 //!  :transitions
 //!  [{:from "implement" :to "review"
@@ -35,13 +34,16 @@
 //!    :on-fail "retry"}
 //!   {:from "qa-staging" :to "qa-staging"
 //!    :backoff-s 30 :on-fail "abort"}
-//!   {:from "qa-staging" :to "debug"}]
+//!   {:from "qa-staging" :to "debug"
+//!    :check "sparkctl status --ns loop-$TICKET_ID-$CYCLE"}]
 //!
 //!  :loops
 //!  [{:name "qa" :states ["qa-staging" "debug"] :max-cycles 4 :on-exhausted "escalate"}]}
 //! ```
 //!
 //! Notes that matter for the conversion:
+//! - `:check` is a bare command string, or `{:cmd .. :timeout-s ..}`. The
+//!   harness runs it itself; exit 0 passes the edge.
 //! - `:on-fail` is `"retry"` | `"abort"` | `{:route "state-id"}`.
 //! - `:model`/`:thinking`/`:provider` are all optional at every level — leave
 //!   them `None` and let [`loop_core::Machine::resolve_model`] stack the layers.
@@ -60,8 +62,8 @@
 //!  :worker    {:model "claude-sonnet-5"  :thinking "medium"}
 //!  :judge     {:model "claude-haiku-4-5" :thinking "low"}
 //!  :navigator {:model "claude-haiku-4-5" :thinking "low" :max-invocations 5}
-//!  :default-tools ["read" "bash"]
-//!  :pi-extensions ["scoped-tools" "mcp" "review-model-selector"]
+//!  :default-skills []
+//!  :pi-extensions ["mcp" "review-model-selector"]
 //!  :budgets {:usd 15 :wallclock-s 7200 :max-transitions 60}
 //!  :context "digest" :digest-last-n 8
 //!  :transition-mode "constrained"}
@@ -315,13 +317,8 @@ fn parse_defaults(table: &mlua::Table) -> Result<Defaults> {
         None => Ok(Defaults::default()),
         Some(t) => {
             let model = parse_model_choice(&t, "`:defaults`")?;
-            let tools = get_str_vec(&t, "tools")?.unwrap_or_default();
-            let exclude_tools = get_str_vec(&t, "exclude-tools")?.unwrap_or_default();
-            Ok(Defaults {
-                model,
-                tools,
-                exclude_tools,
-            })
+            let skills = get_str_vec(&t, "skills")?.unwrap_or_default();
+            Ok(Defaults { model, skills })
         }
     }
 }
@@ -344,8 +341,7 @@ fn parse_states(table: &mlua::Table) -> Result<BTreeMap<StateId, State>> {
         let ctx = format!("state `{id}`");
         let playbook = parse_playbook(&st, &id)?;
         let model = parse_model_choice(&st, &ctx)?;
-        let tools = get_str_vec(&st, "tools")?.unwrap_or_default();
-        let exclude_tools = get_str_vec(&st, "exclude-tools")?.unwrap_or_default();
+        let skills = get_str_vec(&st, "skills")?.unwrap_or_default();
         let description = get_str(&st, "description")?;
         out.insert(
             id.clone(),
@@ -353,8 +349,7 @@ fn parse_states(table: &mlua::Table) -> Result<BTreeMap<StateId, State>> {
                 id,
                 playbook,
                 model,
-                tools,
-                exclude_tools,
+                skills,
                 description,
             },
         );
@@ -626,7 +621,7 @@ pub fn config_from_table(table: &mlua::Table, base: Config) -> Result<Config> {
     let navigator = model_spec_overlay(table, "navigator", &base.navigator)?;
     let navigator_max_invocations =
         parse_navigator_max_invocations(table, base.navigator_max_invocations)?;
-    let default_tools = get_str_vec(table, "default-tools")?.unwrap_or(base.default_tools);
+    let default_skills = get_str_vec(table, "default-skills")?.unwrap_or(base.default_skills);
     let pi_extensions = get_str_vec(table, "pi-extensions")?.unwrap_or(base.pi_extensions);
 
     let budgets = match get_table(table, "budgets")? {
@@ -663,7 +658,7 @@ pub fn config_from_table(table: &mlua::Table, base: Config) -> Result<Config> {
         judge,
         navigator,
         navigator_max_invocations,
-        default_tools,
+        default_skills,
         pi_extensions,
         budgets,
         context,

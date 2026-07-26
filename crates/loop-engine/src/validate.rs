@@ -2,12 +2,12 @@
 //!
 //! Machine authoring errors are the cheapest class of failure to catch and the
 //! most annoying to debug at run time: an unreachable state, a dangling
-//! playbook reference, no path to a terminal, a stage whose `criteria` can
-//! never be judged because nothing emits the var it gates on.
+//! playbook or skill reference, no path to a terminal, two edges between the
+//! same pair where only the first can ever be taken.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use loop_core::{Machine, PlaybookRef, State};
+use loop_core::{Machine, PlaybookRef};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Severity {
@@ -53,16 +53,16 @@ impl Diagnostic {
 ///   `resolve`, since resolution is filesystem work).
 /// - Every loop's states exist and its head is a state some edge re-enters.
 /// - `escalation_state`, if set, is a terminal.
-/// - **Warning:** a state whose only outgoing edges have `when` guards over
-///   vars no bound tool is known to emit — the classic "gate that can never
-///   open".
-/// - **Warning:** a state whose id or playbook names it a validation stage
-///   (qa/test/validate/verify/check/review/audit) yet allowlists `edit` or
-///   `write` — a stage that can fix what it is grading (docs/07 #1). The
-///   trigger is deliberately the stage's identity and not "gates a `criteria`
-///   edge": `implement → review` is criteria-gated too, and `implement` must
-///   obviously be able to edit.
-pub fn validate(machine: &Machine, resolve: &dyn Fn(&PlaybookRef) -> bool) -> Vec<Diagnostic> {
+/// - Every skill a state names resolves (same caller-supplied filesystem seam).
+/// - **Warning:** an edge with neither `check` nor `criteria` — the worker's
+///   proposal is committed unexamined.
+/// - No two transitions share a `from`/`to` pair: `select_edge` takes the
+///   first, so the rest are dead and their `criteria` silently ignored.
+pub fn validate(
+    machine: &Machine,
+    resolve: &dyn Fn(&PlaybookRef) -> bool,
+    resolve_skill: &dyn Fn(&str) -> bool,
+) -> Vec<Diagnostic> {
     let mut out = Vec::new();
 
     let name_exists =
@@ -143,13 +143,21 @@ pub fn validate(machine: &Machine, resolve: &dyn Fn(&PlaybookRef) -> bool) -> Ve
         }
     }
 
-    // Every state's playbook resolves.
+    // Every state's playbook and skills resolve.
     for (id, state) in &machine.states {
         if !resolve(&state.playbook) {
             out.push(Diagnostic::error(
                 id.clone(),
                 format!("playbook for state `{id}` does not resolve in the toolbox"),
             ));
+        }
+        for name in machine.resolve_skills(state, &[]) {
+            if !resolve_skill(&name) {
+                out.push(Diagnostic::error(
+                    id.clone(),
+                    format!("skill `{name}` on state `{id}` does not resolve in the toolbox"),
+                ));
+            }
         }
     }
 
@@ -200,6 +208,25 @@ pub fn validate(machine: &Machine, resolve: &dyn Fn(&PlaybookRef) -> bool) -> Ve
         ));
     }
 
+    // Warning: an edge with no `check` and no `criteria`. Nothing stands
+    // between the worker's proposal and the commit, so the worker's word is
+    // final on that hop. Sometimes that is exactly right — an unconditional
+    // hand-off into the first working state — which is why this is advisory.
+    // It is worth saying out loud because an unguarded edge is now the *shape
+    // you get by forgetting*, where it used to take deleting a `when`.
+    for t in &machine.transitions {
+        if t.check.is_none() && t.criteria.is_none() {
+            out.push(Diagnostic::warning(
+                t.from.clone(),
+                format!(
+                    "transition `{}` → `{}` has neither `check` nor `criteria`: the worker's \
+                     proposal is committed unexamined",
+                    t.from, t.to
+                ),
+            ));
+        }
+    }
+
     // Error: two edges between the same pair. `when` guards used to tell such
     // edges apart; without them `select_edge` takes the first declared one and
     // the rest are dead, silently discarding whatever `criteria` they carry.
@@ -217,67 +244,5 @@ pub fn validate(machine: &Machine, resolve: &dyn Fn(&PlaybookRef) -> bool) -> Ve
         }
     }
 
-    // Warning: a *validation* state that allowlists `edit`/`write` — a stage
-    // that can fix what it is supposed to be grading (docs/07 #1).
-    //
-    // "Gates a `criteria` edge" is too broad a trigger: `implement → review` is
-    // criteria-gated and `implement` must obviously be able to edit. The
-    // dangerous shape is a stage whose *job* is to validate, so the trigger is
-    // the stage's own identity — its id or playbook name — which is also what a
-    // human reads when deciding whether a warning is real.
-    for (id, state) in &machine.states {
-        let names_a_check = |s: &str| {
-            let s = s.to_lowercase();
-            [
-                "qa", "test", "validate", "verify", "check", "review", "audit",
-            ]
-            .iter()
-            .any(|kw| {
-                s.split(|c: char| !c.is_alphanumeric())
-                    .any(|part| part == *kw)
-            })
-        };
-        let playbook_name = match &state.playbook {
-            loop_core::PlaybookRef::Named(n) => n.clone(),
-            loop_core::PlaybookRef::Path(p) => p
-                .file_stem()
-                .map(|s| s.to_string_lossy().to_string())
-                .unwrap_or_default(),
-            loop_core::PlaybookRef::Inline(_) => String::new(),
-        };
-        if !names_a_check(id) && !names_a_check(&playbook_name) {
-            continue;
-        }
-        let tools = effective_tools(machine, state);
-        let offending: Vec<&str> = ["edit", "write"]
-            .into_iter()
-            .filter(|t| tools.contains(*t))
-            .collect();
-        if !offending.is_empty() {
-            out.push(Diagnostic::warning(
-                id.clone(),
-                format!(
-                    "state `{id}` looks like a validation stage but allowlists {} — it can fix what it is supposed to be grading",
-                    offending.join(", ")
-                ),
-            ));
-        }
-    }
-
     out
-}
-
-/// The union of machine defaults and a state's own allowlist, minus excludes —
-/// without a `Config` baseline, which `validate` doesn't have.
-fn effective_tools(machine: &Machine, state: &State) -> BTreeSet<String> {
-    let mut set: BTreeSet<String> = machine.defaults.tools.iter().cloned().collect();
-    set.extend(state.tools.iter().cloned());
-    for t in state
-        .exclude_tools
-        .iter()
-        .chain(machine.defaults.exclude_tools.iter())
-    {
-        set.remove(t);
-    }
-    set
 }

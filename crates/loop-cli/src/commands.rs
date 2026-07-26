@@ -68,7 +68,7 @@ fn ensure_toolbox(config: &Config) -> Result<Vec<String>> {
             created.push(p.display().to_string());
         }
     }
-    std::fs::create_dir_all(paths.toolbox_tools())?;
+    std::fs::create_dir_all(paths.toolbox_skills())?;
     Toolbox::new(config).materialize_ext()?;
     Ok(created)
 }
@@ -129,9 +129,11 @@ fn load(paths: Paths) -> Result<(FennelVm, Config, Machine)> {
 pub fn validate(paths: Paths) -> Result<()> {
     let (_vm, config, machine) = load(paths)?;
     let toolbox = Toolbox::new(&config);
-    let diagnostics = loop_engine::validate(&machine, &|r| {
-        toolbox.resolve_playbook(r, &machine.dir).is_ok()
-    });
+    let diagnostics = loop_engine::validate(
+        &machine,
+        &|r| toolbox.resolve_playbook(r, &machine.dir).is_ok(),
+        &|name| toolbox.resolve_skill(name, &machine.dir).is_ok(),
+    );
 
     let errors = diagnostics
         .iter()
@@ -172,10 +174,7 @@ pub fn run(paths: Paths, max_transitions: Option<u32>, resuming: bool) -> Result
     }
 
     let toolbox = Toolbox::new(&config);
-    let (agent_dir, warnings) = toolbox.stage_agent_dir()?;
-    for w in &warnings {
-        eprintln!("warn  {w}");
-    }
+    let (agent_dir, _mcp_servers) = toolbox.stage_agent_dir()?;
     let ext = toolbox.materialize_ext()?;
 
     let ledger_path = paths.ledger_file();

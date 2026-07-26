@@ -137,9 +137,10 @@ impl StageBuilder for CliStage<'_> {
         let model =
             self.machine
                 .resolve_model(state, &frontmatter_model(&playbook), &self.config.worker);
-        let tools = self
+        let skills = self
             .machine
-            .resolve_tools(state, &self.config.default_tools);
+            .resolve_skills(state, &self.config.default_skills);
+        let skill_paths = self.toolbox.resolve_skills(&skills, &self.machine.dir)?;
 
         let context = self.context(state_id, cycle, attempt, entry_addendum)?;
         let vars = context.to_map();
@@ -165,8 +166,7 @@ impl StageBuilder for CliStage<'_> {
             cycle,
             attempt,
             model,
-            tools,
-            exclude_tools: state.exclude_tools.clone(),
+            skill_paths,
             system_prompt_path,
             entry_message: render::entry_message(&context),
             reachable: self.machine.neighbors(state_id),
@@ -178,7 +178,11 @@ impl StageBuilder for CliStage<'_> {
             session_id: Some(self.session_id(state_id, cycle, attempt)),
             env,
         };
-        Ok(StagePlan { spec, context })
+        Ok(StagePlan {
+            spec,
+            context,
+            skills,
+        })
     }
 
     fn build_judge(

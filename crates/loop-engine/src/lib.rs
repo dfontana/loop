@@ -504,7 +504,7 @@ impl Engine<'_> {
             // then `high` again beside it.
             model: plan.spec.model.model.clone(),
             thinking: plan.spec.model.thinking.to_string(),
-            tools: plan.spec.tools.clone(),
+            skills: plan.skills.clone(),
         })?;
 
         let result = self.runner.run_worker(&plan.spec)?;

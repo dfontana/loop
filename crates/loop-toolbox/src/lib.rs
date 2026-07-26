@@ -2,9 +2,9 @@
 //! has to be on disk before a `pi` spawn can work.
 //!
 //! See docs/04-toolbox.md. Two kinds of reusable thing — **playbooks** (a
-//! stage's prompt) and **tools** (scoped-tools YAML / MCP servers) — plus the
-//! staging step that turns `~/.config/loop/tools/*.yaml` into the single
-//! `scoped-tools.yaml` the installed extension reads.
+//! stage's prompt) and **skills** (situational know-how plus the scripts that
+//! carry it out) — plus the staging step that puts `mcp.json` where the `mcp`
+//! extension looks for it.
 
 use std::path::{Path, PathBuf};
 
@@ -13,7 +13,7 @@ use loop_core::{Config, Context, CoreError, IoContext, ModelChoice, PlaybookRef,
 pub mod ext;
 pub mod playbook;
 pub mod render;
-pub mod scoped;
+pub mod skill;
 
 pub use ext::ExtPaths;
 pub use playbook::ResolvedPlaybook;
@@ -89,26 +89,34 @@ impl<'a> Toolbox<'a> {
         }
     }
 
-    /// Merge `~/.config/loop/tools/*.yaml` into
-    /// `~/.local/state/loop/agent-dir/scoped-tools.yaml`, copy `mcp.json`, and
-    /// stage optional `tools/bin/` helpers alongside them. Returns the directory
-    /// to export as `PI_AGENT_DIR`.
-    ///
-    /// On a same-named tool in two files, the alphabetically later file wins
-    /// and a warning is collected — silently dropping a tool is how you get a
-    /// stage that mysteriously can't build.
+    /// Resolve one skill name to the path pi's `--skill` should load,
+    /// local-first (`./.loop/skills/`, then `~/.config/loop/skills/`).
+    pub fn resolve_skill(&self, name: &str, machine_dir: &Path) -> Result<PathBuf> {
+        skill::resolve(
+            name,
+            &machine_dir.join("skills"),
+            &self.config.paths.toolbox_skills(),
+        )
+    }
+
+    /// Resolve every skill a stage names, in order.
+    pub fn resolve_skills(&self, names: &[String], machine_dir: &Path) -> Result<Vec<PathBuf>> {
+        names
+            .iter()
+            .map(|n| self.resolve_skill(n, machine_dir))
+            .collect()
+    }
+
+    /// Prepare the directory exported as `PI_AGENT_DIR`, copying `mcp.json`
+    /// into it for the `mcp` extension. Returns the directory and the MCP
+    /// server names it declares.
     pub fn stage_agent_dir(&self) -> Result<(PathBuf, Vec<String>)> {
         let agent_dir = self.config.paths.agent_dir();
         std::fs::create_dir_all(&agent_dir)
             .io_ctx(format!("creating agent dir {}", agent_dir.display()))?;
 
-        let tools_dir = self.config.paths.toolbox_tools();
-        let dest = agent_dir.join("scoped-tools.yaml");
-        let (_names, warnings) = scoped::merge_tools(&tools_dir, &dest)?;
-        scoped::stage_mcp(&tools_dir, &agent_dir)?;
-        stage_tool_helpers(&tools_dir, &agent_dir)?;
-
-        Ok((agent_dir, warnings))
+        let servers = skill::stage_mcp(&self.config.paths.toolbox_mcp(), &agent_dir)?;
+        Ok((agent_dir, servers))
     }
 
     /// Write loop's three vendored pi extensions into `~/.config/loop/ext/`
@@ -151,51 +159,6 @@ impl<'a> Toolbox<'a> {
     pub fn config(&self) -> &Config {
         self.config
     }
-}
-
-/// Copy optional executable helpers from `tools/bin/` into the staged agent
-/// directory. Scoped-tool commands can then invoke them through `$PI_AGENT_DIR`
-/// without assuming a particular XDG configuration path.
-fn stage_tool_helpers(tools_dir: &Path, agent_dir: &Path) -> Result<()> {
-    let source = tools_dir.join("bin");
-    if !source.exists() {
-        return Ok(());
-    }
-
-    let destination = agent_dir.join("bin");
-    if destination.exists() {
-        std::fs::remove_dir_all(&destination)
-            .io_ctx(format!("clearing staged helpers {}", destination.display()))?;
-    }
-    copy_tree(&source, &destination)
-}
-
-fn copy_tree(source: &Path, destination: &Path) -> Result<()> {
-    std::fs::create_dir_all(destination).io_ctx(format!(
-        "creating staged helper directory {}",
-        destination.display()
-    ))?;
-    for entry in std::fs::read_dir(source)
-        .io_ctx(format!("reading helper directory {}", source.display()))?
-    {
-        let entry = entry.io_ctx(format!("reading helper entry in {}", source.display()))?;
-        let source_path = entry.path();
-        let destination_path = destination.join(entry.file_name());
-        if entry
-            .file_type()
-            .io_ctx(format!("reading helper type {}", source_path.display()))?
-            .is_dir()
-        {
-            copy_tree(&source_path, &destination_path)?;
-        } else {
-            std::fs::copy(&source_path, &destination_path).io_ctx(format!(
-                "staging helper {} to {}",
-                source_path.display(),
-                destination_path.display()
-            ))?;
-        }
-    }
-    Ok(())
 }
 
 /// Write `content` to `path` only if the file is absent or its content hash
@@ -441,45 +404,31 @@ mod tests {
     }
 
     #[test]
-    fn stage_agent_dir_reports_collision_warnings() {
+    fn stage_agent_dir_copies_mcp_and_reports_its_servers() {
         let config_dir = tempdir().unwrap();
         let state_dir = tempdir().unwrap();
         let project_dir = tempdir().unwrap();
         let config = test_config(config_dir.path(), state_dir.path(), project_dir.path());
         let tb = Toolbox::new(&config);
 
-        let tools_dir = config.paths.toolbox_tools();
-        std::fs::create_dir_all(&tools_dir).unwrap();
         std::fs::write(
-            tools_dir.join("a.yaml"),
-            "shared:\n  description: from a\n  commandTemplate: echo a\n",
+            config.paths.toolbox_mcp(),
+            r#"{"mcpServers": {"linear": {"url": "https://example"}}}"#,
         )
         .unwrap();
-        std::fs::write(
-            tools_dir.join("b.yaml"),
-            "shared:\n  description: from b\n  commandTemplate: echo b\n",
-        )
-        .unwrap();
-        let helpers = tools_dir.join("bin");
-        std::fs::create_dir_all(&helpers).unwrap();
-        std::fs::write(helpers.join("classify.sh"), "#!/bin/sh\necho helper\n").unwrap();
 
-        let (agent_dir, warnings) = tb.stage_agent_dir().unwrap();
+        let (agent_dir, servers) = tb.stage_agent_dir().unwrap();
         assert_eq!(agent_dir, config.paths.agent_dir());
-        assert_eq!(warnings.len(), 1);
-        assert!(agent_dir.join("scoped-tools.yaml").is_file());
-        assert_eq!(
-            std::fs::read_to_string(agent_dir.join("bin/classify.sh")).unwrap(),
-            "#!/bin/sh\necho helper\n"
-        );
+        assert_eq!(servers, vec!["linear".to_string()]);
+        assert!(agent_dir.join("mcp.json").is_file());
     }
 
     /// Smoke test against the real `examples/toolbox` fixtures: every shipped
-    /// playbook must parse, and merging every shipped `tools/*.yaml` must not
-    /// warn or fail. This is what actually exercises the format the docs
-    /// promise, on top of the synthetic per-case unit tests above.
+    /// playbook must parse and every shipped skill must resolve. This is what
+    /// actually exercises the format the docs promise, on top of the synthetic
+    /// per-case unit tests above.
     #[test]
-    fn real_example_toolbox_playbooks_and_tools_all_load_cleanly() {
+    fn real_example_toolbox_playbooks_and_skills_all_load_cleanly() {
         let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
         let examples = manifest_dir.join("../../examples/toolbox");
         if !examples.is_dir() {
@@ -504,15 +453,21 @@ mod tests {
         }
         assert!(parsed_any, "expected at least one example playbook");
 
-        let config_dir = tempdir().unwrap();
-        let dest = config_dir.path().join("scoped-tools.yaml");
-        let (names, warnings) = scoped::merge_tools(&examples.join("tools"), &dest).unwrap();
-        assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
-        assert!(names.contains(&"spark_build".to_string()));
-        assert!(names.contains(&"staging_deploy".to_string()));
-        assert!(names.contains(&"ci_status".to_string()));
+        let skills_dir = examples.join("skills");
+        let empty_local = examples.join("__no_local__");
+        let mut resolved_any = false;
+        for entry in std::fs::read_dir(&skills_dir).unwrap() {
+            let path = entry.unwrap().path();
+            let name = path.file_name().unwrap().to_str().unwrap().to_string();
+            let name = name.strip_suffix(".md").unwrap_or(&name).to_string();
+            skill::resolve(&name, &empty_local, &skills_dir)
+                .unwrap_or_else(|e| panic!("skill `{name}` did not resolve: {e}"));
+            resolved_any = true;
+        }
+        assert!(resolved_any, "expected at least one example skill");
 
-        let servers = scoped::stage_mcp(&examples.join("tools"), config_dir.path()).unwrap();
+        let config_dir = tempdir().unwrap();
+        let servers = skill::stage_mcp(&examples.join("mcp.json"), config_dir.path()).unwrap();
         assert!(servers.contains(&"linear".to_string()));
         assert!(servers.contains(&"warehouse".to_string()));
     }

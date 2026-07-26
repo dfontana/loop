@@ -81,7 +81,7 @@ fn partial_config_overrides_only_what_it_names() {
         got.navigator_max_invocations,
         defaults.navigator_max_invocations
     );
-    assert_eq!(got.default_tools, defaults.default_tools);
+    assert_eq!(got.default_skills, defaults.default_skills);
     assert_eq!(got.pi_extensions, defaults.pi_extensions);
     assert_eq!(got.budgets.wallclock_s, defaults.budgets.wallclock_s);
     assert_eq!(

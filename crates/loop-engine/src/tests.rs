@@ -749,7 +749,7 @@ fn validate_catches_missing_entry_state() {
     let mut m = base_machine();
     m.entry = "nope".into();
     m.terminals.insert("done".into());
-    let diags = crate::validate(&m, &always_resolves);
+    let diags = crate::validate(&m, &always_resolves, &|_| true);
     assert!(diags.iter().any(|d| d.message.contains("entry state")));
 }
 
@@ -759,7 +759,7 @@ fn validate_catches_dangling_transition_targets() {
     m.entry = "a".into();
     m.states.insert("a".into(), state("a"));
     m.transitions.push(edge("a", "nowhere"));
-    let diags = crate::validate(&m, &always_resolves);
+    let diags = crate::validate(&m, &always_resolves, &|_| true);
     assert!(
         diags
             .iter()
@@ -775,7 +775,7 @@ fn validate_catches_unreachable_state() {
     m.states.insert("a".into(), state("a"));
     m.states.insert("island".into(), state("island"));
     m.transitions.push(edge("a", "done"));
-    let diags = crate::validate(&m, &always_resolves);
+    let diags = crate::validate(&m, &always_resolves, &|_| true);
     assert!(diags.iter().any(|d| d.message.contains("unreachable")));
 }
 
@@ -787,7 +787,7 @@ fn validate_catches_no_path_to_terminal() {
     m.states.insert("a".into(), state("a"));
     m.states.insert("dead_end".into(), state("dead_end"));
     m.transitions.push(edge("a", "dead_end"));
-    let diags = crate::validate(&m, &always_resolves);
+    let diags = crate::validate(&m, &always_resolves, &|_| true);
     assert!(
         diags
             .iter()
@@ -802,7 +802,7 @@ fn validate_catches_unresolved_playbook() {
     m.terminals.insert("done".into());
     m.states.insert("a".into(), state("a"));
     m.transitions.push(edge("a", "done"));
-    let diags = crate::validate(&m, &never_resolves);
+    let diags = crate::validate(&m, &never_resolves, &|_| true);
     assert!(diags.iter().any(|d| d.message.contains("does not resolve")));
 }
 
@@ -815,7 +815,7 @@ fn validate_catches_loop_head_never_re_entered() {
     m.transitions.push(edge("a", "done"));
     m.loops
         .push(loop_spec("orphan", &["a"], 3, OnExhausted::Escalate));
-    let diags = crate::validate(&m, &always_resolves);
+    let diags = crate::validate(&m, &always_resolves, &|_| true);
     assert!(diags.iter().any(|d| d.message.contains("never re-entered")));
 }
 
@@ -827,7 +827,7 @@ fn validate_catches_escalation_state_not_a_terminal() {
     m.escalation_state = Some("a".into());
     m.states.insert("a".into(), state("a"));
     m.transitions.push(edge("a", "done"));
-    let diags = crate::validate(&m, &always_resolves);
+    let diags = crate::validate(&m, &always_resolves, &|_| true);
     assert!(
         diags
             .iter()
@@ -846,7 +846,7 @@ fn validate_rejects_duplicate_edges_between_the_same_pair() {
     m.states.insert("a".into(), state("a"));
     m.transitions.push(judged_edge("a", "done", "first"));
     m.transitions.push(judged_edge("a", "done", "second"));
-    let diags = crate::validate(&m, &always_resolves);
+    let diags = crate::validate(&m, &always_resolves, &|_| true);
     assert!(
         diags
             .iter()
@@ -856,45 +856,65 @@ fn validate_rejects_duplicate_edges_between_the_same_pair() {
     );
 }
 
+/// Skills resolve through the same filesystem seam playbooks do, so a typo in
+/// a skill name is caught by `loop validate` rather than at spawn time.
 #[test]
-fn validate_warns_on_validation_state_with_edit_or_write() {
+fn validate_reports_a_skill_that_does_not_resolve() {
     let mut m = base_machine();
     m.entry = "qa-staging".into();
     m.terminals.insert("done".into());
     m.states.insert(
         "qa-staging".into(),
-        state_with_tools("qa-staging", &["read", "edit"]),
+        state_with_skills("qa-staging", &["contract-check"]),
     );
     m.transitions
         .push(judged_edge("qa-staging", "done", "looks correct"));
-    let diags = crate::validate(&m, &always_resolves);
+
+    let diags = crate::validate(&m, &always_resolves, &|name| name != "contract-check");
     assert!(
         diags
             .iter()
-            .any(|d| d.severity == crate::Severity::Warning && d.message.contains("allowlists"))
+            .any(|d| d.severity == crate::Severity::Error && d.message.contains("contract-check")),
+        "got: {diags:?}"
     );
 }
 
-/// The counterpart, and the reason the trigger is the stage's identity rather
-/// than "gates a criteria edge": `implement → review` is criteria-gated and
-/// `implement` must be able to edit. Warning there fires on every ordinary
-/// machine — including the shipped `standard-ticket` template — which is how
-/// you teach someone to ignore warnings.
+/// An edge with neither tier commits whatever the worker proposed. That is
+/// occasionally right — an unconditional hand-off — so it warns rather than
+/// failing. It must still be said: with `when` gone, unguarded is the shape
+/// you get by forgetting.
 #[test]
-fn validate_does_not_warn_on_an_implement_state_that_edits() {
+fn validate_warns_on_an_edge_with_no_check_and_no_criteria() {
     let mut m = base_machine();
-    m.entry = "implement".into();
+    m.entry = "a".into();
     m.terminals.insert("done".into());
-    m.states.insert(
-        "implement".into(),
-        state_with_tools("implement", &["read", "edit", "write"]),
-    );
-    m.transitions
-        .push(judged_edge("implement", "done", "the plan is done"));
-    let diags = crate::validate(&m, &always_resolves);
+    m.states.insert("a".into(), state("a"));
+    m.transitions.push(edge("a", "done"));
+
+    let diags = crate::validate(&m, &always_resolves, &|_| true);
     assert!(
-        !diags.iter().any(|d| d.message.contains("allowlists")),
-        "implement legitimately edits; got: {diags:?}"
+        diags.iter().any(|d| d.severity == crate::Severity::Warning
+            && d.message.contains("committed unexamined")),
+        "got: {diags:?}"
+    );
+}
+
+/// The counterpart: a guarded edge is silent, so the warning stays worth reading.
+#[test]
+fn validate_does_not_warn_on_a_guarded_edge() {
+    let mut m = base_machine();
+    m.entry = "a".into();
+    m.terminals.insert("done".into());
+    m.states.insert("a".into(), state("a"));
+    m.transitions
+        .push(judged_edge("a", "done", "the work is done"));
+
+    let diags = crate::validate(&m, &always_resolves, &|_| true);
+    assert!(
+        !diags
+            .iter()
+            .any(|d| d.message.contains("committed unexamined")),
+        "got: {diags:?}"
     );
 }
 
@@ -922,7 +942,7 @@ fn validate_counts_an_on_fail_route_as_loop_head_re_entry() {
         on_exhausted: OnExhausted::Escalate,
     });
 
-    let diags = crate::validate(&m, &always_resolves);
+    let diags = crate::validate(&m, &always_resolves, &|_| true);
     assert!(
         !diags.iter().any(|d| d.message.contains("never re-entered")),
         "got: {diags:?}"

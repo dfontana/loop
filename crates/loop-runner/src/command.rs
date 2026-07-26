@@ -3,7 +3,7 @@
 //! Confirmed against the installed pi (`pi --help`) and its resource loader
 //! source (`dist/core/resource-loader.js`):
 //! `--print`, `--mode json`, `--session-id`, `--no-session`, `--provider`,
-//! `--model <m>:<thinking>`, `--tools`, `--exclude-tools`,
+//! `--model <m>:<thinking>`, `--no-skills`, `--skill <path>`,
 //! `--no-builtin-tools`, `--no-extensions`, `-e <path>`,
 //! `--append-system-prompt <text-or-path>`, then the positional message.
 //!
@@ -20,8 +20,7 @@ use loop_core::{JudgeSpec, NavigatorSpec, TransitionMode, WorkerSpec};
 /// Build the Worker command.
 ///
 /// Required environment:
-/// - `PI_AGENT_DIR` → the staged agent dir, so `scoped-tools` finds the
-///   merged YAML and `mcp` finds `mcp.json`.
+/// - `PI_AGENT_DIR` → the staged agent dir, so `mcp` finds `mcp.json`.
 /// - `LOOP_REACHABLE` → comma-separated neighbors; the transition tool builds
 ///   its enum from this.
 /// - `LOOP_TRANSITION_MODE` → `constrained` | `open`.
@@ -29,9 +28,16 @@ use loop_core::{JudgeSpec, NavigatorSpec, TransitionMode, WorkerSpec};
 ///   `$CYCLE` and key its idempotency on them.
 ///
 /// Extension discovery is left on (no `--no-extensions`): the Worker is the
-/// one role that needs the installed `scoped-tools`/`mcp`/
-/// `review-model-selector` pi-extensions to load alongside the harness's own
-/// injected `transition` tool.
+/// one role that needs the installed `mcp`/`review-model-selector`
+/// pi-extensions to load alongside the harness's own injected `transition`
+/// tool.
+///
+/// Skills, by contrast, are pinned shut. `--no-skills` turns off ambient
+/// discovery and each `--skill <path>` adds one back, so a stage loads exactly
+/// what its machine named and nothing a stray `~/.pi/skills/` happens to
+/// contain. Note this bounds *instructions*, not capability: a skill is a
+/// prompt plus a script the agent runs through bash, so withholding one hides
+/// know-how rather than revoking access.
 pub fn worker_command(pi_bin: &str, spec: &WorkerSpec) -> Command {
     let mut cmd = Command::new(pi_bin);
     cmd.arg("--print").arg("--mode").arg("json");
@@ -43,11 +49,9 @@ pub fn worker_command(pi_bin: &str, spec: &WorkerSpec) -> Command {
     cmd.arg("--provider").arg(&spec.model.provider);
     cmd.arg("--model").arg(spec.model.pi_model_arg());
 
-    if !spec.tools.is_empty() {
-        cmd.arg("--tools").arg(spec.tools.join(","));
-    }
-    if !spec.exclude_tools.is_empty() {
-        cmd.arg("--exclude-tools").arg(spec.exclude_tools.join(","));
+    cmd.arg("--no-skills");
+    for skill in &spec.skill_paths {
+        cmd.arg("--skill").arg(skill);
     }
 
     for ext in &spec.ext_paths {
@@ -86,8 +90,8 @@ pub fn worker_command(pi_bin: &str, spec: &WorkerSpec) -> Command {
 
 /// The Judge gets no code tools at all: `--no-builtin-tools` disables the
 /// built-ins, and `--no-extensions` stops any *installed* pi-extension
-/// (`scoped-tools`, `mcp`, …) from being auto-discovered and handing it a
-/// side door. The only tool it has is the explicitly `-e`'d `verdict-tool.ts`.
+/// (`mcp`, …) from being auto-discovered and handing it a side door. The only
+/// tool it has is the explicitly `-e`'d `verdict-tool.ts`.
 /// That independence is what makes its verdict trustworthy (docs/07-risks.md
 /// #1) — do not add `read` "for convenience".
 pub fn judge_command(pi_bin: &str, spec: &JudgeSpec) -> Command {
@@ -100,7 +104,9 @@ pub fn judge_command(pi_bin: &str, spec: &JudgeSpec) -> Command {
     cmd.arg("--provider").arg(&spec.model.provider);
     cmd.arg("--model").arg(spec.model.pi_model_arg());
 
-    cmd.arg("--no-builtin-tools").arg("--no-extensions");
+    cmd.arg("--no-builtin-tools")
+        .arg("--no-extensions")
+        .arg("--no-skills");
     cmd.arg("-e").arg(&spec.ext_path);
 
     cmd.arg("--append-system-prompt").arg(&spec.criteria);
@@ -149,7 +155,9 @@ pub fn navigator_command(pi_bin: &str, spec: &NavigatorSpec) -> Command {
     cmd.arg("--provider").arg(&spec.model.provider);
     cmd.arg("--model").arg(spec.model.pi_model_arg());
 
-    cmd.arg("--no-builtin-tools").arg("--no-extensions");
+    cmd.arg("--no-builtin-tools")
+        .arg("--no-extensions")
+        .arg("--no-skills");
     cmd.arg("-e").arg(&spec.ext_path);
 
     cmd.arg("--append-system-prompt").arg(&spec.graph_summary);
@@ -209,15 +217,17 @@ mod tests {
                 model: "claude-sonnet-5".into(),
                 thinking: Thinking::High,
             },
-            tools: vec!["read".into(), "edit".into(), "transition".into()],
-            exclude_tools: vec!["write".into()],
+            skill_paths: vec![
+                PathBuf::from("/tb/skills/spark-build"),
+                PathBuf::from("/tb/skills/jj"),
+            ],
             system_prompt_path: PathBuf::from("/tmp/playbook.md"),
             entry_message: "Entering implement, cycle 1".into(),
             reachable: vec!["review".into(), "debug".into()],
             transition_mode: TransitionMode::Constrained,
             agent_dir: PathBuf::from("/tmp/agent-dir"),
             ext_paths: vec![PathBuf::from("/tmp/ext/transition-tool.ts")],
-            pi_extensions: vec!["scoped-tools".into(), "mcp".into()],
+            pi_extensions: vec!["mcp".into()],
             cwd: PathBuf::from("/tmp/project"),
             session_id: Some("PROJ-1487-implement-1".into()),
             env: vec![("TICKET_ID".into(), "PROJ-1487".into())],
@@ -241,10 +251,11 @@ mod tests {
                 "anthropic",
                 "--model",
                 "claude-sonnet-5:high",
-                "--tools",
-                "read,edit,transition",
-                "--exclude-tools",
-                "write",
+                "--no-skills",
+                "--skill",
+                "/tb/skills/spark-build",
+                "--skill",
+                "/tb/skills/jj",
                 "-e",
                 "/tmp/ext/transition-tool.ts",
                 "--append-system-prompt",
@@ -302,6 +313,30 @@ mod tests {
             ext_path: PathBuf::from("/tmp/ext/verdict-tool.ts"),
             cwd: PathBuf::from("/tmp/project"),
         }
+    }
+
+    /// `--no-skills` must be present even when the stage names none: without
+    /// it a spawn silently inherits whatever `~/.pi/skills/` happens to hold,
+    /// and a stage's instruction set stops being a property of its machine.
+    #[test]
+    fn worker_with_no_skills_still_pins_discovery_shut() {
+        let spec = WorkerSpec {
+            skill_paths: vec![],
+            ..worker_spec()
+        };
+        let args = args_of(&worker_command("pi", &spec));
+        assert!(args.contains(&"--no-skills".to_string()));
+        assert!(!args.contains(&"--skill".to_string()));
+    }
+
+    /// Skills are a separate switch from extensions, so the isolated roles have
+    /// to turn both off — `--no-extensions` alone leaves skill discovery on.
+    #[test]
+    fn judge_and_navigator_also_disable_skill_discovery() {
+        let judge = args_of(&judge_command("pi", &judge_spec()));
+        assert!(judge.contains(&"--no-skills".to_string()));
+        let nav = args_of(&navigator_command("pi", &navigator_spec()));
+        assert!(nav.contains(&"--no-skills".to_string()));
     }
 
     #[test]

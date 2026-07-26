@@ -127,7 +127,14 @@ pub enum EventPayload {
         session_id: Option<String>,
         model: String,
         thinking: String,
-        tools: Vec<String>,
+        /// Skills loaded into this stage, by name.
+        ///
+        /// Defaulted so a ledger written before skills replaced tool
+        /// allowlists still folds. Refusing to parse would make a run
+        /// interrupted across the upgrade permanently unresumable — the one
+        /// situation the ledger exists to survive.
+        #[serde(default)]
+        skills: Vec<String>,
     },
     /// Digest of what the worker did. Never a transcript.
     WorkerOutput {

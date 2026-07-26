@@ -39,8 +39,7 @@ fn proj1487_machine_loads_completely() {
         Some("claude-sonnet-5")
     );
     assert_eq!(machine.defaults.model.thinking, Some(Thinking::Medium));
-    assert_eq!(machine.defaults.tools, vec!["read", "bash"]);
-    assert!(machine.defaults.exclude_tools.is_empty());
+    assert!(machine.defaults.skills.is_empty());
 
     // Budgets: machine values are already tighter than the config defaults
     // (15 usd / 7200s / 60 transitions), so tighten() is a no-op here.
@@ -61,10 +60,7 @@ fn proj1487_machine_loads_completely() {
     assert_eq!(machine.states.len(), 6);
     let implement = machine.state("implement").expect("implement state");
     assert_eq!(implement.playbook, PlaybookRef::Named("implement".into()));
-    assert_eq!(
-        implement.tools,
-        vec!["edit", "write", "bash", "spark_build"]
-    );
+    assert_eq!(implement.skills, vec!["spark-build"]);
     assert_eq!(implement.model.thinking, Some(Thinking::High));
     assert_eq!(
         implement.description.as_deref(),
@@ -72,7 +68,7 @@ fn proj1487_machine_loads_completely() {
     );
 
     let qa_staging = machine.state("qa-staging").expect("qa-staging state");
-    assert_eq!(qa_staging.exclude_tools, vec!["edit", "write"]);
+    assert_eq!(qa_staging.skills, vec!["staging-deploy", "spark-run"]);
     assert_eq!(qa_staging.playbook, PlaybookRef::Named("qa".into()));
 
     assert_eq!(machine.transitions.len(), 10);

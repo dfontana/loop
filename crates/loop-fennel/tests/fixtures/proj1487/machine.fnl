@@ -10,7 +10,7 @@
             {:id "contract"
              :desc "GET /accounts/:id returns churn_score as a number matching the OpenAPI schema."}]
 
- :defaults {:provider "anthropic" :model "claude-sonnet-5" :thinking "medium" :tools ["read" "bash"]}
+ :defaults {:provider "anthropic" :model "claude-sonnet-5" :thinking "medium"}
  :budgets {:usd 8 :wallclock-s 5400 :max-transitions 40}
  :judge {:model "claude-haiku-4-5" :thinking "low"}
  :navigator {:model "claude-haiku-4-5" :thinking "low" :max-invocations 5}
@@ -22,23 +22,21 @@
 
  :states
  {:implement {:playbook "implement" :thinking "high"
-              :tools ["edit" "write" "bash" "spark_build"]
+              :skills ["spark-build"]
               :description "Implement the plan; keep the build green."}
   :review {:playbook "review" :thinking "high"
-           :tools ["read" "bash" "agent" "select_review_model"]
            :description "Get an independent review of the diff."}
   :qa-staging {:playbook "qa" :thinking "high"
-               :tools ["staging_deploy" "spark_run" "fetch_job_output"]
-               :exclude-tools ["edit" "write"]
+               :skills ["staging-deploy" "spark-run"]
                :description "Run QA against staging."}
   :debug {:playbook "debug-spark" :thinking "high"
-          :tools ["edit" "bash" "spark_build" "use_playbook"]
+          :skills ["spark-build" "debug-transient"]
           :description "Diagnose and fix a QA failure."}
   :validate-contract {:playbook "validate-contract" :thinking "medium"
-                       :tools ["staging_deploy" "contract_check"]
+                       :skills ["staging-deploy" "contract-check"]
                        :description "Confirm the API contract matches the OpenAPI schema."}
   :open-pr {:playbook "open-pr" :thinking "low"
-            :tools ["open_pr"]
+            :skills ["open-pr"]
             :description "Open the pull request."}}
 
  :transitions
