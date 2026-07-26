@@ -6,7 +6,7 @@
  * harness reads the call arguments off the JSONL event stream, writes a
  * `transition_proposed` ledger event, and runs the guard checks.
  *
- * Two schema modes, chosen per machine (see docs/05-orchestration.md):
+ * Two schema modes, chosen per machine (see docs/02-how-it-works.md):
  *   - CONSTRAINED (default): `to` is an enum of the current state's reachable
  *     neighbors, injected via LOOP_REACHABLE. The model literally cannot name an
  *     invalid edge; the Navigator only fires on explicit `blocked`.

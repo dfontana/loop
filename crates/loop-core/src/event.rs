@@ -1,4 +1,4 @@
-//! The ledger's event schema (docs/03-ledger.md).
+//! The ledger's event schema (docs/02-how-it-works.md).
 //!
 //! One JSON object per line, `ts` + `type` on every one. These types are the
 //! wire format: changing a field name changes every ledger ever written, so

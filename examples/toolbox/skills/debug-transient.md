@@ -7,7 +7,7 @@ description: Tell an infrastructure flake apart from a real bug before deciding 
   A SKILL, not a stage playbook: situational know-how a stage consults when it
   hits the situation, rather than a task with its own `transition`. The `debug`
   state loads it via `:skills`, which becomes `pi --skill <this dir>`. The
-  caller stays in control of its own stage. See docs/04-toolbox.md.
+  caller stays in control of its own stage. See docs/03-customizing.md.
 -->
 
 # Situational guidance: is this transient, or real?

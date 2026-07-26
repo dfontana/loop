@@ -32,7 +32,7 @@ pub trait StageBuilder {
     ) -> Result<StagePlan>;
 
     /// Assemble the Judge spawn for a `criteria` guard. The digest passed on
-    /// must exclude the worker's own pass/fail claim (docs/07-risks.md #1).
+    /// must exclude the worker's own pass/fail claim (docs/05-design-notes.md).
     ///
     /// `check_output` is what the edge's deterministic check printed, when it
     /// has one — the only evidence the Judge gets that the worker had no hand

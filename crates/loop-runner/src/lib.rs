@@ -1,6 +1,6 @@
 //! Spawning `pi` and reading its JSON event stream.
 //!
-//! See docs/05-orchestration.md. Three roles, three cost profiles: the Worker
+//! See docs/02-how-it-works.md. Three roles, three cost profiles: the Worker
 //! does the stage's work and ends with `transition`; the Judge independently
 //! grades a `criteria`; the Navigator reroutes a blocked worker. All three are
 //! `pi --print --mode json` subprocesses whose newline-delimited events this
@@ -113,7 +113,7 @@ impl AgentRunner for PiRunner {
     /// The verdict arrives as `LOOP_VERDICT {…}`. A judge that returns
     /// nothing — no marker, a malformed one, or the process exiting non-zero
     /// — is a **fail**, not a pass: an unavailable grader must never wave
-    /// work through (docs/07-risks.md #1).
+    /// work through (docs/05-design-notes.md).
     fn run_judge(&self, spec: &JudgeSpec) -> Result<Verdict> {
         let cmd = command::judge_command(&self.pi_bin, spec);
         let (outcome, exit_ok) = self.spawn_and_parse(cmd, "judge")?;

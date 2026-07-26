@@ -1,7 +1,7 @@
 //! The toolbox: playbook resolution, template rendering, and everything that
 //! has to be on disk before a `pi` spawn can work.
 //!
-//! See docs/04-toolbox.md. Two kinds of reusable thing — **playbooks** (a
+//! See docs/03-customizing.md. Two kinds of reusable thing — **playbooks** (a
 //! stage's prompt) and **skills** (situational know-how plus the scripts that
 //! carry it out). MCP servers are deliberately not a third: loop names servers
 //! out of the user's own config and never ships one.

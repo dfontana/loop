@@ -1,4 +1,4 @@
-//! `loop validate` — the static linter (docs/07-risks.md #11).
+//! `loop validate` — the static linter (docs/05-design-notes.md).
 //!
 //! Machine authoring errors are the cheapest class of failure to catch and the
 //! most annoying to debug at run time: an unreachable state, a dangling

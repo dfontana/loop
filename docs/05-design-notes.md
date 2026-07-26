@@ -1,0 +1,430 @@
+# Design notes
+
+Every other doc in this set describes what `loop` does and how to drive it. This
+one is the argument: why the system is shaped this way, what each choice costs,
+and which parts are still wrong. If you are trying to change `loop` rather than
+use it, start here.
+
+## The problem
+
+Point a good coding agent at a real ticket and let it run for an hour. Three
+things happen, reliably.
+
+It **drifts**. The ticket said "add the column and expose it on the endpoint";
+somewhere around the third failing test the session is refactoring the test
+harness, and nothing in the loop notices that the work stopped matching the task.
+
+It **declares victory**. The agent is the only party with an opinion about
+whether it is done, and it is the party that wants to be done. "Tests pass" gets
+written by the same process that would have had to run them.
+
+It **cannot be audited**. What actually happened lives in one 200k-token
+transcript. You can read it, but you cannot fold it, diff it, grep it for the
+moment a decision was made, or resume from it after a crash.
+
+None of these is a failure of the model at the work. They are failures of the
+*frame*: one prompt, one session, one uninterrupted stretch of autonomy with
+nobody but the agent deciding whether to keep going. And ticket-level work
+already has structure — implement, review, test, fix, ship — that a single
+session flattens into prose. That structure is exactly where you would want to
+put a gate. `loop` exists to make it explicit enough to attach one.
+
+## Why a state machine
+
+States are stages; edges are claims. "Implementation is done enough to review"
+is a claim, and once it is an edge in a declared graph it is a thing the harness
+can refuse. In a single session that same claim is a sentence the agent writes to
+itself.
+
+The graph is also the unit of reuse — but not the unit you keep. A ticket's
+machine is meant to be hacked into shape in five minutes and thrown away with the
+branch; the durable artifacts are the template it was cloned from and the
+playbooks its states point at. That split is why the machine can afford to be
+per-ticket: it is cheap because almost none of it is original.
+
+Making the graph a declared value buys a few things for free that a prompt never
+gives you. `loop validate` walks it statically — reachability, dangling
+playbooks, a state with no path to any terminal, an unguarded edge — and `loop
+diagram` renders it as mermaid without touching the filesystem, because the graph
+is a value and not a behaviour. Both are in [the CLI
+reference](04-cli-reference.md).
+
+The cost is real: you now maintain a second artifact per ticket, and a badly
+drawn graph fails in ways a prompt cannot — a state nothing reaches, a loop head
+no edge re-enters. That failure mode is why `validate` exists, and why it errors
+rather than warns on most of it.
+
+## Why the harness decides, not the agent
+
+This is the thesis. An agent grading its own work is *the* failure mode, so the
+harness owns commitment: the agent proposes, the harness disposes. Nothing an
+agent says moves the machine on its own.
+
+Three mechanisms carry that, in order of how hard they are to argue with.
+
+**The proposal is structurally constrained.** The `transition` tool's schema is
+built at spawn time from the current state's outgoing edges, so in the default
+mode the target is a union of literals — one per reachable neighbour. An invalid
+edge is not discouraged, it is unrepresentable. This matters more than it sounds:
+a prompt that says "only transition to `review` or `blocked`" is a request, and
+requests get ignored under pressure. A schema is not a request. (See [the three
+injected tools](02-how-it-works.md#the-three-injected-tools).)
+
+**The Judge does not share the Worker's context.** It is a separate process with
+its own model, `--no-session`, no builtin tools, no extensions, no skills, and
+exactly one tool to call. It is handed the Worker's summary and the artifact
+paths and hashes as *evidence* — not the Worker's proposed target, not its
+argument for advancing, and no ability to go look at anything else. It judges
+what it was given, against criteria written by you rather than by the stage it is
+judging. Be honest about the boundary: the summary is still Worker-authored, so
+the Judge weighs a claim. What it cannot do is be talked around by the session
+that produced the claim, because it never sees that session.
+
+**A `check` never touches the Worker's session at all.** It is a command the
+harness runs itself, in its own subprocess, after the stage has exited; the exit
+code decides. That is the one signal on the whole ledger a Worker cannot author,
+and it is why a failed check short-circuits — the Judge is never spawned, so a
+deterministic fact is not appealable to a model. The rule that follows: any fact
+that actually matters should be pushed into a check, and `criteria` should be
+reserved for the genuinely fuzzy remainder.
+
+The corollary is a design constraint on you, not on the harness. Everything else
+on the ledger — the summary, the claimed artifact paths, the rationale — is
+Worker-authored and should be read as testimony.
+
+## Why three roles
+
+Because judging and routing are not the work, and paying Worker prices for them
+is waste. The Worker runs on the strong model with real thinking budget; the
+Judge and the Navigator default to a cheap model at low thinking, and their jobs
+are small enough that this is not a compromise. Deciding "does this diff satisfy
+these three criteria" is a smaller question than producing the diff.
+
+But cost is the secondary reason. The primary one is that **isolation is what
+turns the Judge's verdict into evidence**. A Judge sharing the Worker's session
+would be a second opinion from the same context — self-grading with extra steps
+and an extra invoice. Spawning it cold, tool-less, and criteria-first is the
+whole mechanism; the cheap model is what that mechanism happens to make
+affordable.
+
+The Navigator is the same trick pointed at routing. It fires only when the
+proposal is unusable — blocked, absent, or naming something that is not a
+neighbour — picks from an enum of reachable states, and can leave a note for the
+next stage. It is capped both run-wide and per source state, and the cap is
+deliberately low: a Navigator that keeps firing is not a routing problem, it is a
+machine whose graph does not match the work, and escalating to a human is the
+correct answer to that.
+
+The cost we accept here: the Judge's tokens are not counted against the run's
+dollar budget (gap 4 below), so a chatty criteria tier is spend you only see
+after the fact.
+
+## Why tools instead of prose
+
+A decision the harness must act on cannot travel as free text the harness has to
+parse. That is the whole argument; the rest is detail about why the alternatives
+are worse.
+
+**Prose is unenforceable.** A system prompt or a skill telling the agent to
+finish by naming its next state is advice. The agent can end its turn without
+doing it (which happens, and the harness synthesizes a `blocked` proposal for
+exactly that case), or it can name something that is not a state, or it can name
+three. A tool schema built from the graph at spawn time cannot be talked out of
+its enum. The constraint is structural rather than instructional, and that is the
+only kind of constraint that survives an agent under pressure to finish.
+
+**A CLI shell-out would invert control.** The obvious alternative — let the agent
+run `loop transition review` — puts the child in charge of the parent. `loop` is
+the parent process; `pi` is the child it spawned and is currently blocked on. A
+subcommand invoked from inside that child would have to reach back into a run its
+own parent owns, mid-stage, and hand back a decision through a channel the parent
+then has to parse. It reintroduces exactly the text-parsing problem the tool
+exists to remove, and adds a lifecycle question ("what does the ledger look like
+if the agent calls it twice?") that the current shape does not have.
+
+All three tools work the same way, which keeps the surface small: the tool
+returns a marker line, and the harness scrapes it off `pi`'s JSONL stdout stream.
+`transition`, `verdict`, `choose` — one mechanism, three roles, no bespoke
+plumbing per role.
+
+Two honest notes about that. First, it is a scrape, so parsing is deliberately
+tolerant: surrounding prose is fine and the last payload for a marker wins. The
+tolerance is safe only because the marker is not evidence — a `transition`
+payload is a *proposal* that then has to survive the guards. This is precisely
+where an earlier design went wrong (see [Reversed decisions](#reversed-decisions)):
+values scraped out of tool output were treated as trusted facts, and any stage
+with `bash` could print them.
+
+Second, what happens when the marker is missing is a design decision, not an
+accident, and it differs per role: a Worker with no marker becomes a blocked
+proposal and goes to the Navigator; a Judge with no usable verdict **fails
+closed**; a Navigator with no choice escalates. Every default sends the run
+toward a human rather than toward the next state.
+
+## Why an append-only ledger
+
+There is no mutable state file anywhere in `loop`. The run's state is *folded*
+from the event log every time it is needed, which means `resume`, `status`, and
+the digest handed to the next stage are three views of one source that cannot
+disagree with each other. The alternative — a `state.json` alongside a log —
+gives you two things to keep in sync across crashes, and they will drift.
+
+Durability is unglamorous and deliberate: the file is opened once and held,
+each event is one `write_all` of a line plus a newline, then an fsync. On open,
+a torn tail (a half-written last line from a kill mid-append) is truncated back
+to the last whole line, idempotently. An unparseable line in the *interior* is a
+hard error, because that is corruption rather than a crash and silently skipping
+it would produce a plausible-looking wrong fold.
+
+The costs are worth naming.
+
+The fold has to stay total. Every event either contributes to run state or is
+explicitly inert, and adding an event type means deciding which. Get that wrong
+and the failure is not a crash, it is a run that resumes at the wrong point.
+
+The event schema is a compatibility surface with no version marker — no `seq`,
+no run id, no schema field; ordering is file order. Today that is fine because
+nothing has shipped and back-compat shims were deliberately deleted rather than
+carried (see below). It will stop being fine the first time someone has a ledger
+they care about, and a version field is cheaper to add now than to infer later.
+
+And resume granularity is per-event, which means an interrupted stage re-runs
+from the top at the next attempt number rather than picking up mid-work. That is
+a straightforward consequence of not checkpointing inside a stage, and it makes
+**stage idempotency a real authoring requirement**: an `open-pr` stage has to
+check for an existing PR, a deploy has to be keyed on something stable. The
+mechanics are in [how it works](02-how-it-works.md).
+
+## Why Fennel
+
+A machine is configuration, not a program. The load path makes that literal: the
+Fennel file evaluates to a plain Lua table, and `convert.rs` reads that table
+into the IR. Everything downstream — the validator, the diagram renderer, the
+engine — sees the IR and never the Lua. The language is on one side of a hard
+boundary.
+
+So why a language at all, rather than YAML? Because the 5% of a machine that
+wants structure wants it badly: a comment explaining why an edge exists, a
+binding shared by four states, a template you clone and edit rather than
+copy-paste. YAML answers that with anchors and, the moment a guard needs to be
+more than a comparison, with an embedded expression mini-language you have to
+design, document, and debug. Fennel gives you ordinary bindings and comments for
+free, and the guard problem is solved a different way entirely — by `:check`
+commands and `:criteria` prose, both of which the harness owns.
+
+Which is the point of the boundary. `:when` guards were real: Fennel closures
+registered at load time and called by the engine during a run. They were removed,
+and using `:when` now fails with an error that points at `:check` and `:criteria`
+instead. Removing them is what keeps a machine a *value* — something you can
+hash, diagram, and statically validate — rather than a program whose behaviour
+you can only observe by running it. The macro DSL sketched in the early design
+notes was never built for the same reason; machines are plain tables today.
+
+The costs: a Lua runtime embedded in the binary, an unfamiliarity tax on anyone
+who has to read parens six months from now, and the fact that loading a machine
+evaluates arbitrary code. The last one is acceptable only because machines are
+files you author yourself; it would need rethinking if machines were ever shared.
+
+## Why two locations
+
+Two directories, because two lifetimes.
+
+`~/.config/loop/` is the **toolbox**: playbooks, skills, machine templates, the
+vendored harness tools. It outlives every ticket, is worth version-controlling,
+and is the reason a new ticket is an assembly job rather than a build.
+
+`<project>/.loop/` is the **ticket**: the machine, the task and plan prose, the
+ledger, the artifacts. It is disposable in the same breath as the branch. The
+ledger and artifacts live here rather than in a global state directory
+specifically because they are about *this* work — they belong in the same
+review, the same backup, and the same `rm -rf` as the code they describe.
+
+Resolution is local-first: a playbook or skill name is looked up in the ticket
+directory before the toolbox. That is the whole ergonomic payoff of the split.
+When one ticket needs a weirder `review` prompt, you drop a file in
+`.loop/playbooks/` and the toolbox stays untouched — no fork, no version suffix,
+no `review-but-for-the-migration.md` accumulating in your home directory. The
+override dies with the branch.
+
+Generated files (the rendered system prompt actually handed to `pi`) go to a
+third place, the state directory, because they are derived and you should be able
+to delete them without consequence.
+
+The cost is that "where does this live" is a question with two answers, and one
+sharp edge worth knowing: pointing the state directory elsewhere does not move
+the ledger. The ledger is always in the project. Paths are enumerated in
+[customizing](03-customizing.md).
+
+## Skills bound instructions, not capability
+
+Workers are spawned with skills pinned shut — automatic discovery off, each
+stage's skills passed explicitly. It is tempting to read that as a sandbox. It is
+not, and the docs should not let you believe it is.
+
+A skill is a prompt plus the scripts sitting next to it, and the agent runs those
+scripts through `bash` like anything else. The Worker keeps its builtin tools and
+pi's ambient extension discovery — it gets no flag turning either off. So
+withholding a skill from a stage **hides know-how; it does not revoke access**. A
+QA stage that was not given the deploy skill cannot be relied on not to deploy;
+it was only never told how you like it done.
+
+That is still worth doing, because the thing it actually buys is scoping.
+Instructions are the scarce resource in a stage: every skill you load is context
+competing for attention, and a stage told about four things does better than a
+stage told about forty. Pinning the list is prompt hygiene with a stable,
+reviewable definition — and it makes a stage's instruction set a declared,
+diffable part of the machine rather than a function of whatever is installed on
+this laptop today.
+
+The real containment lives elsewhere, and it is worth being precise about where:
+the Judge and Navigator spawns, which genuinely are stripped — no builtin tools,
+no extensions, no skills, no session — and the harness-run `check`, which decides
+outside the agent's reach entirely. Those two are boundaries. The skill list is a
+scope.
+
+## Reversed decisions
+
+Things that were built or specified and then taken out. Each is a place where the
+current design is a correction rather than a first draft.
+
+- **`:when` guards and ledger vars.** Vars were sold as trusted facts ("a real
+  exit code asserted it"), but every path into them ran through the Worker's
+  session — the harness scraped them from tool output, so any stage with `bash`
+  could print the marker itself. The whole tier went, closures included. Trust
+  had to come from *who ran the command*, which is now `:check`.
+- **YAML machines.** The original plan was YAML-first with Fennel as an opt-in
+  second backend behind a shared IR. v1 ships one loader and one authoring
+  surface; two would have doubled the loader surface for a format that could not
+  express the shared structure anyway.
+- **Per-stage tool filtering.** Stages once carried tool allowlists and scoped
+  tool wrappers. Once nothing gated on tool stdout, an allowlist only constrained
+  blast radius — and only on a stage without `bash`, which no stage was, since
+  the machine-wide default granted it. Replaced by pi skills.
+- **The reproducibility snapshot.** Removed. An LLM run is not reproducible, and
+  pretending otherwise buys a heavy artifact in exchange for a guarantee that
+  does not hold; the ledger records decisions and rationale instead.
+- **A loop-owned `mcp.json`.** MCP was modeled as a config file `loop` staged
+  into a generated agent directory. That duplicated a file you already have —
+  one holding OAuth state and bearer tokens — and the redirect it relied on
+  replaces rather than overlays, so a machine naming no server would have taken
+  away every server you had configured. Now a state names which of *your* servers
+  it needs, and nothing is staged.
+- **Pre-launch ledger back-compat.** A serde default existed so a ledger written
+  before an early schema change would still fold. Nothing had shipped, so no such
+  ledger existed; it was deleted rather than carried forward as a permanent
+  apology.
+
+## Prior art
+
+Almost every piece of this exists somewhere. The combination — user-authored
+per-ticket state machines, a durable ledger, a portable toolbox, driven by a thin
+CLI over headless coding agents — is the part that seems unoccupied.
+
+**LangGraph** is the closest conceptual match: agents as a graph, conditional
+edges, cycles, checkpointing, human-in-the-loop interrupts. `loop` differs on
+three axes — it is a CLI over subprocess agents rather than a library embedding
+them, the graph is authored per ticket rather than built in code, and the
+checkpointer is a greppable JSONL file rather than a database. The edge-case
+thinking in their reducer is worth reading before touching the fold.
+
+**Temporal, Restate, DBOS, Step Functions** are the ledger's ancestry:
+event-sourced workflows, deterministic replay, fold-to-current-state as the only
+state representation, and the discipline that side effects must be idempotent
+because replay re-runs them. The difference that shapes everything downstream:
+their activities are deterministic functions, ours are LLMs. That is exactly why
+there is a fuzzy Judge tier sitting on top of a deterministic core, and why
+retries are bounded by declared cycle limits rather than assumed convergent.
+
+**XState and statecharts** supplied the vocabulary — guard, transition, entry —
+and, more usefully, the precision about *when* a transition may fire. Their
+hierarchical and parallel-region models are deliberately not adopted; a ticket
+graph that needs nested superstates is a signal the machine is too clever.
+
+**GitHub Actions, Argo, Dagger** are the reuse model: declarative steps
+referenced by name, templating, artifacts passed between steps. The toolbox is
+their marketplace and playbooks are their `uses:`. One thing explicitly *not*
+taken: their `name@version` pin. Playbooks and skills resolve by name,
+local-first, unpinned — which is the right trade for a system whose whole premise
+is that a ticket directory is disposable, but does mean a toolbox edit lands on
+the next stage that resolves it. Their gap is the reason this project exists at
+all: they are acyclic and have no reasoning executor.
+
+**StateFlow** (Wu et al., 2024) and AutoGen's group-chat patterns are the
+empirical argument that framing LLM task-solving as an explicit state machine
+beats free-form ReAct on control and cost for multi-step work. Cite it the next
+time the structure feels like overhead.
+
+**OpenHands, SWE-agent, Aider's architect mode** are what happens *inside* a
+Worker stage — edit, run, observe, against a real test suite. They are not
+competitors; a Worker can be one. The difference is that their control flow lives
+inside one agent's head, where it cannot be inspected, budgeted, or resumed.
+`loop` externalizes exactly that layer and leaves the inner loop alone.
+
+**AutoGPT and BabyAGI** are the cautionary tale: goal in, unbounded autonomy,
+agents wandering and burning money with nothing to show. The declared graph,
+bounded cycles, objective gates, and hard budgets are all corrections to that
+specific failure.
+
+**pi's own `run-plan` / `run-review` skills** are the direct precedent — a
+coordinator that plans, delegates to a persistent implementer, and runs a bounded
+adversarial review loop with an independent reviewer model. That is `loop` in
+miniature, inside one session. The generalization is to lift the hard-coded
+plan→implement→review→fix loop into a user-authored machine and the coordinator
+out of the session into a CLI with a ledger — so control flow becomes
+inspectable, budgetable, and resumable across crashes.
+
+## Known gaps
+
+Verified defects and limitations in the current implementation. They are grouped
+by kind but numbered continuously; none of them is a feature.
+
+1. **Unimplemented — `:context "full"`.** The context mode is parsed and stored
+   but never read; the digest path is unconditional. Setting `full` changes
+   nothing, so a stage that needs more history has to interpolate it from the
+   playbook.
+2. **Unimplemented — `:pi-extensions` activates nothing.** It is stored but never
+   turned into a spawn flag; extension loading is pi's ambient discovery. Its
+   only real effect is one `loop validate` diagnostic, so treat it as a
+   declaration, not a switch.
+3. **Bug — `$ENTRY_ADDENDUM` is usually dropped.** The lookup requires the
+   Navigator event to sit immediately before the commit, but a guarded route
+   inserts a guard event between them. It survives only when the target is the
+   escalation state, which is terminal — so in practice the Navigator's
+   get-back-on-track note never reaches a stage.
+4. **Accepted — Judge cost is invisible to the dollar budget.** Guard events
+   carry no usage, so criteria-heavy machines spend more than the budget
+   accounts for.
+5. **Accepted — wallclock resets on `loop resume`.** The clock is per-process, so
+   a resumed run gets a fresh time budget regardless of how long the original
+   ran.
+6. **Bug — `status --json` can print non-JSON.** An empty ledger produces a
+   human-readable "no run yet" line in both modes, which breaks any script that
+   pipes the JSON output into a parser.
+7. **Bug — a bad artifact path kills the run process.** If a Worker claims a path
+   that does not exist, canonicalization fails and the error propagates out of
+   the engine: no error event, no run-finished event, ledger tail left at state
+   entry. A later `resume` re-runs the stage, so it is recoverable, but the
+   process death is unhandled.
+8. **Bug — `loop doctor` hardcodes one config path in its label.** Under a
+   custom config directory the check reports a path it did not test, which is
+   actively misleading when you are debugging exactly that.
+9. **Gap — `loop validate` does not check global default skills.** Skills that
+   come from the global config are validated as an empty list, so a typo there
+   surfaces at run time instead of at lint time.
+10. **Gap — artifact hashes are never re-verified.** The store can verify a
+    recorded hash, but nothing calls it at consumption time; a later stage
+    reading an artifact path gets whatever is on disk now.
+11. **Accepted — pi's stderr is discarded.** The verbose path is hardcoded off,
+    so a pi crash surfaces as a non-zero exit and a transient error event with
+    no diagnostic text. Debugging a spawn failure means reproducing it by hand.
+12. **Gap — the crash flag on resume is ignored.** A stage re-entered after a
+    crash is treated identically to a clean entry, so there is no way for a
+    playbook to know it is a retry-after-death rather than a normal attempt.
+13. **Dead code — the local-skills path helper has no caller.** Skills resolve
+    against the machine directory; the helper is a leftover and a trap for anyone
+    reading resolution order from the paths module.
+14. **Gap — `config.fnl`'s top-level `:provider` has no reader.** The `--provider`
+    flag is always taken from the per-role model spec, and the resolution chain
+    bottoms out at `:worker` / `:judge` / `:navigator` rather than at the
+    top-level key. Setting it alone changes nothing; see
+    [`config.fnl`](03-customizing.md#configfnl--global-defaults).

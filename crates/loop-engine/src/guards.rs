@@ -46,7 +46,7 @@ pub fn select_edge<'m>(machine: &'m Machine, from: &str, to: &str) -> Option<&'m
 ///   the other side.
 /// - The Judge sees the worker's output digest, artifact paths, and the
 ///   check's output — never the worker's own claim that it succeeded
-///   (docs/07 #1).
+///   (docs/05-design-notes.md).
 pub fn check(
     runner: &dyn AgentRunner,
     checks: &dyn CheckRunner,

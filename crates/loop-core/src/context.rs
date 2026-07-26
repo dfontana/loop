@@ -1,4 +1,4 @@
-//! The context namespace (docs/04-toolbox.md) — the `$UPPER_SNAKE` variables a
+//! The context namespace (docs/03-customizing.md) — the `$UPPER_SNAKE` variables a
 //! playbook template can see.
 
 use std::collections::BTreeMap;

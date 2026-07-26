@@ -408,7 +408,7 @@ fn select_edge_takes_the_first_declared_edge_and_none_when_absent() {
     assert!(select_edge(&m, "b", "a").is_none());
 }
 
-// ── docs/06: transient vs real routing, self-loop with backoff ─────────
+// ── examples/: transient vs real routing, self-loop with backoff ─────────
 
 #[test]
 fn transient_vs_real_routing_drives_self_loop_then_real_failure_to_debug() {

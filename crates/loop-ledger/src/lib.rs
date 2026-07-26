@@ -1,7 +1,7 @@
 //! The append-only JSONL run record: getting events on and off disk, capturing
 //! artifacts, and rendering the digest.
 //!
-//! See docs/03-ledger.md. The contract, in one line: **state is never stored,
+//! See docs/02-how-it-works.md. The contract, in one line: **state is never stored,
 //! only folded** — so there is no mutable state file to desync from the log.
 //! The fold itself lives in `loop_core::fold`; this crate is its I/O half.
 //!
@@ -117,7 +117,7 @@ impl LedgerSink for Ledger {
 /// line becomes interior, and every subsequent read fails as corruption. A run
 /// interrupted mid-write would resume once and then be permanently unreadable.
 ///
-/// Repairing on open (docs/07-risks.md #9 says the reader "tolerates and
+/// Repairing on open (docs/05-design-notes.md says the reader "tolerates and
 /// truncates") makes the crash cost exactly what it should: the one event that
 /// was still in flight, and nothing else. Idempotent, so opening a healthy
 /// ledger does no I/O beyond the read.
@@ -163,7 +163,7 @@ fn repair_torn_tail(path: &Path) -> Result<()> {
 
 /// Parse newline-delimited events, tolerating an unparseable *last* line (a
 /// crash artifact) but erroring on an unparseable line anywhere else (real
-/// corruption — see docs/03-ledger.md and docs/07-risks.md #9).
+/// corruption — see docs/02-how-it-works.md and docs/05-design-notes.md).
 fn parse_events(content: &str, path: &Path) -> Result<Vec<Event>> {
     let lines: Vec<&str> = content.lines().collect();
     let last_idx = lines.len().saturating_sub(1);

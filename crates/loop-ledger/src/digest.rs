@@ -1,5 +1,5 @@
 //! The rolling ledger digest — the deterministic continuity channel between
-//! stages (docs/01-architecture.md, "Data flow between stages").
+//! stages (docs/02-how-it-works.md, "Data flow between stages").
 //!
 //! Never transcripts: the last N committed transitions with their rationales
 //! and pinned artifact references. Cost and drift are the reasons this is a
@@ -102,7 +102,7 @@ pub fn render(events: &[Event], last_n: usize) -> String {
 
 /// The rationale of the `transition_proposed` immediately behind a given
 /// `transition_committed`, matched by `(from, to)`. Committed events are
-/// always preceded by the proposal they ratify (docs/01's control loop:
+/// always preceded by the proposal they ratify (docs/02-how-it-works.md's control loop:
 /// propose -> guard -> commit), so the nearest match walking backward is the
 /// right one even across cycles that revisit the same edge.
 fn rationale_for(events: &[Event], committed_at: usize, from: &str, to: &str) -> Option<String> {
@@ -131,7 +131,7 @@ fn truncate(s: &str, max_chars: usize) -> String {
 
 /// A one-paragraph summary of a single stage's output, for the Judge. It must
 /// exclude the worker's own pass/fail claim — the Judge grades artifacts, not
-/// self-assessment (docs/07-risks.md #1).
+/// self-assessment (docs/05-design-notes.md).
 ///
 /// The exclusion is structural, not a filter: this takes `summary` (what
 /// `worker_output` records the worker *did*) and the artifact list, never the

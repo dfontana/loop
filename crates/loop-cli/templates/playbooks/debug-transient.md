@@ -10,7 +10,7 @@ thinking: medium
   `:skills` list, which becomes `pi --skill <this file>`; it returns this
   guidance for the worker to apply in-context. It is deliberately a checklist, not
   a task with its own `transition` — the caller stays in control of its own stage.
-  See docs/04-toolbox.md ("Playbooks-as-tools").
+  See docs/03-customizing.md ("Playbooks-as-tools").
 -->
 
 # Situational guidance: is this transient, or real?

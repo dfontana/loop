@@ -5,7 +5,7 @@
  * NOT a pi-extensions package). The Navigator fires when a Worker proposed an
  * out-of-graph target or set `blocked=true`. It picks a reachable next state and
  * writes a short entry-prompt addendum that becomes `$ENTRY_ADDENDUM` in the next
- * stage (docs/05-orchestration.md).
+ * stage (docs/02-how-it-works.md).
  *
  * `to` is a constrained enum of reachable states plus `escalate`, injected via
  * LOOP_REACHABLE — so the Navigator, like the Worker, cannot name an edge that

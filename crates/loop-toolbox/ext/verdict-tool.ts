@@ -6,7 +6,7 @@
  * transition/verdict/choose are loop's own, vendored in the toolbox's ext/).
  *
  * The Judge is spawned with `--no-builtin-tools -e verdict-tool.ts` (see
- * docs/05-orchestration.md), so it has no way to read/edit/deploy — only to
+ * docs/02-how-it-works.md), so it has no way to read/edit/deploy — only to
  * return a pass/fail on the transition's `criteria`, given the worker-output
  * digest and artifact paths passed in the kickoff message. Keeping the verdict a
  * structured tool call (not free prose) is what lets the harness gate on it.

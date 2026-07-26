@@ -7,7 +7,7 @@
 //! `--no-builtin-tools`, `--no-extensions`, `-e <path>`,
 //! `--append-system-prompt <text-or-path>`, then the positional message.
 //!
-//! One correction against docs/05-orchestration.md: `--append-system-prompt`
+//! One correction against docs/02-how-it-works.md: `--append-system-prompt`
 //! does **not** use an `@path` convention. pi's `resolvePromptInput` calls
 //! `existsSync` on the raw argument and reads it as a file if it exists,
 //! otherwise treats it as literal text — so we pass the rendered playbook's
@@ -92,7 +92,7 @@ pub fn worker_command(pi_bin: &str, spec: &WorkerSpec) -> Command {
 /// built-ins, and `--no-extensions` stops any *installed* pi-extension
 /// (`mcp`, …) from being auto-discovered and handing it a side door. The only
 /// tool it has is the explicitly `-e`'d `verdict-tool.ts`.
-/// That independence is what makes its verdict trustworthy (docs/07-risks.md
+/// That independence is what makes its verdict trustworthy (docs/05-design-notes.md
 /// #1) — do not add `read` "for convenience".
 pub fn judge_command(pi_bin: &str, spec: &JudgeSpec) -> Command {
     let mut cmd = Command::new(pi_bin);

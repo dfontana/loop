@@ -99,7 +99,7 @@ fn kinds(events: &[serde_json::Value]) -> Vec<&str> {
 
 /// The shipped `standard-ticket` template, driven to `done` — including a
 /// Judge rejecting the review and routing back to `implement` for a second
-/// cycle. This is the walkthrough in docs/06, minus the pipeline stages.
+/// cycle. This is the walkthrough in examples/, minus the pipeline stages.
 #[test]
 fn full_run_of_the_shipped_template_reaches_done() {
     let fx = Fixture::new(
@@ -219,7 +219,7 @@ fn a_crashed_stage_is_retried_and_the_run_still_completes() {
     assert_eq!(events.last().unwrap()["status"], "done");
 }
 
-/// The crash-resume contract of docs/03: a ledger whose last write was torn
+/// The crash-resume contract of docs/02-how-it-works.md: a ledger whose last write was torn
 /// off mid-JSON is repaired, the interrupted stage is re-entered, and the run
 /// finishes. Before the ledger repaired its own tail, `resume` would append
 /// one event past the torn line and then be permanently unreadable.

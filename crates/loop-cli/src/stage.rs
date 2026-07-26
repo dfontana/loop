@@ -149,7 +149,7 @@ impl StageBuilder for CliStage<'_> {
 
         // Small, scalar context values only: these land in the spawn's
         // environment, where a stage's tooling reads them to key its
-        // idempotency on the cycle (docs/04).
+        // idempotency on the cycle (docs/03-customizing.md).
         let env = [
             ("TICKET_ID", context.ticket_id.clone()),
             ("STATE", context.state.clone()),

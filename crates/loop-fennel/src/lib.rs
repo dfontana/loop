@@ -39,7 +39,7 @@ impl FennelVm {
         // SAFETY: no untrusted code is ever loaded into this VM — machine and
         // config files are authored by the person invoking the harness, and
         // full stdlib access (including `debug`) is required by fennel.lua
-        // itself and is an explicit, documented design choice (docs/09).
+        // itself and is an explicit, documented design choice (docs/05-design-notes.md).
         let lua = unsafe { mlua::Lua::unsafe_new() };
         eval::install_fennel(&lua)?;
         eval::install_loop_module(&lua)?;
@@ -49,7 +49,7 @@ impl FennelVm {
     /// Compile and run a `.fnl` file, returning the table it evaluates to.
     /// Compilation errors must carry the **Fennel** file/line, not the
     /// generated Lua's — that is the documented weakness of this backend
-    /// (docs/02-language.md) and the thing to get right.
+    /// (docs/05-design-notes.md) and the thing to get right.
     pub fn eval_file(&self, path: &Path) -> Result<mlua::Value> {
         let source = std::fs::read_to_string(path)
             .map_err(|e| CoreError::io(format!("reading {}", path.display()), e))?;

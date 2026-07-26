@@ -39,7 +39,7 @@
   ;; What stops a QA stage from "fixing" what it is grading is not what it
   ;; can reach — it is that the edges out of it are gated on commands the
   ;; harness runs itself, plus a Judge that never sees this stage's own claims
-  ;; (docs/07 #1).
+  ;; (docs/05-design-notes.md).
   :qa-staging {:playbook "qa"
                :thinking "high"
                ;; EDIT — the deploy/run skills for this pipeline.
@@ -74,7 +74,7 @@
   ;; The heart of this template: transient failures retry in place with
   ;; backoff and touch no code; real ones spawn the debugger. Burning debug
   ;; cycles on a flaky cluster — or worse, "fixing" code to match a broken
-  ;; environment — is the failure this routing exists to prevent (docs/07 #4).
+  ;; environment — is the failure this routing exists to prevent (docs/05-design-notes.md).
   ;;
   ;; Each edge asserts one branch of `classify.sh`'s taxonomy as a `:check`, so
   ;; the split is decided by a versioned regex set and an exit code rather than

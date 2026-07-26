@@ -87,7 +87,7 @@ pub fn install_loop_module(lua: &mlua::Lua) -> Result<()> {
 /// errors and any runtime error inside a compiled closure (a guard included)
 /// carry Fennel line numbers rather than positions in the generated Lua.
 ///
-/// This is the documented weak point of the Fennel backend (docs/02-language.md
+/// This is the documented weak point of the Fennel backend (docs/05-design-notes.md
 /// §"Weaker static analysis") and the thing this function exists to defeat:
 /// `correlate` makes the compiler emit one Lua line per Fennel top-level form,
 /// and we load the chunk under the `.fnl` filename, so `chunkname:line` in any

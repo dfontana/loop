@@ -63,7 +63,7 @@ impl ArtifactStore {
     /// outside the root. Canonicalizing both sides and comparing resolves all
     /// three at once: `fs::canonicalize` follows every symlink component, so
     /// the comparison is against where the path *actually* points, not its
-    /// spelling (docs/07-risks.md #10).
+    /// spelling (docs/05-design-notes.md).
     fn resolve_claimed_source(&self, claimed: &str) -> Result<PathBuf> {
         let candidate = Path::new(claimed);
         let joined = if candidate.is_absolute() {
@@ -122,7 +122,7 @@ impl ArtifactSink for ArtifactStore {
 }
 
 /// Best-effort project-relative rendering of a captured path, for
-/// `ArtifactRef.path` (docs/03-ledger.md: "Project-relative, e.g.
+/// `ArtifactRef.path` (docs/02-how-it-works.md: "Project-relative, e.g.
 /// `.loop/artifacts/implement-1-diff.patch`"). Falls back to the path as-is
 /// when it isn't actually under `project_root` (e.g. an absolute artifacts
 /// root configured outside the project in a test).
