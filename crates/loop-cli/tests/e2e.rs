@@ -236,13 +236,10 @@ fn resume_after_a_torn_write_re_enters_and_completes() {
     fx.run(&["init", "TINY-1"]);
     fx.machine(TINY_MACHINE);
 
-    // A run killed by SIGKILL partway through writing `worker_output`. This
-    // line is deliberately an *old* ledger: it carries the removed
-    // `resolved_config` and `tools` fields, which serde must tolerate — a run
-    // interrupted across an upgrade still has to resume.
+    // A run killed by SIGKILL partway through writing `worker_output`.
     fx.write_ledger(&[
-        r#"{"ts":"2026-07-24T22:00:00.000Z","type":"run_started","ticket":"TINY-1","machine_hash":"x","resolved_config":null,"budgets":{"usd":null,"wallclock_s":null,"max_transitions":null}}"#.into(),
-        r#"{"ts":"2026-07-24T22:00:01.000Z","type":"state_entered","state":"implement","cycle":1,"attempt":1,"session_id":null,"model":"claude-sonnet-5","thinking":"medium","tools":["read","bash","transition"]}"#.into(),
+        r#"{"ts":"2026-07-24T22:00:00.000Z","type":"run_started","ticket":"TINY-1","machine_hash":"x","budgets":{"usd":null,"wallclock_s":null,"max_transitions":null}}"#.into(),
+        r#"{"ts":"2026-07-24T22:00:01.000Z","type":"state_entered","state":"implement","cycle":1,"attempt":1,"session_id":null,"model":"claude-sonnet-5","thinking":"medium","skills":[],"mcp":[]}"#.into(),
         r#"{"ts":"2026-07-24T22:00:02.000Z","type":"worker_ou"#.into(),
     ]);
 

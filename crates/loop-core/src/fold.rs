@@ -275,6 +275,7 @@ mod tests {
             model: "m".into(),
             thinking: "low".into(),
             skills: vec![],
+            mcp: vec![],
         })
     }
 
@@ -553,6 +554,7 @@ mod entry_head_tests {
             model: "m".into(),
             thinking: "low".into(),
             skills: vec![],
+            mcp: vec![],
         })
     }
 

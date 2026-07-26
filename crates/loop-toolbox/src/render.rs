@@ -85,8 +85,31 @@ fn utf8_len(b: u8) -> usize {
 
 /// The short positional kickoff message a stage is spawned with — "you are
 /// entering STATE, cycle N", plus the navigator's addendum when present.
-pub fn entry_message(ctx: &loop_core::Context) -> String {
-    let mut msg = format!("You are entering **{}**, cycle {}.", ctx.state, ctx.cycle);
+///
+/// `mcp` is the servers the state named. They lead, because the `mcp`
+/// extension starts every session with every server **off** and offers no
+/// flag to change that — the agent connecting them is the only way in, and it
+/// has to happen before the work that needs them.
+pub fn entry_message(ctx: &loop_core::Context, mcp: &[String]) -> String {
+    let mut msg = String::new();
+    if !mcp.is_empty() {
+        msg.push_str(
+            "Before anything else, connect the MCP servers this stage needs — they \
+             start the session disconnected, and `mcp({connect: \"…\"})` is what \
+             turns one on:\n\n",
+        );
+        for server in mcp {
+            msg.push_str(&format!("- `mcp({{connect: \"{server}\"}})`\n"));
+        }
+        msg.push_str(
+            "\nIf one fails to connect, say so in your `transition` rationale rather \
+             than working around it.\n\n",
+        );
+    }
+    msg.push_str(&format!(
+        "You are entering **{}**, cycle {}.",
+        ctx.state, ctx.cycle
+    ));
     if let Some(prev) = &ctx.prev_state {
         if !prev.is_empty() {
             msg.push_str(&format!(" (previous state: {prev})"));
@@ -182,7 +205,7 @@ mod tests {
             cycle: 3,
             ..Default::default()
         };
-        let msg = entry_message(&ctx);
+        let msg = entry_message(&ctx, &[]);
         assert!(msg.contains("implement"));
         assert!(msg.contains('3'));
     }
@@ -195,7 +218,37 @@ mod tests {
             entry_addendum: Some("Focus on the schema mismatch.".into()),
             ..Default::default()
         };
-        let msg = entry_message(&ctx);
+        let msg = entry_message(&ctx, &[]);
         assert!(msg.contains("Focus on the schema mismatch."));
+    }
+
+    /// The connect instruction has to come *before* the "you are entering"
+    /// line: a stage that reads its work first and its tooling second may
+    /// reach for a server that is still off.
+    #[test]
+    fn entry_message_asks_for_a_connect_per_named_server_up_front() {
+        let ctx = loop_core::Context {
+            state: "qa-staging".into(),
+            cycle: 1,
+            ..Default::default()
+        };
+        let msg = entry_message(&ctx, &["linear".into(), "warehouse".into()]);
+
+        assert!(msg.contains(r#"mcp({connect: "linear"})"#), "{msg}");
+        assert!(msg.contains(r#"mcp({connect: "warehouse"})"#), "{msg}");
+        assert!(msg.find("connect").unwrap() < msg.find("entering").unwrap());
+    }
+
+    /// A stage that names no server must not be told anything about MCP —
+    /// otherwise every spawn pays for a paragraph about a tool it won't use.
+    #[test]
+    fn entry_message_says_nothing_about_mcp_when_no_server_is_named() {
+        let ctx = loop_core::Context {
+            state: "review".into(),
+            cycle: 1,
+            ..Default::default()
+        };
+        let msg = entry_message(&ctx, &[]);
+        assert!(!msg.to_lowercase().contains("mcp"), "{msg}");
     }
 }

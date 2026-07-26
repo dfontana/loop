@@ -59,11 +59,6 @@ impl Paths {
     pub fn toolbox_skills(&self) -> PathBuf {
         self.config_dir.join("skills")
     }
-    /// `~/.config/loop/mcp.json`, staged into the agent dir for the `mcp`
-    /// pi-extension.
-    pub fn toolbox_mcp(&self) -> PathBuf {
-        self.config_dir.join("mcp.json")
-    }
     pub fn toolbox_machines(&self) -> PathBuf {
         self.config_dir.join("machines")
     }
@@ -72,10 +67,6 @@ impl Paths {
     }
 
     // ── generated ─────────────────────────────────────────────────────────
-    /// Exported as `PI_AGENT_DIR` for every spawn.
-    pub fn agent_dir(&self) -> PathBuf {
-        self.state_dir.join("agent-dir")
-    }
     /// Rendered playbooks and entry messages for one ticket's spawns.
     pub fn render_dir(&self, ticket: &str) -> PathBuf {
         self.state_dir.join("render").join(sanitize(ticket))
@@ -158,6 +149,10 @@ pub struct Config {
 
     /// Skills loaded into every stage, before the machine's and the state's.
     pub default_skills: Vec<String>,
+    /// MCP servers connected in every stage, before the machine's and the
+    /// state's. Names out of the user's own `mcp.json` — loop never reads or
+    /// writes that file.
+    pub default_mcp: Vec<String>,
     /// Installed pi-extension package names activated per spawn
     /// (`mcp`, `review-model-selector`).
     pub pi_extensions: Vec<String>,
@@ -197,6 +192,7 @@ impl Config {
             },
             navigator_max_invocations: 5,
             default_skills: Vec::new(),
+            default_mcp: Vec::new(),
             pi_extensions: vec!["mcp".into(), "review-model-selector".into()],
             budgets: Budgets {
                 usd: Some(15.0),

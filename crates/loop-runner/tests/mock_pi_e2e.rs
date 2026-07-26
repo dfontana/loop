@@ -126,7 +126,7 @@ fn mock_pi_drives_worker_judge_navigator_and_a_crash() {
         entry_message: "Entering implement, cycle 1".into(),
         reachable: vec!["review".into(), "debug".into()],
         transition_mode: TransitionMode::Constrained,
-        agent_dir: tmp.path().join("agent-dir"),
+        mcp: vec![],
         ext_paths: vec![tmp.path().join("transition-tool.ts")],
         pi_extensions: vec![],
         cwd: tmp.path().to_path_buf(),

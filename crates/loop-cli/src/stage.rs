@@ -19,7 +19,6 @@ pub struct CliStage<'a> {
     pub machine: &'a Machine,
     pub config: &'a Config,
     pub toolbox: Toolbox<'a>,
-    pub agent_dir: PathBuf,
     pub ext: ExtPaths,
     /// Read-only handle. The engine holds the writable one, so this opens the
     /// same file independently rather than aliasing it — every append is
@@ -141,6 +140,7 @@ impl StageBuilder for CliStage<'_> {
             .machine
             .resolve_skills(state, &self.config.default_skills);
         let skill_paths = self.toolbox.resolve_skills(&skills, &self.machine.dir)?;
+        let mcp = self.machine.resolve_mcp(state, &self.config.default_mcp);
 
         let context = self.context(state_id, cycle, attempt, entry_addendum)?;
         let vars = context.to_map();
@@ -168,10 +168,10 @@ impl StageBuilder for CliStage<'_> {
             model,
             skill_paths,
             system_prompt_path,
-            entry_message: render::entry_message(&context),
+            entry_message: render::entry_message(&context, &mcp),
             reachable: self.machine.neighbors(state_id),
             transition_mode: self.machine.transition_mode,
-            agent_dir: self.agent_dir.clone(),
+            mcp,
             ext_paths: vec![self.ext.transition.clone()],
             pi_extensions: self.config.pi_extensions.clone(),
             cwd: self.config.paths.project_dir.clone(),

@@ -25,6 +25,12 @@ pub struct WorkerSpec {
     /// spawn also gets `--no-skills`, so this list is exactly what loads —
     /// nothing is picked up by ambient discovery.
     pub skill_paths: Vec<PathBuf>,
+    /// MCP servers this stage should reach, by name. There is no flag for
+    /// this: the `mcp` extension starts every session with every server off,
+    /// and the only way in is the agent calling `mcp({connect})`. So the list
+    /// travels in the entry message as an instruction, and lives here for the
+    /// ledger's record of what the stage was told to connect.
+    pub mcp: Vec<String>,
     /// Rendered playbook, passed as `--append-system-prompt @path`.
     pub system_prompt_path: PathBuf,
     /// The short positional kickoff message.
@@ -32,8 +38,6 @@ pub struct WorkerSpec {
     /// Neighbors of the current state — the `transition` tool's `to` enum.
     pub reachable: Vec<StateId>,
     pub transition_mode: TransitionMode,
-    /// Exported as `PI_AGENT_DIR`.
-    pub agent_dir: PathBuf,
     /// `-e` paths: loop's own vendored ext (`transition-tool.ts`).
     pub ext_paths: Vec<PathBuf>,
     /// Installed pi-extension names to keep enabled.

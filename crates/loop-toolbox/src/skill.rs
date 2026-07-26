@@ -1,5 +1,4 @@
-//! Resolving a stage's skills to the paths pi's `--skill` takes, and staging
-//! `mcp.json` for the `mcp` extension.
+//! Resolving a stage's skills to the paths pi's `--skill` takes.
 //!
 //! A skill is a `SKILL.md` plus whatever scripts sit beside it. loop does not
 //! parse or rewrite either — it resolves a name to a path and hands that path
@@ -15,7 +14,7 @@
 
 use std::path::{Path, PathBuf};
 
-use loop_core::{CoreError, IoContext, Result};
+use loop_core::{CoreError, Result};
 
 /// Every place a bare skill name is looked for, in order. Exposed so a miss
 /// can report all of them — that message is what makes `loop validate` useful.
@@ -71,28 +70,6 @@ pub fn resolve(name: &str, local_dir: &Path, toolbox_dir: &Path) -> Result<PathB
         name: name.to_string(),
         searched,
     })
-}
-
-/// Copy `mcp.json` into the staged agent dir, returning the server names it
-/// declares. A missing file is not an error — most machines use no MCP server.
-pub fn stage_mcp(src: &Path, agent_dir: &Path) -> Result<Vec<String>> {
-    if !src.is_file() {
-        return Ok(Vec::new());
-    }
-
-    let content = std::fs::read_to_string(src).io_ctx(format!("reading {}", src.display()))?;
-    let value: serde_json::Value = serde_json::from_str(&content)?;
-    let servers = value
-        .get("mcpServers")
-        .and_then(|v| v.as_object())
-        .map(|m| m.keys().cloned().collect())
-        .unwrap_or_default();
-
-    std::fs::create_dir_all(agent_dir).io_ctx(format!("creating {}", agent_dir.display()))?;
-    std::fs::write(agent_dir.join("mcp.json"), &content)
-        .io_ctx(format!("writing {}", agent_dir.join("mcp.json").display()))?;
-
-    Ok(servers)
 }
 
 #[cfg(test)]
@@ -184,29 +161,5 @@ mod tests {
             resolve("vendor/thing.md", &local, &toolbox).unwrap(),
             vendored
         );
-    }
-
-    #[test]
-    fn stage_mcp_copies_the_file_and_lists_servers() {
-        let tmp = tempdir().unwrap();
-        let src = tmp.path().join("mcp.json");
-        std::fs::write(
-            &src,
-            r#"{"mcpServers": {"linear": {"url": "https://example"}, "warehouse": {"command": "npx"}}}"#,
-        )
-        .unwrap();
-        let agent_dir = tmp.path().join("agent-dir");
-
-        let servers = stage_mcp(&src, &agent_dir).unwrap();
-        assert!(servers.contains(&"linear".to_string()));
-        assert!(servers.contains(&"warehouse".to_string()));
-        assert!(agent_dir.join("mcp.json").is_file());
-    }
-
-    #[test]
-    fn stage_mcp_with_no_file_is_not_an_error() {
-        let tmp = tempdir().unwrap();
-        let servers = stage_mcp(&tmp.path().join("absent.json"), &tmp.path().join("a")).unwrap();
-        assert!(servers.is_empty());
     }
 }

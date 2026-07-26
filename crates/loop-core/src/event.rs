@@ -128,13 +128,9 @@ pub enum EventPayload {
         model: String,
         thinking: String,
         /// Skills loaded into this stage, by name.
-        ///
-        /// Defaulted so a ledger written before skills replaced tool
-        /// allowlists still folds. Refusing to parse would make a run
-        /// interrupted across the upgrade permanently unresumable — the one
-        /// situation the ledger exists to survive.
-        #[serde(default)]
         skills: Vec<String>,
+        /// MCP servers this stage was told to connect, by name.
+        mcp: Vec<String>,
     },
     /// Digest of what the worker did. Never a transcript.
     WorkerOutput {

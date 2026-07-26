@@ -44,6 +44,10 @@
                :thinking "high"
                ;; EDIT — the deploy/run skills for this pipeline.
                :skills ["staging-deploy" "spark-run"]
+               ;; EDIT — servers from YOUR ~/.pi/agent/mcp.json this stage
+               ;; should reach. The entry message asks it to connect each one;
+               ;; drop the key if this pipeline needs none.
+               :mcp ["warehouse"]
                :description "Deploy to staging, run the pipeline, grade it."}
 
   :debug {:playbook "debug-spark"

@@ -23,7 +23,7 @@ Every line has `ts` (ISO-8601) and `type`. Payload by type:
 | `type` | Payload | Meaning |
 |---|---|---|
 | `run_started` | `ticket, machine_hash, budgets: {usd, wallclock_s, max_transitions}` | Records the run identity and its effective guardrail budgets. |
-| `state_entered` | `state, cycle, attempt, session_id, model, thinking, skills[]` | A worker is about to run this stage. |
+| `state_entered` | `state, cycle, attempt, session_id, model, thinking, skills[], mcp[]` | A worker is about to run this stage. |
 | `worker_output` | `state, cycle, summary, artifacts: [{name, path, sha256}], usage: {tokens, cost_usd}` | Digest of what the worker did. |
 | `transition_proposed` | `from, to \| blocked:true, rationale, by: "worker"` | The worker's `transition` tool call. |
 | `guard_checked` | `from, to, structural, check, criteria, check_output, judge_rationale` | Result of the guard tiers. |

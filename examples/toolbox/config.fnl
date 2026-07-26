@@ -22,9 +22,16 @@
  ;; need them rather than on everything.
  :default-skills []
 
+ ;; MCP servers connected in every stage, by the name they carry in YOUR
+ ;; ~/.pi/agent/mcp.json. loop never reads or writes that file — it only names
+ ;; servers, and the stage's entry message asks the agent to `mcp({connect})`
+ ;; each one, because the mcp extension starts every session with all servers
+ ;; off. Usually empty for the same reason :default-skills is.
+ :default-mcp []
+
  ;; Installed pi-extension packages activated per spawn. These are NOT files
- ;; loop ships — they live in your pi extension settings. loop points `mcp` at
- ;; the staged agent dir via PI_AGENT_DIR, where it finds mcp.json.
+ ;; loop ships — they live in your pi extension settings. `mcp` has to be here
+ ;; for any :mcp list to mean anything; `loop validate` says so if it isn't.
  :pi-extensions ["mcp" "review-model-selector"]
 
  ;; Hard stops the harness enforces. Not suggestions to the agent.

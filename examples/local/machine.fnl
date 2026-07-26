@@ -31,7 +31,7 @@
  ;; Sits under every state and over ~/.config/loop/config.fnl. A state's own
  ;; :model/:thinking wins; so does its playbook's frontmatter.
  :defaults {:provider "anthropic" :model "claude-sonnet-5" :thinking "medium"
-            :skills []}
+            :skills [] :mcp []}
 
  ;; Hard stops the harness enforces. May only tighten the global budgets.
  :budgets {:usd 8 :wallclock-s 5400 :max-transitions 40}
@@ -64,9 +64,14 @@
   ;; reach — it is that the edges out of it are gated on `:check` commands the
   ;; harness runs itself, and on a Judge that never sees this stage's own
   ;; claims (docs/07 #1).
+  ;; :mcp names servers in YOUR ~/.pi/agent/mcp.json — loop neither reads nor
+  ;; ships that file. Every server starts a session disconnected, so the entry
+  ;; message asks this stage to `mcp({connect: "warehouse"})` before it works.
+  ;; A stage that doesn't name a server can't reach one.
   :qa-staging {:playbook "qa"
                :thinking "high"
                :skills ["staging-deploy" "spark-run"]
+               :mcp ["warehouse"]
                :description "Deploy to staging, run the pipeline, grade it."}
 
   :debug {:playbook "debug-spark"

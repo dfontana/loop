@@ -60,7 +60,8 @@ reimplementing them:
 
 - Skills are pi's own (`--skill`), so the toolbox is compatible with pi's skill
   format; MCP surfaces are the [`mcp`](../pi-extensions/extensions/mcp)
-  extension; the `review` stage uses `select_review_model` from
+  extension, reaching a stage through *your* server config rather than anything
+  loop ships; the `review` stage uses `select_review_model` from
   [`review-model-selector`](../pi-extensions/extensions/review-model-selector).
 - The `implement`/`review` playbooks mirror the
   [`run-plan`](../pi-extensions/skills/run-plan) /

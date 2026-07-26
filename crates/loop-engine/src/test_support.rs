@@ -58,6 +58,7 @@ pub fn state(id: &str) -> State {
         playbook: PlaybookRef::Inline("test playbook".into()),
         model: ModelChoice::default(),
         skills: Vec::new(),
+        mcp: Vec::new(),
         description: None,
     }
 }
@@ -65,6 +66,13 @@ pub fn state(id: &str) -> State {
 pub fn state_with_skills(id: &str, skills: &[&str]) -> State {
     State {
         skills: skills.iter().map(|s| s.to_string()).collect(),
+        ..state(id)
+    }
+}
+
+pub fn state_with_mcp(id: &str, mcp: &[&str]) -> State {
+    State {
+        mcp: mcp.iter().map(|s| s.to_string()).collect(),
         ..state(id)
     }
 }
@@ -304,6 +312,7 @@ impl<'m> StageBuilder for FakeStageBuilder<'m> {
             .machine
             .resolve_model(st, &ModelChoice::default(), &model_spec());
         let skills = self.machine.resolve_skills(st, &[]);
+        let mcp = self.machine.resolve_mcp(st, &[]);
         let spec = WorkerSpec {
             ticket: self.machine.ticket.clone(),
             state: state.clone(),
@@ -317,7 +326,7 @@ impl<'m> StageBuilder for FakeStageBuilder<'m> {
             entry_message: format!("enter {state} cycle {cycle} attempt {attempt}"),
             reachable: self.machine.neighbors(state),
             transition_mode: self.machine.transition_mode,
-            agent_dir: PathBuf::new(),
+            mcp,
             ext_paths: Vec::new(),
             pi_extensions: Vec::new(),
             cwd: PathBuf::new(),

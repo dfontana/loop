@@ -54,6 +54,10 @@ impl Diagnostic {
 /// - Every loop's states exist and its head is a state some edge re-enters.
 /// - `escalation_state`, if set, is a terminal.
 /// - Every skill a state names resolves (same caller-supplied filesystem seam).
+/// - A state names MCP servers while `mcp` is absent from `pi-extensions`
+///   (`mcp_enabled`): the stage would be told to call a tool it wasn't given.
+///   The server *names* are not checkable — they live in the user's own
+///   `mcp.json`, which loop never reads.
 /// - **Warning:** an edge with neither `check` nor `criteria` — the worker's
 ///   proposal is committed unexamined.
 /// - No two transitions share a `from`/`to` pair: `select_edge` takes the
@@ -62,6 +66,7 @@ pub fn validate(
     machine: &Machine,
     resolve: &dyn Fn(&PlaybookRef) -> bool,
     resolve_skill: &dyn Fn(&str) -> bool,
+    mcp_enabled: bool,
 ) -> Vec<Diagnostic> {
     let mut out = Vec::new();
 
@@ -158,6 +163,18 @@ pub fn validate(
                     format!("skill `{name}` on state `{id}` does not resolve in the toolbox"),
                 ));
             }
+        }
+        // The names themselves are unverifiable here — they belong to the
+        // user's `mcp.json`. What *is* checkable is whether the tool that
+        // connects them will exist in the spawn at all.
+        if !mcp_enabled && !machine.resolve_mcp(state, &[]).is_empty() {
+            out.push(Diagnostic::error(
+                id.clone(),
+                format!(
+                    "state `{id}` names MCP servers, but `mcp` is not in `:pi-extensions` \
+                     — the stage would be told to call a tool it does not have"
+                ),
+            ));
         }
     }
 

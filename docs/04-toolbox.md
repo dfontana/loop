@@ -2,10 +2,13 @@
 
 > **Superseded in part by [09-implementation-plan.md](09-implementation-plan.md).**
 > The toolbox lives at **`~/.config/loop/`**, not `~/.loop/`, and everything
-> loop *generates* (the staged `mcp.json`, rendered prompts) goes to
-> **`~/.local/state/loop/`** — which is what `PI_AGENT_DIR` points at, so
+> loop *generates* (rendered prompts) goes to **`~/.local/state/loop/`**, so
 > nothing generated lands in the directory you hand-edit. `loop.config.yaml` is
 > now `config.fnl`.
+>
+> **There is no toolbox `mcp.json`, and `PI_AGENT_DIR` is not set.** A state
+> names servers with `:mcp`; they resolve against *your* own
+> `~/.pi/agent/mcp.json`, which loop never reads. See "MCP" below.
 >
 > The second kind of reusable thing is now a **skill**, not a scoped-tool: a
 > `SKILL.md` plus the scripts beside it, loaded by `pi --skill`. Per-stage tool
@@ -37,7 +40,6 @@ referenced by name.
       run.sh  classify.sh
     staging-deploy/
     contract-check/
-  mcp.json                      # .mcp.json for the `mcp` extension
   machines/                     # MACHINE TEMPLATES — starting points to copy
     standard-ticket.yaml
     data-pipeline-ticket.yaml
@@ -166,7 +168,7 @@ second copy:
 | Toolbox piece | Backed by | How loop points it at the toolbox |
 |---|---|---|
 | `skills/<name>/` | **pi's own skill loader** | `--no-skills` plus one `--skill <path>` per skill the state named |
-| `mcp.json` | [`mcp`](../../pi-extensions/extensions/mcp) extension | staged as `$PI_AGENT_DIR/mcp.json` |
+| a state's `:mcp` names | [`mcp`](../../pi-extensions/extensions/mcp) extension | nothing staged: the entry message asks the stage to `mcp({connect: …})` each name |
 | `select_review_model` (in the `review` stage) | [`review-model-selector`](../../pi-extensions/extensions/review-model-selector) extension | activated per spawn; nothing to configure |
 | `ext/*.ts` (transition/verdict/choose) | **loop's own**, vendored here | `-e`-injected per spawn (Worker / Judge / Navigator) |
 
@@ -215,10 +217,33 @@ That symmetry is the point of the split:
   only tier a worker cannot author, because the harness runs it out of process
   after the stage exits.
 
-MCP servers remain available through the [`mcp`](../../pi-extensions/extensions/mcp)
-extension's single proxy tool, configured by `mcp.json`. Note that extension
-defaults every server *off* per session, so a headless stage needs its server
-pre-enabled.
+### MCP — the "what else with"
+
+MCP servers reach a stage through the [`mcp`](../../pi-extensions/extensions/mcp)
+extension's single proxy tool. loop deliberately does **not** model them: it
+ships no `mcp.json`, stages none, and never sets `PI_AGENT_DIR`, because doing
+so would replace the servers you actually configured with an empty set.
+
+What a state declares is which of *your* servers this stage should reach:
+
+```fennel
+:qa-staging {:playbook "qa" :mcp ["warehouse"]}
+```
+
+That extension starts every session with every server **off**, and the panel
+that turns one on (`/mcp`) does not exist headless. The only way in is the
+agent calling `mcp({connect: "warehouse"})`, so the names ride into the stage's
+entry message as exactly that instruction, ahead of the work.
+
+Two consequences worth naming:
+
+- The names are **unverifiable at load time** — they belong to a file loop
+  doesn't read, so a typo surfaces as a failed connect, not a `loop validate`
+  error. What validate *can* catch is `:mcp` on a machine whose
+  `:pi-extensions` omits `mcp`, where the tool wouldn't exist at all.
+- This bounds *reach*, not trust. An unnamed server is one the stage never
+  connects, but a named one is fully available to it; as with skills, the tier
+  that decides what a stage may transition past is the edge's `:check`.
 
 ## Per-stage binding
 
@@ -264,11 +289,12 @@ the same cycle.
 
 ## Toolbox changes
 
-The toolbox is intentionally live. A run stages MCP configuration before it
-begins, while each stage resolves its playbook and skills immediately before it
-starts. An edit to `~/.config/loop/playbooks/implement.md` therefore affects
-later stages of an in-flight run, but never a stage that has already started;
-MCP edits apply on the next run or resume.
+The toolbox is intentionally live: each stage resolves its playbook and skills
+immediately before it starts. An edit to
+`~/.config/loop/playbooks/implement.md` therefore affects later stages of an
+in-flight run, but never a stage that has already started. Your `mcp.json` is
+read by the `mcp` extension at connect time, so an edit there lands on the next
+stage that connects.
 
 Skill *scripts* are read at the moment they run, by the agent and by any check
 that invokes them — so editing one mid-run changes the gate as well as the

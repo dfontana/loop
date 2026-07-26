@@ -58,9 +58,8 @@ model/prompt/tools without touching the rest.
 ```
 
 - **Machine loader** — parses `machine.yaml` (or `.fnl`) and validates the graph.
-  The run stages tools and MCP configuration before it begins; each stage resolves
-  its playbook immediately before it runs, so a playbook edit applies to stages
-  that have not started yet.
+  Each stage resolves its playbook and skills immediately before it runs, so an
+  edit applies to stages that have not started yet.
 - **Ledger** — the append-only JSONL run record. Folding it yields the current
   state, the active cycle counters, and per-state attempt counts. See
   [03-ledger.md](03-ledger.md).

@@ -11,7 +11,7 @@
 //!  :qa-cases [{:id "pipeline" :desc "…"}
 //!             {:id "contract" :desc "…"}]
 //!
-//!  :defaults {:model "claude-sonnet-5" :thinking "medium" :skills ["jj"]}
+//!  :defaults {:model "claude-sonnet-5" :thinking "medium" :skills ["jj"] :mcp []}
 //!  :budgets  {:usd 8 :wallclock-s 5400 :max-transitions 40}
 //!  :judge     {:model "claude-haiku-4-5" :thinking "low"}
 //!  :navigator {:model "claude-haiku-4-5" :thinking "low" :max-invocations 5}
@@ -26,7 +26,8 @@
 //!                :skills ["spark-build"]
 //!                :description "Implement the plan; keep the build green."}
 //!   :qa-staging {:playbook "qa" :thinking "high"
-//!                :skills ["staging-deploy" "spark-run"]}}
+//!                :skills ["staging-deploy" "spark-run"]
+//!                :mcp ["warehouse"]}}
 //!
 //!  :transitions
 //!  [{:from "implement" :to "review"
@@ -45,6 +46,10 @@
 //! - `:check` is a bare command string, or `{:cmd .. :timeout-s ..}`. The
 //!   harness runs it itself; exit 0 passes the edge.
 //! - `:on-fail` is `"retry"` | `"abort"` | `{:route "state-id"}`.
+//! - `:mcp` names servers in the **user's own** `mcp.json`, which loop never
+//!   reads. The names ride into the entry message as `mcp({connect: …})`
+//!   instructions, so a name that exists nowhere fails at connect time rather
+//!   than at load — loop has nothing to check it against.
 //! - `:model`/`:thinking`/`:provider` are all optional at every level — leave
 //!   them `None` and let [`loop_core::Machine::resolve_model`] stack the layers.
 //!   Do **not** eagerly fill in defaults here; the playbook frontmatter layer
@@ -63,6 +68,7 @@
 //!  :judge     {:model "claude-haiku-4-5" :thinking "low"}
 //!  :navigator {:model "claude-haiku-4-5" :thinking "low" :max-invocations 5}
 //!  :default-skills []
+//!  :default-mcp []
 //!  :pi-extensions ["mcp" "review-model-selector"]
 //!  :budgets {:usd 15 :wallclock-s 7200 :max-transitions 60}
 //!  :context "digest" :digest-last-n 8
@@ -318,7 +324,8 @@ fn parse_defaults(table: &mlua::Table) -> Result<Defaults> {
         Some(t) => {
             let model = parse_model_choice(&t, "`:defaults`")?;
             let skills = get_str_vec(&t, "skills")?.unwrap_or_default();
-            Ok(Defaults { model, skills })
+            let mcp = get_str_vec(&t, "mcp")?.unwrap_or_default();
+            Ok(Defaults { model, skills, mcp })
         }
     }
 }
@@ -342,6 +349,7 @@ fn parse_states(table: &mlua::Table) -> Result<BTreeMap<StateId, State>> {
         let playbook = parse_playbook(&st, &id)?;
         let model = parse_model_choice(&st, &ctx)?;
         let skills = get_str_vec(&st, "skills")?.unwrap_or_default();
+        let mcp = get_str_vec(&st, "mcp")?.unwrap_or_default();
         let description = get_str(&st, "description")?;
         out.insert(
             id.clone(),
@@ -350,6 +358,7 @@ fn parse_states(table: &mlua::Table) -> Result<BTreeMap<StateId, State>> {
                 playbook,
                 model,
                 skills,
+                mcp,
                 description,
             },
         );
@@ -622,6 +631,7 @@ pub fn config_from_table(table: &mlua::Table, base: Config) -> Result<Config> {
     let navigator_max_invocations =
         parse_navigator_max_invocations(table, base.navigator_max_invocations)?;
     let default_skills = get_str_vec(table, "default-skills")?.unwrap_or(base.default_skills);
+    let default_mcp = get_str_vec(table, "default-mcp")?.unwrap_or(base.default_mcp);
     let pi_extensions = get_str_vec(table, "pi-extensions")?.unwrap_or(base.pi_extensions);
 
     let budgets = match get_table(table, "budgets")? {
@@ -659,6 +669,7 @@ pub fn config_from_table(table: &mlua::Table, base: Config) -> Result<Config> {
         navigator,
         navigator_max_invocations,
         default_skills,
+        default_mcp,
         pi_extensions,
         budgets,
         context,

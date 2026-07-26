@@ -47,6 +47,34 @@ paying real complexity for a guarantee it never delivered, and skills — which
 the agent can read, and which carry their guardrails in a testable script —
 cover the same ground more honestly.
 
+### Why loop stopped modeling MCP
+
+An earlier draft had loop own an `mcp.json`: a file in the toolbox, copied into
+a generated agent dir, with `PI_AGENT_DIR` pointed at it per spawn.
+
+That is a worse version of a file the user already has. The `mcp` extension
+reads `~/.pi/agent/mcp.json` and `./.mcp.json`, and it holds OAuth state, bearer
+tokens, and env-expanded headers — everything you would least like to maintain a
+second copy of. Worse, `PI_AGENT_DIR` is a *redirect*, not an overlay: pointing
+it at loop's directory doesn't add loop's servers to the user's, it replaces
+them. A machine that named no server would silently take away every server the
+user had configured.
+
+So loop models the one thing that is genuinely its business — **which of your
+servers a given stage should reach** — and nothing else. A state lists names in
+`:mcp`; the harness sets no `PI_AGENT_DIR` and stages no file.
+
+The mechanism for turning one on is dictated by the extension: servers default
+to **off** every session, and the only way in is the `/mcp` panel (which does
+not exist headless) or the agent calling `mcp({connect: "<name>"})`, which
+enables and connects in one step. So the names go into the stage's entry
+message as exactly those calls, ahead of the work.
+
+This does mean the agent performs its own setup, and could in principle skip it
+or connect something it wasn't given. That is the same bargain skills already
+make: it bounds *reach*, not trust. The tier a worker cannot talk past is still
+the edge's `:check`.
+
 ## Directory layout
 
 ```
@@ -54,13 +82,10 @@ cover the same ground more honestly.
   config.fnl                     # global defaults (was loop.config.yaml)
   playbooks/*.md                 # a stage's prompt
   skills/<name>/SKILL.md         # situational know-how + the scripts beside it
-  mcp.json
   machines/*.fnl                 # machine templates
   ext/{transition,verdict,choose}-tool.ts   # materialized from the binary
 
 ~/.local/state/loop/             # generated, disposable, safe to rm -rf
-  agent-dir/                     # exported as PI_AGENT_DIR for every spawn
-    mcp.json                     # copied from ~/.config/loop/mcp.json
   render/<ticket>/               # rendered playbooks + entry messages per spawn
 
 ./.loop/                         # per-ticket, in the project repo
@@ -77,11 +102,11 @@ against `loop-core` alone — no crate in wave 1 depends on another.
 
 | Crate | Owns | Depends on |
 |---|---|---|
-| `loop-core` | The IR: `Machine`, `State`, `Transition`, `Config`, `Event`, `Vars`, and the two traits (`GuardEvaluator`, `AgentRunner`) every other crate is written against. No I/O. | — |
+| `loop-core` | The IR: `Machine`, `State`, `Transition`, `Check`, `Config`, `Event`, and the traits (`AgentRunner`, `CheckRunner`, `LedgerSink`, …) every other crate is written against. No I/O. | — |
 | `loop-ledger` | JSONL append (fsync per event, tolerant of a trailing partial line), the fold to `RunState`, the artifact store (temp-file + atomic rename + sha256), the rolling digest. | core |
-| `loop-fennel` | `mlua` + vendored `fennel.lua`; loads `config.fnl` / `machine.fnl` → `Machine`; owns the Lua registry of guard closures and implements `GuardEvaluator`. | core |
-| `loop-toolbox` | Playbook and skill resolution (local-first, then toolbox), `$UPPER_SNAKE` rendering over the context namespace, `PI_AGENT_DIR` staging, materializing the three `ext/*.ts` from `include_str!`. | core |
-| `loop-runner` | Spawning `pi` (worker/judge/navigator), parsing the JSONL event stream, extracting `LOOP_TRANSITION`, summing `usage.cost`; implements `AgentRunner`. Also `exec_check`, the harness's own bounded subprocess for a transition `:check`. | core |
+| `loop-fennel` | `mlua` + vendored `fennel.lua`; loads `config.fnl` / `machine.fnl` → `Machine`. The IR is plain data, so the VM is dropped once loading is done. | core |
+| `loop-toolbox` | Playbook and skill resolution (local-first, then toolbox), `$UPPER_SNAKE` rendering over the context namespace, the entry message (including the per-stage `mcp({connect})` preamble), materializing the three `ext/*.ts` from `include_str!`. | core |
+| `loop-runner` | Spawning `pi` (worker/judge/navigator), parsing the JSONL event stream, extracting the `transition` call, summing `usage.cost`; implements `AgentRunner`. Also `exec_check`, the harness's own bounded subprocess for a transition `:check`. | core |
 | `loop-engine` | The control loop of [01](01-architecture.md): guard tiers, budgets, cycle caps, navigator caps, `on_fail` handling — plus `validate` (the static linter of [07](07-risks.md) #11). Written against the traits, so it is fully testable with fakes. | core |
 | `loop-cli` | `clap`: `init`, `validate`, `run`, `status`, `resume`, `doctor`. Wires the concrete impls into the engine. | all |
 | `mock-pi` | Test fixture binary: replays a scripted JSONL stream (including crash-mid-stage) so the whole loop is testable deterministically, offline, for $0. | — |

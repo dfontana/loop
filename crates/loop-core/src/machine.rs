@@ -133,6 +133,8 @@ pub struct Defaults {
     pub model: ModelChoice,
     /// Loaded into every stage, on top of whatever the state names.
     pub skills: Vec<String>,
+    /// MCP servers connected in every stage, on top of the state's own.
+    pub mcp: Vec<String>,
 }
 
 /// A node in the graph.
@@ -147,6 +149,10 @@ pub struct State {
     /// `loop-toolbox` and passed to pi as `--skill`. Resolve the *set* with
     /// [`Machine::resolve_skills`].
     pub skills: Vec<String>,
+    /// MCP servers this stage should reach, by the name they carry in the
+    /// user's own `mcp.json`. loop neither reads nor ships that file; it only
+    /// names servers. Resolve the *set* with [`Machine::resolve_mcp`].
+    pub mcp: Vec<String>,
     /// One line on what this stage is for. Fed to the Navigator so it can route.
     pub description: Option<String>,
 }
@@ -347,17 +353,20 @@ impl Machine {
     /// never a capability. What a stage may *do* is decided by the tools pi
     /// gives it, not here.
     pub fn resolve_skills(&self, state: &State, config_default: &[String]) -> Vec<String> {
-        let mut out: Vec<String> = Vec::new();
-        for s in config_default
-            .iter()
-            .chain(self.defaults.skills.iter())
-            .chain(state.skills.iter())
-        {
-            if !out.iter().any(|x| x == s) {
-                out.push(s.clone());
-            }
-        }
-        out
+        union(config_default, &self.defaults.skills, &state.skills)
+    }
+
+    /// Union of the global baseline, the machine defaults, and the state's own
+    /// MCP servers, order-preserving and deduplicated.
+    ///
+    /// These are names out of the *user's* `mcp.json`, which loop never reads.
+    /// A stage cannot reach a server it doesn't name, because the `mcp`
+    /// extension starts every session with all servers off — but that also
+    /// means loop cannot tell a typo from a server this machine simply has
+    /// installed and loop doesn't, so a name that doesn't exist fails at
+    /// connect time rather than at `loop validate`.
+    pub fn resolve_mcp(&self, state: &State, config_default: &[String]) -> Vec<String> {
+        union(config_default, &self.defaults.mcp, &state.mcp)
     }
 
     pub fn is_terminal(&self, id: &str) -> bool {
@@ -400,4 +409,16 @@ impl Machine {
             .filter(|l| l.states.iter().any(|s| s == state))
             .collect()
     }
+}
+
+/// Concatenate the three layers of a purely-additive setting, keeping the first
+/// occurrence of each name so the global baseline stays at the front.
+fn union(global: &[String], machine: &[String], state: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for s in global.iter().chain(machine.iter()).chain(state.iter()) {
+        if !out.iter().any(|x| x == s) {
+            out.push(s.clone());
+        }
+    }
+    out
 }

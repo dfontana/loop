@@ -133,6 +133,7 @@ pub fn validate(paths: Paths) -> Result<()> {
         &machine,
         &|r| toolbox.resolve_playbook(r, &machine.dir).is_ok(),
         &|name| toolbox.resolve_skill(name, &machine.dir).is_ok(),
+        config.pi_extensions.iter().any(|e| e == "mcp"),
     );
 
     let errors = diagnostics
@@ -174,7 +175,6 @@ pub fn run(paths: Paths, max_transitions: Option<u32>, resuming: bool) -> Result
     }
 
     let toolbox = Toolbox::new(&config);
-    let (agent_dir, _mcp_servers) = toolbox.stage_agent_dir()?;
     let ext = toolbox.materialize_ext()?;
 
     let ledger_path = paths.ledger_file();
@@ -195,7 +195,6 @@ pub fn run(paths: Paths, max_transitions: Option<u32>, resuming: bool) -> Result
         machine: &machine,
         config: &config,
         toolbox: Toolbox::new(&config),
-        agent_dir,
         ext,
         ledger_path: ledger_path.clone(),
     };

@@ -20,7 +20,6 @@ use loop_core::{JudgeSpec, NavigatorSpec, TransitionMode, WorkerSpec};
 /// Build the Worker command.
 ///
 /// Required environment:
-/// - `PI_AGENT_DIR` → the staged agent dir, so `mcp` finds `mcp.json`.
 /// - `LOOP_REACHABLE` → comma-separated neighbors; the transition tool builds
 ///   its enum from this.
 /// - `LOOP_TRANSITION_MODE` → `constrained` | `open`.
@@ -30,7 +29,9 @@ use loop_core::{JudgeSpec, NavigatorSpec, TransitionMode, WorkerSpec};
 /// Extension discovery is left on (no `--no-extensions`): the Worker is the
 /// one role that needs the installed `mcp`/`review-model-selector`
 /// pi-extensions to load alongside the harness's own injected `transition`
-/// tool.
+/// tool. Note `PI_AGENT_DIR` is deliberately **not** set — `mcp` reads the
+/// user's own `~/.pi/agent/mcp.json`, and pointing it at a loop-owned
+/// directory would hide every server the user actually configured.
 ///
 /// Skills, by contrast, are pinned shut. `--no-skills` turns off ambient
 /// discovery and each `--skill <path>` adds one back, so a stage loads exactly
@@ -64,7 +65,6 @@ pub fn worker_command(pi_bin: &str, spec: &WorkerSpec) -> Command {
 
     cmd.current_dir(&spec.cwd);
 
-    cmd.env("PI_AGENT_DIR", &spec.agent_dir);
     cmd.env("LOOP_REACHABLE", spec.reachable.join(","));
     cmd.env(
         "LOOP_TRANSITION_MODE",
@@ -225,7 +225,7 @@ mod tests {
             entry_message: "Entering implement, cycle 1".into(),
             reachable: vec!["review".into(), "debug".into()],
             transition_mode: TransitionMode::Constrained,
-            agent_dir: PathBuf::from("/tmp/agent-dir"),
+            mcp: vec!["linear".into()],
             ext_paths: vec![PathBuf::from("/tmp/ext/transition-tool.ts")],
             pi_extensions: vec!["mcp".into()],
             cwd: PathBuf::from("/tmp/project"),
@@ -269,10 +269,18 @@ mod tests {
         );
     }
 
+    /// Setting `PI_AGENT_DIR` would repoint the `mcp` extension at a
+    /// loop-owned directory, hiding every server in the user's own
+    /// `~/.pi/agent/mcp.json` — the exact set a stage's `:mcp` names.
+    #[test]
+    fn worker_command_does_not_repoint_the_agent_dir() {
+        let cmd = worker_command("pi", &worker_spec());
+        assert_eq!(env_of(&cmd, "PI_AGENT_DIR"), None);
+    }
+
     #[test]
     fn worker_command_env_matches_spec() {
         let cmd = worker_command("pi", &worker_spec());
-        assert_eq!(env_of(&cmd, "PI_AGENT_DIR"), Some("/tmp/agent-dir"));
         assert_eq!(env_of(&cmd, "LOOP_REACHABLE"), Some("review,debug"));
         assert_eq!(env_of(&cmd, "LOOP_TRANSITION_MODE"), Some("constrained"));
         assert_eq!(env_of(&cmd, "TICKET_ID"), Some("PROJ-1487"));

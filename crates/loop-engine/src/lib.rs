@@ -505,6 +505,7 @@ impl Engine<'_> {
             model: plan.spec.model.model.clone(),
             thinking: plan.spec.model.thinking.to_string(),
             skills: plan.skills.clone(),
+            mcp: plan.spec.mcp.clone(),
         })?;
 
         let result = self.runner.run_worker(&plan.spec)?;

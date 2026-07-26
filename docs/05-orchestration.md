@@ -35,8 +35,11 @@ Two different extension mechanisms feed a spawn, and they're easy to conflate:
 - **existing pi-extensions** — [`mcp`](../../pi-extensions/extensions/mcp) and
   [`review-model-selector`](../../pi-extensions/extensions/review-model-selector)
   — are *installed packages*, not files loop ships. The harness activates them
-  and exports `PI_AGENT_DIR` for the spawn so `mcp` finds the staged
-  `mcp.json`.
+  and otherwise leaves them alone: `PI_AGENT_DIR` is deliberately unset so
+  `mcp` keeps reading the user's own `~/.pi/agent/mcp.json`. A state's `:mcp`
+  list names servers from that file, and rides into the entry message as
+  `mcp({connect: …})` instructions — the extension starts every session with
+  every server off, and headless there is no `/mcp` panel to turn one on.
 - **skills** are pi's own mechanism, loaded by path: `--no-skills` turns off
   ambient discovery, then one `--skill <path>` per skill the state named. So a
   stage loads exactly what its machine declared and nothing a stray

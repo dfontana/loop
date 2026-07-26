@@ -152,10 +152,11 @@ ticket actually demands it.
 ## 14. Toolbox changes during a run
 
 **Risk:** you edit `~/.loop/playbooks/implement.md` while a run is mid-flight.
-**Mitigation:** each stage resolves its playbook when it starts, so a playbook
-edit can affect later stages but not one already in progress. Tool and MCP
-configuration are staged before the run starts, so their edits apply on the next
-run or resume. Avoid editing the toolbox during a run when consistency matters;
+**Mitigation:** each stage resolves its playbook and skills when it starts, so
+an edit can affect later stages but not one already in progress. Your own
+`mcp.json` is read by the `mcp` extension at connect time, so an edit there
+lands on the next stage that connects. Avoid editing the toolbox during a run
+when consistency matters;
 keep it in version control if you need to audit or coordinate changes.
 
 ---

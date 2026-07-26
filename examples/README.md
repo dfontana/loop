@@ -72,7 +72,6 @@ Spark/staging credentials and binaries named by the example tools.
 | [`toolbox/skills/open-pr/`](toolbox/skills/open-pr) | Open or update the branch's PR, idempotently. | pi skill |
 | [`toolbox/skills/ci-status/`](toolbox/skills/ci-status) | Generic CI read/wait — a library item this ticket doesn't load. | pi skill |
 | [`toolbox/skills/debug-transient.md`](toolbox/skills/debug-transient.md) | Transient-vs-real checklist; situational know-how the `debug` stage loads. | pi skill |
-| [`toolbox/mcp.json`](toolbox/mcp.json) | MCP server registry in real `.mcp.json` schema. | [`mcp`](../../pi-extensions/extensions/mcp) |
 | [`toolbox/machines/standard-ticket.fnl`](toolbox/machines/standard-ticket.fnl) | Machine template: the plain code-only spine. | loop |
 | [`toolbox/machines/data-pipeline-ticket.fnl`](toolbox/machines/data-pipeline-ticket.fnl) | Machine template PROJ-1487 is derived from. | loop |
 | [`toolbox/ext/transition-tool.ts`](toolbox/ext/transition-tool.ts) | The Worker's transition tool. | loop (vendored) |
@@ -82,9 +81,11 @@ Spark/staging credentials and binaries named by the example tools.
 > **"Backed by" matters.** Skills use pi's own loader — the harness resolves a
 > name to a path and passes `--skill <path>`; it does not parse or rewrite the
 > format. Anything marked with a `pi-extensions` link is an *existing installed
-> package* loop configures, not code it ships: it stages `mcp.json` into a
-> generated agent dir, points `mcp` at it via `PI_AGENT_DIR`, and activates
-> `review-model-selector` per spawn. Only the three `ext/*.ts` are loop's own.
+> package* loop configures, not code it ships: it activates `mcp` and
+> `review-model-selector` per spawn and leaves their own configuration alone.
+> There is no `mcp.json` here on purpose — a state's `:mcp` names servers out
+> of *your* `~/.pi/agent/mcp.json`, and the stage connects them itself. Only
+> the three `ext/*.ts` are loop's own.
 > See [docs/04](../docs/04-toolbox.md#these-are-existing-pi-extensions-not-new-loop-code)
 > and [docs/05](../docs/05-orchestration.md).
 

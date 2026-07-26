@@ -248,6 +248,7 @@ mod tests {
                 model: "claude-sonnet-5".into(),
                 thinking: "high".into(),
                 skills: vec!["spark-build".into()],
+                mcp: vec![],
             },
             EventPayload::WorkerOutput {
                 state: "implement".into(),
@@ -365,6 +366,7 @@ mod tests {
                 model: "m".into(),
                 thinking: "high".into(),
                 skills: vec![],
+                mcp: vec![],
             })
             .unwrap();
         ledger
@@ -424,6 +426,7 @@ mod tests {
                 model: "m".into(),
                 thinking: "high".into(),
                 skills: vec![],
+                mcp: vec![],
             })
             .unwrap();
         // Crash here: no worker_output follows.

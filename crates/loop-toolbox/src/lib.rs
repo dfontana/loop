@@ -3,8 +3,8 @@
 //!
 //! See docs/04-toolbox.md. Two kinds of reusable thing — **playbooks** (a
 //! stage's prompt) and **skills** (situational know-how plus the scripts that
-//! carry it out) — plus the staging step that puts `mcp.json` where the `mcp`
-//! extension looks for it.
+//! carry it out). MCP servers are deliberately not a third: loop names servers
+//! out of the user's own config and never ships one.
 
 use std::path::{Path, PathBuf};
 
@@ -105,18 +105,6 @@ impl<'a> Toolbox<'a> {
             .iter()
             .map(|n| self.resolve_skill(n, machine_dir))
             .collect()
-    }
-
-    /// Prepare the directory exported as `PI_AGENT_DIR`, copying `mcp.json`
-    /// into it for the `mcp` extension. Returns the directory and the MCP
-    /// server names it declares.
-    pub fn stage_agent_dir(&self) -> Result<(PathBuf, Vec<String>)> {
-        let agent_dir = self.config.paths.agent_dir();
-        std::fs::create_dir_all(&agent_dir)
-            .io_ctx(format!("creating agent dir {}", agent_dir.display()))?;
-
-        let servers = skill::stage_mcp(&self.config.paths.toolbox_mcp(), &agent_dir)?;
-        Ok((agent_dir, servers))
     }
 
     /// Write loop's three vendored pi extensions into `~/.config/loop/ext/`
@@ -403,26 +391,6 @@ mod tests {
         assert_eq!(contents, "hello PROJ-1");
     }
 
-    #[test]
-    fn stage_agent_dir_copies_mcp_and_reports_its_servers() {
-        let config_dir = tempdir().unwrap();
-        let state_dir = tempdir().unwrap();
-        let project_dir = tempdir().unwrap();
-        let config = test_config(config_dir.path(), state_dir.path(), project_dir.path());
-        let tb = Toolbox::new(&config);
-
-        std::fs::write(
-            config.paths.toolbox_mcp(),
-            r#"{"mcpServers": {"linear": {"url": "https://example"}}}"#,
-        )
-        .unwrap();
-
-        let (agent_dir, servers) = tb.stage_agent_dir().unwrap();
-        assert_eq!(agent_dir, config.paths.agent_dir());
-        assert_eq!(servers, vec!["linear".to_string()]);
-        assert!(agent_dir.join("mcp.json").is_file());
-    }
-
     /// Smoke test against the real `examples/toolbox` fixtures: every shipped
     /// playbook must parse and every shipped skill must resolve. This is what
     /// actually exercises the format the docs promise, on top of the synthetic
@@ -465,10 +433,5 @@ mod tests {
             resolved_any = true;
         }
         assert!(resolved_any, "expected at least one example skill");
-
-        let config_dir = tempdir().unwrap();
-        let servers = skill::stage_mcp(&examples.join("mcp.json"), config_dir.path()).unwrap();
-        assert!(servers.contains(&"linear".to_string()));
-        assert!(servers.contains(&"warehouse".to_string()));
     }
 }
