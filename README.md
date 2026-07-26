@@ -25,6 +25,7 @@ While it runs, or after it stops:
 
 ```sh
 loop status          # where it is and how it got there
+loop logs            # recent ledger events
 loop resume          # continue an interrupted run
 ```
 

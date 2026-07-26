@@ -8,6 +8,7 @@ use clap::{Parser, Subcommand};
 use loop_core::Paths;
 
 mod commands;
+mod output;
 mod stage;
 
 #[derive(Parser)]
@@ -53,6 +54,15 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Show recent ledger events, or the complete ledger as JSONL.
+    Logs {
+        /// Number of recent events to show in human mode.
+        #[arg(short = 'n', default_value_t = 20, conflicts_with = "raw")]
+        n: usize,
+        /// Write the complete repaired ledger as JSONL.
+        #[arg(long, conflicts_with = "n")]
+        raw: bool,
+    },
     /// Continue an interrupted run from the folded resume point.
     Resume {
         #[arg(long)]
@@ -93,6 +103,7 @@ fn try_main() -> anyhow::Result<()> {
             verbose,
         } => commands::run(paths, max_transitions, true, verbose),
         Command::Status { json } => commands::status(paths, json),
+        Command::Logs { n, raw } => commands::logs(paths, n, raw),
         Command::Doctor => commands::doctor(paths),
     }
 }

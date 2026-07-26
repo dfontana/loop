@@ -2,7 +2,7 @@
 
 `loop` — "A local, ticket-level agent orchestrator".
 
-Seven subcommands: [`init`](#loop-init), [`validate`](#loop-validate), [`diagram`](#loop-diagram), [`run`](#loop-run), [`resume`](#loop-resume), [`status`](#loop-status), [`doctor`](#loop-doctor).
+Eight subcommands: [`init`](#loop-init), [`validate`](#loop-validate), [`diagram`](#loop-diagram), [`run`](#loop-run), [`resume`](#loop-resume), [`status`](#loop-status), [`logs`](#loop-logs), [`doctor`](#loop-doctor).
 
 For what the runtime actually does with the machine, see [02-how-it-works.md](02-how-it-works.md). For the keys inside `config.fnl` and `machine.fnl`, see [03-customizing.md](03-customizing.md).
 
@@ -317,6 +317,32 @@ Header is one of `not started`, ``running — at `{state}` ``, or `finished — 
 | `note` | `note: <text…70>` |
 | `run_finished` | `run_finished Done` |
 
+## `loop logs`
+
+```
+loop logs [-n <N>]
+loop logs --raw
+```
+
+> Show recent ledger events, or the complete ledger as JSONL.
+
+| Flag     | Type  | Default | Meaning                                      |
+| -------- | ----- | ------- | -------------------------------------------- |
+| `-n <N>` | usize | `20`    | Number of events in the human-readable tail. |
+| `--raw`  | bool  | false   | Emit the complete repaired ledger as JSONL.  |
+
+`logs` opens the ledger through the normal `Ledger` reader, so a torn trailing write is repaired before anything is printed. It does not load `machine.fnl` or `config.fnl`; the ledger is its only source, so it works while the machine is missing or invalid.
+
+Human mode prints one event per line, oldest first within the selected tail, as `<timestamp>  <status summary>`. It has no `recent:` wrapper and defaults to the last 20 events. If fewer than `N` events exist, it prints all of them. An empty ledger prints:
+
+```
+no run yet — `loop run` starts one
+```
+
+`--raw` ignores the human tail and writes the entire repaired ledger to stdout exactly as JSONL: no heading, status message, reformatting, or filtering. An empty ledger writes zero bytes. `--raw` conflicts with an explicitly supplied `-n`, so a command such as `loop logs --raw -n 50` is a command-line usage error and exits 2 without output.
+
+Valid ledger content goes only to stdout. A ledger read or parse failure is reported to stderr and exits 1; successful commands exit 0.
+
 ## `loop doctor`
 
 ```
@@ -382,12 +408,13 @@ Two things to know:
 
 ## Exit codes
 
-| Code | Meaning    |
-| ---- | ---------- |
-| 0    | Success.   |
-| 1    | Any error. |
+| Code | Meaning                                    |
+| ---- | ------------------------------------------ |
+| 0    | Success.                                   |
+| 1    | Runtime or application error.              |
+| 2    | Command-line usage error reported by clap. |
 
-There are no other exit codes: `main` catches a single error type, prints `error: {e:#}` to stderr, and exits 1. The `{e:#}` form prints the full context chain, so a failure surfaces as `error: outer: inner: root cause`.
+Runtime errors are caught by `main`, which prints `error: {e:#}` to stderr and exits 1. Clap handles invalid commands, flags, and arguments before `main` and exits 2. The `{e:#}` form prints the full context chain, so a runtime failure surfaces as `error: outer: inner: root cause`.
 
 Per command:
 
@@ -399,6 +426,7 @@ Per command:
 | `run` | outcome `Done` | outcome `Failed` or `Aborted`; ledger already has a run; machine missing or fails to load |
 | `resume` | outcome `Done` | as `run`, plus an empty ledger |
 | `status` | always, including the empty-ledger message | ledger unreadable or has a corrupt interior line |
+| `logs` | human tail, or complete JSONL with `--raw` | ledger unreadable or has a corrupt interior line |
 | `doctor` | all four checks pass | `{n} problem(s)` |
 
 `loop run` and `loop resume` exit 1 on `Failed` and `Aborted` deliberately, so `loop run && gh pr merge` and CI wrappers gate correctly. To distinguish the two, read `status` from [`loop status --json`](#loop-status).

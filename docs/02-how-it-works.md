@@ -418,6 +418,25 @@ run_finished Done
 
 On a ledger with zero events, `--json` emits the same five keys with nulls and zeroes — the plain-text ``no run yet — `loop run` starts one`` belongs to the human mode only, so JSON output is always parseable.
 
+### `loop logs`
+
+For an event-by-event view without the `recent:` wrapper:
+
+```
+loop logs
+loop logs -n 50
+```
+
+Human mode prints the last 20 events by default, oldest first within the selected tail. Each line contains the event timestamp and the same summary grammar as `loop status`. It prints ``no run yet — `loop run` starts one`` for an empty ledger and does not require `machine.fnl` to load.
+
+Use `--raw` when a complete, machine-readable ledger is needed:
+
+```
+loop logs --raw | jq '…'
+```
+
+Raw mode emits the entire repaired ledger as JSONL, byte-for-byte, with no heading or status text. It is the path-independent replacement for reading `.loop/ledger.jsonl` directly; an empty ledger emits zero bytes. `--raw` and an explicit `-n` cannot be combined.
+
 ### `loop diagram`
 
 ```
@@ -477,22 +496,22 @@ Reading it:
 
 ### Reading the ledger directly
 
-The flat envelope makes `jq` the right tool. Three that earn their keep:
+`loop logs --raw` is the path-independent way to reach the complete ledger. The flat envelope makes `jq` the right tool. Three that earn their keep:
 
 **What actually happened, in order:**
 
 ```sh
-jq -r 'select(.type=="transition_committed")
-       | "\(.ts)  cycle \(.cycle)  \(.from) -> \(.to)"' .loop/ledger.jsonl
+loop logs --raw | jq -r 'select(.type=="transition_committed")
+       | "\(.ts)  cycle \(.cycle)  \(.from) -> \(.to)"'
 ```
 
 **Why a guard failed** — dumps the failing tier, the check's captured output, and the Judge's rationale together:
 
 ```sh
-jq -r 'select(.type=="guard_checked" and (.check=="fail" or .criteria=="fail"))
+loop logs --raw | jq -r 'select(.type=="guard_checked" and (.check=="fail" or .criteria=="fail"))
        | "=== \(.from) -> \(.to)  check=\(.check) criteria=\(.criteria)",
          (.check_output // "(no check output)"),
-         (.judge_rationale // "(no judge rationale)")' .loop/ledger.jsonl
+         (.judge_rationale // "(no judge rationale)")'
 ```
 
 This is usually the first thing to run on a run that thrashed: it tells you in one screen whether the deterministic check or the Judge is the thing rejecting your Worker.
@@ -500,11 +519,11 @@ This is usually the first thing to run on a run that thrashed: it tells you in o
 **Where the money went, per state:**
 
 ```sh
-jq -s 'map(select(.type=="worker_output"))
+loop logs --raw | jq -s 'map(select(.type=="worker_output"))
        | group_by(.state)
        | map({state: .[0].state,
               spawns: length,
-              cost: (map(.usage.cost_usd) | add)})' .loop/ledger.jsonl
+              cost: (map(.usage.cost_usd) | add)})'
 ```
 
 That total covers the Workers only. `guard_checked` carries the Judge's `usage` too, so a full accounting sums `worker_output`, `guard_checked`, and `navigator_invoked` — which is exactly what the fold and the digest do.

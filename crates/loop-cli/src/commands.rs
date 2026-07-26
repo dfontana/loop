@@ -1,16 +1,17 @@
-//! The seven subcommands.
+//! The eight subcommands.
 
+use std::io::Write as _;
 use std::path::Path;
 
 use anyhow::{Context as _, Result, bail};
-use loop_core::{Config, Machine, Paths};
+use loop_core::{Config, LedgerSink, Machine, Paths};
 use loop_engine::{Engine, Severity};
 use loop_fennel::FennelVm;
 use loop_ledger::{ArtifactStore, Ledger};
 use loop_runner::PiRunner;
 use loop_toolbox::Toolbox;
 
-use crate::stage::CliStage;
+use crate::{output::summarize, stage::CliStage};
 
 // Templates shipped in the binary, so a fresh install needs no fetch.
 const CONFIG_FNL: &str = include_str!("../templates/config.fnl");
@@ -255,7 +256,6 @@ pub fn run(
 }
 
 pub fn status(paths: Paths, json: bool) -> Result<()> {
-    use loop_core::LedgerSink;
     let ledger = Ledger::open(paths.ledger_file())?;
     let events = ledger.read_all()?;
     // An empty ledger still has to answer in the mode it was asked in: this
@@ -342,6 +342,25 @@ pub fn status(paths: Paths, json: bool) -> Result<()> {
     Ok(())
 }
 
+pub fn logs(paths: Paths, n: usize, raw: bool) -> Result<()> {
+    let ledger = Ledger::open(paths.ledger_file())?;
+    if raw {
+        std::io::stdout().write_all(&ledger.read_raw()?)?;
+        return Ok(());
+    }
+
+    let events = ledger.read_all()?;
+    if events.is_empty() {
+        println!("no run yet — `loop run` starts one");
+        return Ok(());
+    }
+
+    for event in events.iter().rev().take(n).collect::<Vec<_>>().iter().rev() {
+        println!("{}  {}", event.ts, summarize(event));
+    }
+    Ok(())
+}
+
 pub fn doctor(paths: Paths) -> Result<()> {
     let mut problems = 0;
     let mut check = |ok: bool, label: &str, hint: &str| {
@@ -404,62 +423,5 @@ fn fmt_duration(secs: u64) -> String {
         s if s < 60 => format!("{s}s"),
         s if s < 3600 => format!("{}m{}s", s / 60, s % 60),
         s => format!("{}h{}m", s / 3600, (s % 3600) / 60),
-    }
-}
-
-fn summarize(e: &loop_core::Event) -> String {
-    use loop_core::EventPayload::*;
-    match &e.payload {
-        RunStarted { ticket, .. } => format!("run_started {ticket}"),
-        StateEntered {
-            state,
-            cycle,
-            attempt,
-            ..
-        } => format!("→ {state} (cycle {cycle}, attempt {attempt})"),
-        WorkerOutput { state, usage, .. } => {
-            format!("{state} done (${:.2})", usage.cost_usd)
-        }
-        TransitionProposed {
-            from,
-            to,
-            blocked,
-            rationale,
-            ..
-        } => {
-            if *blocked {
-                format!("{from} blocked: {}", truncate(rationale, 60))
-            } else {
-                format!(
-                    "{from} proposes → {}: {}",
-                    to.as_deref().unwrap_or("?"),
-                    truncate(rationale, 60)
-                )
-            }
-        }
-        GuardChecked {
-            from,
-            to,
-            check,
-            criteria,
-            ..
-        } => format!("guard {from}→{to}: check={check:?} criteria={criteria:?}"),
-        NavigatorInvoked {
-            from, chosen_to, ..
-        } => format!("navigator {from} → {chosen_to}"),
-        TransitionCommitted { from, to, .. } => format!("committed {from} → {to}"),
-        Error { kind, detail, .. } => format!("error ({kind:?}): {}", truncate(detail, 60)),
-        Note { text } => format!("note: {}", truncate(text, 70)),
-        RunFinished { status, .. } => format!("run_finished {status:?}"),
-    }
-}
-
-fn truncate(s: &str, n: usize) -> String {
-    let one_line = s.replace('\n', " ");
-    if one_line.chars().count() <= n {
-        one_line
-    } else {
-        let head: String = one_line.chars().take(n - 1).collect();
-        format!("{head}…")
     }
 }

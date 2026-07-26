@@ -215,18 +215,22 @@ error: run ended at `blocked` without completing — see `loop status`
 error: run aborted — see `loop status` for the guardrail
 ```
 
-Whichever it is, `loop status` is the first thing to reach for. It folds the ledger and prints where the run is, what it has cost, how many cycles each looping stage has burned, and the last twelve events:
+Whichever it is, `loop status` is the first thing to reach for. It folds the ledger and prints where the run is, what it has cost, and how many cycles each looping stage has burned:
 
 ```
 running — at `review`
   5 transitions, $1.23, 12m3s
   cycles: implement#2, qa#1
-
-recent:
-  <ts>  <summary>
 ```
 
-`loop status --json` gives you a machine-readable subset for scripting.
+For the event-by-event view, use `logs`:
+
+```
+loop logs            # the last 20 events, oldest first
+loop logs -n 50      # a larger human-readable tail
+```
+
+`loop status --json` gives you a machine-readable folded summary for scripting.
 
 If the run was interrupted — you hit Ctrl-C, the machine slept, a spawn crashed — use:
 
@@ -236,7 +240,7 @@ loop resume
 
 `resume` re-reads the ledger, works out where the run actually got to, and continues from there. An interrupted _stage_ re-runs from the beginning as a new attempt rather than picking up mid-thought, so stages should be safe to run twice. `loop run` refuses to start on top of an existing run and tells you to resume; `loop resume` refuses when there is nothing to continue.
 
-Underneath both is `.loop/ledger.jsonl` — one JSON object per line, appended and fsynced, never rewritten. It is the entire state of the run and it is meant to be read: `grep`, `jq`, or just open it. To start a genuinely fresh run, delete it.
+Underneath both is `.loop/ledger.jsonl` — one JSON object per line, appended and fsynced, never rewritten. To access the complete ledger without knowing its path, use `loop logs --raw`; it is meant to compose with `jq` and other tools. To start a genuinely fresh run, delete it.
 
 ## Where to go next
 

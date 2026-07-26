@@ -90,6 +90,18 @@ impl Ledger {
             .unwrap_or(false)
     }
 
+    /// Read the repaired ledger without reformatting it.
+    ///
+    /// The parse validates the same byte snapshot that is returned, so a torn
+    /// tail appended after this handle opened cannot leak into raw JSONL.
+    pub fn read_raw(&self) -> Result<Vec<u8>> {
+        repair_torn_tail(&self.path)?;
+        let content = read_content(&self.path)?;
+        parse_events(&content, &self.path)?;
+        let end = torn_tail_start(&content).unwrap_or(content.len());
+        Ok(content.as_bytes()[..end].to_vec())
+    }
+
     /// Read and fold in one step.
     pub fn fold(&self) -> Result<RunState> {
         Ok(loop_core::fold(&self.read_all()?))
@@ -125,17 +137,19 @@ impl LedgerSink for Ledger {
     /// (that is a crash mid-write, and costs at most the last event); a
     /// malformed line *in the middle* is an error, because that is corruption.
     fn read_all(&self) -> Result<Vec<Event>> {
-        let content = match fs::read_to_string(&self.path) {
-            Ok(c) => c,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(e) => {
-                return Err(CoreError::io(
-                    format!("reading ledger {}", self.path.display()),
-                    e,
-                ));
-            }
-        };
+        let content = read_content(&self.path)?;
         parse_events(&content, &self.path)
+    }
+}
+
+fn read_content(path: &Path) -> Result<String> {
+    match fs::read_to_string(path) {
+        Ok(content) => Ok(content),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        Err(e) => Err(CoreError::io(
+            format!("reading ledger {}", path.display()),
+            e,
+        )),
     }
 }
 
@@ -152,43 +166,61 @@ impl LedgerSink for Ledger {
 /// was still in flight, and nothing else. Idempotent, so opening a healthy
 /// ledger does no I/O beyond the read.
 fn repair_torn_tail(path: &Path) -> Result<()> {
-    let content = match fs::read_to_string(path) {
-        Ok(c) => c,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => {
-            return Err(CoreError::io(
-                format!("reading ledger {}", path.display()),
-                e,
-            ));
-        }
-    };
+    let content = read_content(path)?;
     if content.is_empty() {
         return Ok(());
     }
 
-    // Byte offset just past the last line that parses as a whole event.
-    let mut good_len = 0usize;
+    // Only the final non-empty line may be torn. If an earlier line is also
+    // malformed, leave the file untouched so read_all reports the interior
+    // corruption instead of silently deleting evidence.
+    let mut nonempty = Vec::new();
     let mut offset = 0usize;
     for line in content.split_inclusive('\n') {
         let trimmed = line.strip_suffix('\n').unwrap_or(line);
-        if trimmed.trim().is_empty() || serde_json::from_str::<Event>(trimmed).is_ok() {
-            good_len = offset + line.len();
+        if !trimmed.trim().is_empty() {
+            nonempty.push((offset, serde_json::from_str::<Event>(trimmed).is_ok()));
         }
         offset += line.len();
     }
 
-    if good_len == content.len() {
+    let Some((torn_start, torn_valid)) = nonempty.last().copied() else {
+        return Ok(());
+    };
+    if torn_valid
+        || nonempty[..nonempty.len() - 1]
+            .iter()
+            .any(|(_, valid)| !valid)
+    {
         return Ok(());
     }
+
     let file = OpenOptions::new()
         .write(true)
         .open(path)
         .io_ctx(format!("opening ledger {} to repair", path.display()))?;
-    file.set_len(good_len as u64)
+    file.set_len(torn_start as u64)
         .io_ctx(format!("truncating torn tail of {}", path.display()))?;
     file.sync_all()
         .io_ctx(format!("fsyncing repaired ledger {}", path.display()))?;
     Ok(())
+}
+
+/// Return the byte offset of the one tolerated malformed final line.
+fn torn_tail_start(content: &str) -> Option<usize> {
+    let mut last_nonempty = None;
+    let mut offset = 0usize;
+    for line in content.split_inclusive('\n') {
+        let trimmed = line.strip_suffix('\n').unwrap_or(line);
+        if !trimmed.trim().is_empty() {
+            last_nonempty = Some((offset, serde_json::from_str::<Event>(trimmed).is_ok()));
+        }
+        offset += line.len();
+    }
+    match last_nonempty {
+        Some((start, false)) => Some(start),
+        _ => None,
+    }
 }
 
 /// Parse newline-delimited events, tolerating an unparseable *last* line (a
@@ -651,6 +683,45 @@ mod repair_tests {
         );
         assert_eq!(after.lines().count(), 2);
         assert!(after.ends_with('\n'));
+    }
+
+    #[test]
+    fn interior_corruption_is_not_removed_with_a_torn_tail() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ledger.jsonl");
+        {
+            let mut ledger = Ledger::open(&path).unwrap();
+            ledger
+                .append(EventPayload::Note { text: "one".into() })
+                .unwrap();
+        }
+        let mut file = OpenOptions::new().append(true).open(&path).unwrap();
+        file.write_all(b"not-json\n{\"type\":\"note\"").unwrap();
+        file.sync_data().unwrap();
+        drop(file);
+        let before = fs::read(&path).unwrap();
+
+        assert!(Ledger::open(&path).is_err());
+        assert_eq!(fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn raw_read_drops_a_torn_tail_added_after_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ledger.jsonl");
+        let mut ledger = Ledger::open(&path).unwrap();
+        ledger
+            .append(EventPayload::Note { text: "one".into() })
+            .unwrap();
+        let expected = fs::read(&path).unwrap();
+
+        let mut file = OpenOptions::new().append(true).open(&path).unwrap();
+        file.write_all(b"{\"type\":\"note\"").unwrap();
+        file.sync_data().unwrap();
+        drop(file);
+
+        assert_eq!(ledger.read_raw().unwrap(), expected);
+        assert_eq!(fs::read(&path).unwrap(), expected);
     }
 
     #[test]

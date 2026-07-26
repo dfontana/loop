@@ -97,6 +97,20 @@ fn kinds(events: &[serde_json::Value]) -> Vec<&str> {
     events.iter().filter_map(|e| e["type"].as_str()).collect()
 }
 
+fn note_lines(count: usize) -> Vec<String> {
+    (0..count)
+        .map(|i| {
+            serde_json::json!({
+                "ts": format!("2026-07-24T22:00:{i:02}.000Z"),
+                "elapsed_s": i,
+                "type": "note",
+                "text": format!("event {i}"),
+            })
+            .to_string()
+        })
+        .collect()
+}
+
 /// The shipped `standard-ticket` template, driven to `done` — including a
 /// Judge rejecting the review and routing back to `implement` for a second
 /// cycle. This is the walkthrough in examples/, minus the pipeline stages.
@@ -399,6 +413,130 @@ fn a_failing_check_overrules_a_worker_that_claims_success() {
         .expect("a guard_checked line");
     assert_eq!(guard["check"], "pass");
     assert_eq!(guard["criteria"], "pass");
+}
+
+#[test]
+fn logs_default_tail_and_n_override_are_oldest_first() {
+    let fx = Fixture::new(r#"{"steps":[]}"#);
+    fx.run(&["init", "TINY-1"]);
+    fx.write_ledger(&note_lines(25));
+
+    let default = fx.run(&["logs"]);
+    assert!(default.status.success(), "{}", combined(&default));
+    let default_stdout = stdout(&default);
+    let lines: Vec<_> = default_stdout.lines().collect();
+    assert_eq!(lines.len(), 20, "{}", default_stdout);
+    assert!(lines[0].contains("note: event 5"), "{}", lines[0]);
+    assert!(lines[19].contains("note: event 24"), "{}", lines[19]);
+    assert!(!default_stdout.contains("recent:"));
+
+    let fewer = fx.run(&["logs", "-n", "3"]);
+    assert!(fewer.status.success(), "{}", combined(&fewer));
+    let fewer_stdout = stdout(&fewer);
+    let lines: Vec<_> = fewer_stdout.lines().collect();
+    assert_eq!(lines.len(), 3);
+    assert!(lines[0].contains("note: event 22"), "{}", lines[0]);
+    assert!(lines[2].contains("note: event 24"), "{}", lines[2]);
+
+    let short = fx.run(&["logs", "-n", "50"]);
+    assert!(short.status.success(), "{}", combined(&short));
+    assert_eq!(stdout(&short).lines().count(), 25);
+    assert!(stdout(&short).lines().next().unwrap().contains("event 0"));
+}
+
+#[test]
+fn logs_raw_is_parseable_and_preserves_repaired_bytes() {
+    let fx = Fixture::new(r#"{"steps":[]}"#);
+    fx.run(&["init", "TINY-1"]);
+    fx.write_ledger(&note_lines(2));
+    let expected = std::fs::read(fx.project.join(".loop/ledger.jsonl")).unwrap();
+
+    let path = fx.project.join(".loop/ledger.jsonl");
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap();
+    std::io::Write::write_all(
+        &mut file,
+        br#"{"ts":"2026-07-24T22:00:02.000Z","type":"note","tex"#,
+    )
+    .unwrap();
+    file.sync_data().unwrap();
+
+    let raw = fx.run(&["logs", "--raw"]);
+    assert!(raw.status.success(), "{}", combined(&raw));
+    assert_eq!(raw.stdout, expected);
+    for line in String::from_utf8(raw.stdout).unwrap().lines() {
+        serde_json::from_str::<serde_json::Value>(line)
+            .unwrap_or_else(|e| panic!("raw output is not JSONL: {e}: {line}"));
+    }
+    assert_eq!(std::fs::read(path).unwrap(), expected);
+}
+
+#[test]
+fn logs_rejects_corrupt_interior_content_without_printing_it() {
+    let fx = Fixture::new(r#"{"steps":[]}"#);
+    fx.run(&["init", "TINY-1"]);
+    fx.write_ledger(&note_lines(1));
+    let path = fx.project.join(".loop/ledger.jsonl");
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap();
+    std::io::Write::write_all(&mut file, b"not-json\n{\"type\":\"note\"").unwrap();
+    file.sync_data().unwrap();
+
+    let out = fx.run(&["logs", "--raw"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(out.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("corrupt ledger line"));
+    assert!(std::fs::read_to_string(path).unwrap().contains("not-json"));
+}
+
+#[test]
+fn logs_raw_rejects_an_explicit_n() {
+    let fx = Fixture::new(r#"{"steps":[]}"#);
+    let out = fx.run(&["logs", "--raw", "-n", "3"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(stdout(&out).is_empty());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("cannot be used"));
+}
+
+#[test]
+fn logs_empty_ledger_has_human_message_but_raw_is_empty() {
+    let fx = Fixture::new(r#"{"steps":[]}"#);
+    fx.run(&["init", "TINY-1"]);
+
+    let human = fx.run(&["logs"]);
+    assert!(human.status.success(), "{}", combined(&human));
+    assert_eq!(stdout(&human), "no run yet — `loop run` starts one\n");
+
+    let raw = fx.run(&["logs", "--raw"]);
+    assert!(raw.status.success(), "{}", combined(&raw));
+    assert!(raw.stdout.is_empty());
+    assert!(
+        raw.stderr.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&raw.stderr)
+    );
+}
+
+#[test]
+fn logs_does_not_load_a_missing_or_invalid_machine() {
+    let fx = Fixture::new(r#"{"steps":[]}"#);
+    fx.run(&["init", "TINY-1"]);
+    fx.write_ledger(&note_lines(1));
+    let expected = std::fs::read(fx.project.join(".loop/ledger.jsonl")).unwrap();
+
+    std::fs::remove_file(fx.project.join(".loop/machine.fnl")).unwrap();
+    let missing = fx.run(&["logs"]);
+    assert!(missing.status.success(), "{}", combined(&missing));
+    assert!(stdout(&missing).contains("note: event 0"));
+
+    fx.machine("{:ticket \"BROKEN\"\n");
+    let invalid = fx.run(&["logs", "--raw"]);
+    assert!(invalid.status.success(), "{}", combined(&invalid));
+    assert_eq!(invalid.stdout, expected);
 }
 
 /// A two-state machine with no toolbox dependencies, for the tests that care
