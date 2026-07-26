@@ -295,6 +295,44 @@ fn an_escalated_run_exits_non_zero() {
     assert_eq!(finished["terminal_state"], "blocked");
 }
 
+/// `loop diagram` draws the graph the engine actually walks. The shipped
+/// template's back-edges exist only as `:on-fail {:route "implement"}`, so a
+/// diagram that drew the `:transitions` list alone would render the template as
+/// a straight line — the one thing this command must not do.
+#[test]
+fn diagram_draws_the_shipped_template_including_its_on_fail_back_edges() {
+    let fx = Fixture::new(r#"{"steps":[]}"#);
+    fx.run(&["init", "DEMO-2"]);
+
+    let out = fx.run(&["diagram"]);
+    assert!(out.status.success(), "diagram failed: {}", combined(&out));
+    let mmd = stdout(&out);
+
+    for line in [
+        "stateDiagram-v2",
+        "title: \"DEMO-2\"",
+        "[*] --> implement",
+        "implement --> review : judge",
+        "review --> test : judge",
+        "test --> open_pr : judge",
+        "open_pr --> done : judge",
+        // The two back-edges, present only as `on_fail` routes.
+        "review --> implement : guard fails",
+        "test --> implement : guard fails",
+        // `open-pr` can't be a bare mermaid id; the alias carries the real name.
+        "state \"open-pr\" as open_pr",
+        "state \"blocked (escalation)\" as blocked",
+        "loop \"fix\": max 4 cycles, then escalate to blocked",
+    ] {
+        assert!(mmd.contains(line), "missing `{line}` in:\n{mmd}");
+    }
+
+    // Nothing but the diagram on stdout — `loop diagram > machine.mmd` has to
+    // produce a file a renderer will accept.
+    assert!(mmd.starts_with("---\n"), "{mmd}");
+    assert!(String::from_utf8_lossy(&out.stderr).is_empty());
+}
+
 /// A machine that cannot load must fail loudly at `validate`, naming the file —
 /// the whole point of the Fennel error plumbing.
 #[test]

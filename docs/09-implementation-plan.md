@@ -107,8 +107,8 @@ against `loop-core` alone — no crate in wave 1 depends on another.
 | `loop-fennel` | `mlua` + vendored `fennel.lua`; loads `config.fnl` / `machine.fnl` → `Machine`. The IR is plain data, so the VM is dropped once loading is done. | core |
 | `loop-toolbox` | Playbook and skill resolution (local-first, then toolbox), `$UPPER_SNAKE` rendering over the context namespace, the entry message (including the per-stage `mcp({connect})` preamble), materializing the three `ext/*.ts` from `include_str!`. | core |
 | `loop-runner` | Spawning `pi` (worker/judge/navigator), parsing the JSONL event stream, extracting the `transition` call, summing `usage.cost`; implements `AgentRunner`. Also `exec_check`, the harness's own bounded subprocess for a transition `:check`. | core |
-| `loop-engine` | The control loop of [01](01-architecture.md): guard tiers, budgets, cycle caps, navigator caps, `on_fail` handling — plus `validate` (the static linter of [07](07-risks.md) #11). Written against the traits, so it is fully testable with fakes. | core |
-| `loop-cli` | `clap`: `init`, `validate`, `run`, `status`, `resume`, `doctor`. Wires the concrete impls into the engine. | all |
+| `loop-engine` | The control loop of [01](01-architecture.md): guard tiers, budgets, cycle caps, navigator caps, `on_fail` handling — plus `validate` (the static linter of [07](07-risks.md) #11) and `mermaid` (the same graph, drawn). Written against the traits, so it is fully testable with fakes. | core |
+| `loop-cli` | `clap`: `init`, `validate`, `diagram`, `run`, `status`, `resume`, `doctor`. Wires the concrete impls into the engine. | all |
 | `mock-pi` | Test fixture binary: replays a scripted JSONL stream (including crash-mid-stage) so the whole loop is testable deterministically, offline, for $0. | — |
 
 ## The two traits that make parallelism work

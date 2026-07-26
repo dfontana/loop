@@ -1,4 +1,4 @@
-//! The six subcommands.
+//! The seven subcommands.
 
 use std::path::Path;
 
@@ -158,6 +158,16 @@ pub fn validate(paths: Paths) -> Result<()> {
     if errors > 0 {
         bail!("{errors} error(s)");
     }
+    Ok(())
+}
+
+/// Print the machine as mermaid. Bare — no fences, no prose — so it pipes:
+/// `loop diagram > machine.mmd`. Unlike `validate` this doesn't touch the
+/// toolbox, since drawing the graph needs nothing off the filesystem beyond
+/// the machine file itself; a machine with a dangling playbook still draws.
+pub fn diagram(paths: Paths) -> Result<()> {
+    let (_vm, _config, machine) = load(paths)?;
+    print!("{}", loop_engine::mermaid(&machine));
     Ok(())
 }
 

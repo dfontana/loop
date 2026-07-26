@@ -18,12 +18,14 @@ use loop_core::{
 };
 
 pub mod guards;
+pub mod mermaid;
 pub mod prompts;
 pub mod validate;
 
 use guards::check as guard_check;
 use guards::select_edge;
 
+pub use mermaid::mermaid;
 pub use prompts::{StageBuilder, StagePlan};
 pub use validate::{Diagnostic, Severity, validate};
 

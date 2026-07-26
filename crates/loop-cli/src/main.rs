@@ -37,6 +37,8 @@ enum Command {
     },
     /// Lint the machine: reachability, dangling references, guard sanity.
     Validate,
+    /// Render the machine as a mermaid state diagram, on stdout.
+    Diagram,
     /// Drive the machine to a terminal.
     Run {
         /// Stop after this many transitions, on top of the machine's budget.
@@ -75,6 +77,7 @@ fn try_main() -> anyhow::Result<()> {
     match cli.command {
         Command::Init { ticket, template } => commands::init(paths, &ticket, &template),
         Command::Validate => commands::validate(paths),
+        Command::Diagram => commands::diagram(paths),
         Command::Run { max_transitions } => commands::run(paths, max_transitions, false),
         Command::Resume { max_transitions } => commands::run(paths, max_transitions, true),
         Command::Status { json } => commands::status(paths, json),
