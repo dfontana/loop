@@ -2,60 +2,112 @@
 
 use std::collections::BTreeMap;
 
-/// Replace every `$NAME` present in `vars`. **Unknown `$NAMES` pass through
-/// untouched** so `$HOME` and shell snippets in a playbook still work.
+/// One run of a scanned template: literal text, or a `$NAME` token.
+enum Piece<'a> {
+    Text(&'a str),
+    /// The bare identifier, without the leading `$`.
+    Var(&'a str),
+}
+
+/// Split a template into literal text and `$NAME` tokens.
 ///
 /// Longest-name-first matching, so `$ARTIFACT_DIFF_PATH` is not eaten by
 /// `$ARTIFACT_DIFF`. `$$` is a literal `$`.
 ///
 /// Implemented as maximal-munch identifier scanning rather than substring
 /// matching against each known name: at every `$` we consume the *whole*
-/// following `[A-Za-z_][A-Za-z0-9_]*` run before ever consulting `vars`. That
-/// gives "longest match wins" for free — `$ARTIFACT_DIFF_PATH` is looked up as
+/// following `[A-Za-z_][A-Za-z0-9_]*` run before anything consults a variable
+/// map. That gives "longest match wins" for free — `$ARTIFACT_DIFF_PATH` is
 /// one token, so it can never be truncated to `$ARTIFACT_DIFF` — and it also
 /// keeps a genuinely unknown longer name (e.g. `$ARTIFACT_DIFF_PATHOLOGY`)
 /// from being partially replaced and left with a dangling suffix.
-pub fn substitute(template: &str, vars: &BTreeMap<String, String>) -> String {
+///
+/// [`substitute`] and [`referenced_vars`] share it, so what `loop preview`
+/// reports a playbook references is by construction what rendering looks up.
+///
+/// Byte-indexed slicing is safe throughout: every boundary this takes is at a
+/// `$` or at an ASCII identifier edge, and no byte of a multi-byte codepoint
+/// is ASCII, so a codepoint is never split.
+fn pieces(template: &str) -> Vec<Piece<'_>> {
     let bytes = template.as_bytes();
     let len = bytes.len();
-    let mut out = String::with_capacity(len);
+    let mut out = Vec::new();
+    let mut text_start = 0usize;
     let mut i = 0usize;
 
     while i < len {
-        if bytes[i] == b'$' {
-            if i + 1 < len && bytes[i + 1] == b'$' {
-                out.push('$');
-                i += 2;
-                continue;
-            }
-
-            let start = i + 1;
-            if start < len && is_ident_start(bytes[start]) {
-                let mut end = start + 1;
-                while end < len && is_ident_continue(bytes[end]) {
-                    end += 1;
-                }
-                let name = &template[start..end];
-                if let Some(value) = vars.get(name) {
-                    out.push_str(value);
-                    i = end;
-                    continue;
-                }
-            }
-
-            // Unknown name, or `$` not followed by an identifier: emit the
-            // `$` literally and let the following bytes be copied as
-            // ordinary text on subsequent iterations.
-            out.push('$');
+        if bytes[i] != b'$' {
             i += 1;
             continue;
         }
 
-        let ch_len = utf8_len(bytes[i]);
-        out.push_str(&template[i..i + ch_len]);
-        i += ch_len;
+        // `$$` is one literal `$`: close the text run *after* the first
+        // dollar and resume past the second.
+        if i + 1 < len && bytes[i + 1] == b'$' {
+            out.push(Piece::Text(&template[text_start..i + 1]));
+            i += 2;
+            text_start = i;
+            continue;
+        }
+
+        let start = i + 1;
+        if start < len && is_ident_start(bytes[start]) {
+            let mut end = start + 1;
+            while end < len && is_ident_continue(bytes[end]) {
+                end += 1;
+            }
+            if text_start < i {
+                out.push(Piece::Text(&template[text_start..i]));
+            }
+            out.push(Piece::Var(&template[start..end]));
+            i = end;
+            text_start = i;
+            continue;
+        }
+
+        // A `$` not followed by an identifier is ordinary text.
+        i += 1;
     }
 
+    if text_start < len {
+        out.push(Piece::Text(&template[text_start..]));
+    }
+    out
+}
+
+/// Replace every `$NAME` present in `vars`. **Unknown `$NAMES` pass through
+/// untouched** so `$HOME` and shell snippets in a playbook still work.
+pub fn substitute(template: &str, vars: &BTreeMap<String, String>) -> String {
+    let mut out = String::with_capacity(template.len());
+    for piece in pieces(template) {
+        match piece {
+            Piece::Text(text) => out.push_str(text),
+            Piece::Var(name) => match vars.get(name) {
+                Some(value) => out.push_str(value),
+                None => {
+                    out.push('$');
+                    out.push_str(name);
+                }
+            },
+        }
+    }
+    out
+}
+
+/// Every `$NAME` a template writes, in first-appearance order, deduplicated.
+///
+/// The caller decides which of them are loop variables: this reports what the
+/// template *asks for*, including names that will pass through untouched.
+/// `loop preview` splits the two against [`loop_core::Context::to_map`].
+pub fn referenced_vars(template: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for piece in pieces(template) {
+        if let Piece::Var(name) = piece
+            && !out.iter().any(|seen| seen == name)
+        {
+            out.push(name.to_string());
+        }
+    }
     out
 }
 
@@ -65,22 +117,6 @@ fn is_ident_start(b: u8) -> bool {
 
 fn is_ident_continue(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_'
-}
-
-/// Length in bytes of the UTF-8 codepoint starting at `b`. `b` is always a
-/// valid char boundary here since the identifier scan above only ever stops
-/// on ASCII bytes (`$`, alnum/underscore boundaries) or consumes whole ASCII
-/// runs, never splitting a multi-byte codepoint.
-fn utf8_len(b: u8) -> usize {
-    if b & 0x80 == 0 {
-        1
-    } else if b & 0xE0 == 0xC0 {
-        2
-    } else if b & 0xF0 == 0xE0 {
-        3
-    } else {
-        4
-    }
 }
 
 /// The short positional kickoff message a stage is spawned with — "you are
@@ -196,6 +232,47 @@ mod tests {
             substitute("plain text, no dollars here.", &v),
             "plain text, no dollars here."
         );
+    }
+
+    #[test]
+    fn non_ascii_text_survives_substitution() {
+        let v = vars(&[("STATE", "qa")]);
+        assert_eq!(
+            substitute("état — $STATE — 完了 $$5", &v),
+            "état — qa — 完了 $5"
+        );
+    }
+
+    /// The whole point of one shared scanner: every name `referenced_vars`
+    /// reports is a name `substitute` would look up, and no others.
+    #[test]
+    fn referenced_vars_reports_what_substitute_looks_up() {
+        let template = "$TASK then $PLAN, again $TASK, $$NOT_A_VAR, $HOME, bare $ sign";
+        assert_eq!(
+            referenced_vars(template),
+            vec!["TASK", "PLAN", "HOME"],
+            "first-appearance order, deduplicated, `$$` and a bare `$` excluded"
+        );
+
+        // Substituting only the reported names leaves nothing else changed.
+        let v = vars(&[("TASK", "T"), ("PLAN", "P"), ("HOME", "H")]);
+        assert_eq!(
+            substitute(template, &v),
+            "T then P, again T, $NOT_A_VAR, H, bare $ sign"
+        );
+    }
+
+    #[test]
+    fn referenced_vars_takes_the_whole_token_not_a_prefix() {
+        assert_eq!(
+            referenced_vars("$ARTIFACT_DIFF_PATH and $ARTIFACT_DIFF"),
+            vec!["ARTIFACT_DIFF_PATH", "ARTIFACT_DIFF"]
+        );
+    }
+
+    #[test]
+    fn referenced_vars_is_empty_for_a_template_with_no_variables() {
+        assert!(referenced_vars("plain text, no dollars here.").is_empty());
     }
 
     #[test]

@@ -8,12 +8,107 @@
 use std::path::PathBuf;
 
 use loop_core::{
-    ArtifactRef, Config, Context, JudgeSpec, Machine, NavigatorSpec, Proposal, Result, StateId,
-    WorkerSpec,
+    ArtifactRef, Config, Context, JudgeSpec, Machine, ModelSpec, NavigatorSpec, Proposal, Result,
+    State, StateId, WorkerSpec,
 };
 use loop_engine::{StageBuilder, StagePlan};
 use loop_ledger::{Ledger, digest};
-use loop_toolbox::{ExtPaths, Toolbox, frontmatter_model, render};
+use loop_toolbox::{ExtPaths, ResolvedPlaybook, Toolbox, frontmatter_model, render};
+
+/// What a state resolves to before any ledger is read or any file is written:
+/// the four-layer model, the local-first playbook, and the effective skill and
+/// MCP sets.
+pub struct Resolved<'a> {
+    pub state: &'a State,
+    pub playbook: ResolvedPlaybook,
+    pub model: ModelSpec,
+    /// Skill *names*, as the ledger records them.
+    pub skills: Vec<String>,
+    /// The same skills as the paths pi is handed, in the same order.
+    pub skill_paths: Vec<PathBuf>,
+    pub mcp: Vec<String>,
+}
+
+/// The read-only half of stage building.
+///
+/// Everything here is a pure function of the machine, the config, and the
+/// toolbox on disk — it reads files, and writes and creates none. Both
+/// [`CliStage::build_stage`] and `loop preview` go through it, so the layered
+/// model rules and local-first resolution have exactly one implementation.
+pub struct Resolver<'a> {
+    pub machine: &'a Machine,
+    pub config: &'a Config,
+    pub toolbox: Toolbox<'a>,
+}
+
+impl<'a> Resolver<'a> {
+    pub fn new(machine: &'a Machine, config: &'a Config) -> Self {
+        Self {
+            machine,
+            config,
+            toolbox: Toolbox::new(config),
+        }
+    }
+
+    pub fn resolve(&self, state_id: &StateId) -> Result<Resolved<'a>> {
+        let state = self
+            .machine
+            .state(state_id)
+            .ok_or_else(|| loop_core::CoreError::machine(format!("no such state: {state_id}")))?;
+        let playbook = self
+            .toolbox
+            .resolve_playbook(&state.playbook, &self.machine.dir)?;
+        let model =
+            self.machine
+                .resolve_model(state, &frontmatter_model(&playbook), &self.config.worker);
+        let skills = self
+            .machine
+            .resolve_skills(state, &self.config.default_skills);
+        let skill_paths = self.toolbox.resolve_skills(&skills, &self.machine.dir)?;
+        let mcp = self.machine.resolve_mcp(state, &self.config.default_mcp);
+
+        Ok(Resolved {
+            state,
+            playbook,
+            model,
+            skills,
+            skill_paths,
+            mcp,
+        })
+    }
+
+    /// The deterministic session id, so a crashed stage's transcript stays
+    /// findable in pi's session store.
+    pub fn session_id(&self, state: &str, cycle: u32, attempt: u32) -> String {
+        let slug = |s: &str| {
+            s.chars()
+                .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+                .collect::<String>()
+        };
+        format!(
+            "{}-{}-{}-{}",
+            slug(&self.machine.ticket),
+            slug(state),
+            cycle,
+            attempt
+        )
+    }
+
+    /// The small, scalar context values that land in a spawn's environment,
+    /// where a stage's tooling reads them to key its idempotency on the cycle
+    /// (docs/03-customizing.md).
+    pub fn env(ctx: &Context) -> Vec<(String, String)> {
+        [
+            ("TICKET_ID", ctx.ticket_id.clone()),
+            ("STATE", ctx.state.clone()),
+            ("CYCLE", ctx.cycle.to_string()),
+            ("ATTEMPT", ctx.attempt.to_string()),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v))
+        .collect()
+    }
+}
 
 pub struct CliStage<'a> {
     pub machine: &'a Machine,
@@ -65,23 +160,6 @@ impl CliStage<'_> {
         })
     }
 
-    /// A deterministic session id, so a crashed stage's transcript stays
-    /// findable in pi's session store.
-    fn session_id(&self, state: &str, cycle: u32, attempt: u32) -> String {
-        let slug = |s: &str| {
-            s.chars()
-                .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-                .collect::<String>()
-        };
-        format!(
-            "{}-{}-{}-{}",
-            slug(&self.machine.ticket),
-            slug(state),
-            cycle,
-            attempt
-        )
-    }
-
     /// The graph, rendered for the Navigator: every state's purpose plus the
     /// edges out of the stuck one, so it routes within declared structure
     /// instead of inventing it.
@@ -129,61 +207,35 @@ impl StageBuilder for CliStage<'_> {
         entry_addendum: Option<&str>,
         crashed: bool,
     ) -> Result<StagePlan> {
-        let state = self
-            .machine
-            .state(state_id)
-            .ok_or_else(|| loop_core::CoreError::machine(format!("no such state: {state_id}")))?;
-        let playbook = self
-            .toolbox
-            .resolve_playbook(&state.playbook, &self.machine.dir)?;
-        let model =
-            self.machine
-                .resolve_model(state, &frontmatter_model(&playbook), &self.config.worker);
-        let skills = self
-            .machine
-            .resolve_skills(state, &self.config.default_skills);
-        let skill_paths = self.toolbox.resolve_skills(&skills, &self.machine.dir)?;
-        let mcp = self.machine.resolve_mcp(state, &self.config.default_mcp);
+        let resolver = Resolver::new(self.machine, self.config);
+        let resolved = resolver.resolve(state_id)?;
 
         let context = self.context(state_id, cycle, attempt, entry_addendum, crashed)?;
         let vars = context.to_map();
-        let body = render::substitute(&playbook.body, &vars);
+        let body = render::substitute(&resolved.playbook.body, &vars);
         let system_prompt_path = self.toolbox.write_rendered(&context, &body, "system")?;
-
-        // Small, scalar context values only: these land in the spawn's
-        // environment, where a stage's tooling reads them to key its
-        // idempotency on the cycle (docs/03-customizing.md).
-        let env = [
-            ("TICKET_ID", context.ticket_id.clone()),
-            ("STATE", context.state.clone()),
-            ("CYCLE", context.cycle.to_string()),
-            ("ATTEMPT", context.attempt.to_string()),
-        ]
-        .into_iter()
-        .map(|(k, v)| (k.to_string(), v))
-        .collect();
 
         let spec = WorkerSpec {
             ticket: self.machine.ticket.clone(),
             state: state_id.clone(),
             cycle,
             attempt,
-            model,
-            skill_paths,
+            model: resolved.model,
+            skill_paths: resolved.skill_paths,
             system_prompt_path,
-            entry_message: render::entry_message(&context, &mcp),
+            entry_message: render::entry_message(&context, &resolved.mcp),
             reachable: self.machine.neighbors(state_id),
             transition_mode: self.machine.transition_mode,
-            mcp,
+            mcp: resolved.mcp,
             ext_paths: vec![self.ext.transition.clone()],
             cwd: self.config.paths.project_dir.clone(),
-            session_id: Some(self.session_id(state_id, cycle, attempt)),
-            env,
+            session_id: Some(resolver.session_id(state_id, cycle, attempt)),
+            env: Resolver::env(&context),
         };
         Ok(StagePlan {
             spec,
             context,
-            skills,
+            skills: resolved.skills,
         })
     }
 
@@ -244,15 +296,7 @@ impl loop_core::CheckRunner for CliStage<'_> {
     ) -> Result<loop_core::CheckOutcome> {
         let context = self.context(from, cycle, attempt, None, false)?;
         let cmd = render::substitute(&check.cmd, &context.to_map());
-        let env: Vec<(String, String)> = [
-            ("TICKET_ID", context.ticket_id.clone()),
-            ("STATE", context.state.clone()),
-            ("CYCLE", context.cycle.to_string()),
-            ("ATTEMPT", context.attempt.to_string()),
-        ]
-        .into_iter()
-        .map(|(k, v)| (k.to_string(), v))
-        .collect();
+        let env = Resolver::env(&context);
 
         loop_runner::exec_check(&cmd, &self.config.paths.project_dir, &env, check.timeout_s)
     }

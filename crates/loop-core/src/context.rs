@@ -3,7 +3,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::machine::QaCase;
+use crate::machine::{Machine, QaCase};
 
 #[derive(Clone, Debug, Default)]
 pub struct Context {
@@ -29,6 +29,32 @@ pub struct Context {
 }
 
 impl Context {
+    /// The run-independent context: everything the machine already knows, with
+    /// every run-dependent field at the value a first entry would carry —
+    /// cycle 1, attempt 1, no previous state, no crash, no Navigator addendum,
+    /// no artifacts, an empty digest.
+    ///
+    /// This is what the same state would get on an empty ledger, and it is
+    /// what `loop preview` renders with. Nothing at run time builds a context
+    /// this way: the runtime folds the real ledger instead, which is why a
+    /// preview render is representative rather than exact.
+    pub fn representative(machine: &Machine, state: &str) -> Self {
+        Self {
+            ticket_id: machine.ticket.clone(),
+            task: machine.task.clone(),
+            plan: machine.plan.clone(),
+            state: state.to_string(),
+            prev_state: None,
+            cycle: 1,
+            attempt: 1,
+            crashed: false,
+            ledger_digest: String::new(),
+            entry_addendum: None,
+            qa_cases: machine.qa_cases.clone(),
+            artifacts: BTreeMap::new(),
+        }
+    }
+
     /// The full substitution map. Later crates render templates by replacing
     /// `$NAME` for each key; unknown `$NAMES` are left untouched so `$HOME`
     /// still works.

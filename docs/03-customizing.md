@@ -208,6 +208,8 @@ An edge with neither `:check` nor `:criteria` is legal and draws a `loop validat
 
 The cap is enforced prospectively at commit time, and only when the target is a head. Exhaustion writes ``loop `{name}` exhausted max_cycles={n} at head `{head}` `` and then escalates or aborts. `loop validate` will also tell you if a declared head is never re-entered by any transition, which usually means you named the wrong element of `:states` first.
 
+[`loop preview`](04-cli-reference.md#loop-preview) prints each loop with the head it resolved to, its member states, its cap, and where exhaustion sends the run — so a head you named in the wrong position is visible as a head, not inferred from a list.
+
 ### A complete machine
 
 ```fennel
@@ -343,6 +345,8 @@ The resolved pair becomes one pi flag:
 
 The Judge and Navigator are resolved separately and do not participate in this chain: `config.fnl`'s `:judge` / `:navigator`, optionally overlaid by the machine's. No state can change them, which is the point — a stage cannot pick its own grader.
 
+Do not merge the four layers in your head. [`loop preview`](04-cli-reference.md#loop-preview) prints the resolved `provider/model:thinking` for every state, computed by the same `resolve_model` the run calls, and `loop preview <state>` adds the `--model` flag pi is handed verbatim.
+
 ---
 
 ## Playbooks
@@ -371,6 +375,8 @@ could not resolve playbook `qa`
 ```
 
 `loop validate` reports the same miss as _playbook for state `{id}` does not resolve in the toolbox_, so you find it before a run burns tokens getting there.
+
+A hit is worth checking too, because local-first is silent when it works: [`loop preview`](04-cli-reference.md#loop-preview) names the file each state resolved to, so you can see whether a stage picked up your `.loop/playbooks/` override or the toolbox copy it was meant to shadow. `loop preview <state>` prints the body it resolved to as well.
 
 ### Frontmatter
 
@@ -412,6 +418,8 @@ The playbook body is rendered with `$UPPER_SNAKE` substitution. This is the comp
 The same map is used for `:check` command strings — see [Check commands](#check-commands).
 
 > **The variables only reach the agent where you interpolated them.** There is no automatically prepended context header. A playbook that never writes `$TASK` gives the agent no task. A playbook that never writes `$LEDGER_DIGEST` gives it no memory of the previous six stages. The positional message pi is spawned with contains no ticket id, task, plan, or digest — only "you are entering **X**, cycle N" and, when the stage names servers, the MCP connect instructions. Everything else is in the file you wrote.
+
+`loop preview <state>` answers that directly: it lists the variables the body **actually writes**, split from the `$NAME`s that will pass through untouched, and then renders the body so you can read the result. The render is representative, not exact — it uses cycle 1, attempt 1, no previous state, no artifacts, and an empty digest, because everything else depends on where the run has already been. Which variables are wired in is exact; what they will contain is not.
 
 Substitution rules:
 
@@ -459,6 +467,8 @@ A playbook `.md` can double as a skill — nothing about the format distinguishe
 
 > `loop validate` checks the whole union — `:default-skills` from `config.fnl` included — because the union is what a spawn actually loads. A name that came from the global config says so in the diagnostic.
 
+To read the union rather than assemble it from three files, [`loop preview`](04-cli-reference.md#loop-preview) prints each state's effective skills with the path each name resolved to; `loop preview <state>` lists them as the `--skill` arguments pi receives.
+
 ---
 
 ## MCP servers
@@ -487,6 +497,8 @@ Two consequences:
 - **A name that exists nowhere fails at connect time, not at load time.** loop has nothing to check it against, so `loop validate` cannot tell a typo from a server you have not installed on this machine.
 
 The one MCP diagnostic validate does emit is the `:pi-extensions` mismatch: naming servers on a state while `"mcp"` is absent from the list errors with _the stage would be told to call a tool it does not have_.
+
+Since a typo cannot be caught, read the names back: [`loop preview`](04-cli-reference.md#loop-preview) shows the effective server list per state, and `loop preview <state>` renders the connect instructions exactly as they will appear in that stage's entry message. It never connects to anything — the names are reported, not tested.
 
 ---
 
@@ -533,6 +545,8 @@ A pattern worth stealing from `examples/local/machine.fnl`: the same script appe
 "Transient" is then decided by a versioned regex set and an exit code rather than by a tired agent that would rather retry than debug.
 
 Empty is an error, not a no-op: ``transitions[N]: `:check` command is empty — omit the key instead``.
+
+[`loop preview`](04-cli-reference.md#loop-preview) lists every edge with its check command, its effective timeout, its criteria, its `:on-fail` action, and its backoff — which is how you notice that the check on the way out of `test` is still the commented-out one the template shipped with. Preview never runs a check; it prints the command string as authored, before `$VAR` substitution.
 
 ---
 

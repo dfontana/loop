@@ -116,6 +116,24 @@ impl Fixture {
             .filter_map(|l| serde_json::from_str(l).ok())
             .collect()
     }
+
+    /// Write a file under the project, creating parents. Relative to the
+    /// project root, so `.loop/playbooks/x.md` and `.loop/skills/y.md` both
+    /// go through it.
+    fn write(&self, rel: &str, body: &str) -> PathBuf {
+        let path = self.project.join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, body).unwrap();
+        path
+    }
+
+    /// Same, under the toolbox root — the loser in every local-first race.
+    fn write_toolbox(&self, rel: &str, body: &str) -> PathBuf {
+        let path = self.config.join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, body).unwrap();
+        path
+    }
 }
 
 fn stdout(o: &Output) -> String {
@@ -989,6 +1007,283 @@ fn session_propagates_a_failed_pi_launch() {
         text.contains(&id),
         "name the session that is missing: {text}"
     );
+}
+
+// ── loop preview ─────────────────────────────────────────────────────────────
+
+/// A machine built to make every resolution rule visible at once: a state
+/// whose thinking, playbook frontmatter and machine defaults each supply a
+/// different layer of the model; skills arriving from two levels; a check with
+/// a non-default timeout; both `on-fail` shapes; a backoff; and a loop.
+const PREVIEW_MACHINE: &str = r#"
+{:ticket "PREV-1"
+ :task "Ship the thing."
+ :plan "1. Ship it."
+ :qa-cases [{:id "smoke" :desc "It starts."}]
+
+ :defaults {:model "machine-default-model" :thinking "low" :skills ["shared"]}
+ :budgets {:usd 3 :wallclock-s 90 :max-transitions 7}
+
+ :entry "implement"
+ :terminals ["done" "blocked"]
+ :escalation-state "blocked"
+
+ :states
+ {:implement {:playbook "implement"
+              :thinking "max"
+              :skills ["local-only"]
+              :mcp ["warehouse"]
+              :description "Do the work."}
+  :verify {:playbook "verify" :description "Check it."}}
+
+ :transitions
+ [{:from "implement" :to "verify"
+   :check {:cmd "test -f marker.txt" :timeout-s 45}
+   :criteria "The work is done."
+   :on-fail {:route "implement"}}
+  {:from "verify" :to "implement" :backoff-s 30 :criteria "Try again." :on-fail "abort"}
+  {:from "verify" :to "done" :criteria "Verified."}]
+
+ :loops
+ [{:name "fix" :states ["implement" "verify"] :max-cycles 3 :on-exhausted "escalate"}]}
+"#;
+
+/// Scaffold the fixture PREVIEW_MACHINE expects: a local playbook that shadows
+/// a toolbox one, a toolbox playbook with no frontmatter model, and a skill at
+/// each level.
+fn preview_fixture() -> Fixture {
+    let fx = Fixture::new(r#"{"steps":[]}"#);
+    fx.run(&["init", "PREV-1"]);
+    fx.machine(PREVIEW_MACHINE);
+
+    fx.write_toolbox(
+        "playbooks/implement.md",
+        "---\nname: implement\nmodel: frontmatter-model\n---\nTOOLBOX COPY — must not be used.\n",
+    );
+    fx.write(
+        ".loop/playbooks/implement.md",
+        "---\nname: implement\ndescription: Local override.\nmodel: frontmatter-model\n---\n\
+         Work on $TICKET_ID, cycle $CYCLE.\n\n$TASK\n\nDigest: $LEDGER_DIGEST\n\nHome is $HOME.\n",
+    );
+    fx.write_toolbox("playbooks/verify.md", "---\nname: verify\n---\nCheck it.\n");
+    fx.write_toolbox("skills/shared.md", "# shared\n");
+    fx.write(".loop/skills/local-only.md", "# local-only\n");
+    fx
+}
+
+/// The whole-machine report: every layered override resolved the way the run
+/// would resolve it, local-first winners named by path, and each edge's real
+/// gate. This is the command's entire promise — a pre-run answer computed by
+/// the run's own resolver, not a second one that can drift from it.
+#[test]
+fn preview_reports_the_stage_a_run_would_actually_build() {
+    let fx = preview_fixture();
+
+    let out = fx.run(&["preview"]);
+    assert!(out.status.success(), "preview failed: {}", combined(&out));
+    let text = stdout(&out);
+
+    for expected in [
+        "PREV-1 — 2 state(s), 3 transition(s), 1 loop(s)",
+        "entry             implement",
+        "terminals         blocked, done",
+        "escalation        blocked",
+        "transition mode   constrained",
+        // Tightened by the machine, not the config's $15 / 7200s / 60.
+        "budgets           $3.00, 1m30s, 7 transition(s)",
+        "navigator         anthropic/claude-haiku-4-5:low (max 5 invocation(s))",
+        "qa cases          1",
+        // Four-layer resolution, merged field by field: `thinking` off the
+        // state, `model` off the playbook frontmatter (beating the machine
+        // default), `provider` off config.fnl.
+        "model           anthropic/frontmatter-model:max",
+        // ...and a state with no overrides of its own falls all the way to
+        // the machine defaults for both fields.
+        "model           anthropic/machine-default-model:low",
+        "mcp             warehouse",
+        // Edge detail: the check's command and its non-default timeout, both
+        // failure shapes, and the backoff.
+        "check         test -f marker.txt",
+        "timeout       45s",
+        "criteria      The work is done.",
+        "on fail       route to `implement`",
+        "on fail       abort the run",
+        "backoff       30s",
+        // Loops, heads, limits, exhaustion.
+        "fix — head `implement`",
+        "max cycles      3",
+        "on exhausted    escalate to `blocked`",
+        "no problems found",
+    ] {
+        assert!(text.contains(expected), "missing `{expected}` in:\n{text}");
+    }
+
+    // Local-first, both kinds: the report names the file that would actually
+    // be loaded, and never the toolbox copy it shadows.
+    let local_playbook = fx.project.join(".loop/playbooks/implement.md");
+    let local_skill = fx.project.join(".loop/skills/local-only.md");
+    let toolbox_skill = fx.config.join("skills/shared.md");
+    assert!(
+        text.contains(&local_playbook.display().to_string()),
+        "{text}"
+    );
+    assert!(text.contains(&local_skill.display().to_string()), "{text}");
+    assert!(
+        text.contains(&toolbox_skill.display().to_string()),
+        "{text}"
+    );
+    assert!(
+        !text.contains("TOOLBOX COPY"),
+        "the shadowed toolbox playbook must not appear: {text}"
+    );
+}
+
+/// The state form: the exact inputs the Worker gets, plus a render that is
+/// labelled as representative rather than passed off as the future prompt.
+#[test]
+fn preview_of_one_state_shows_the_worker_inputs_and_a_labelled_render() {
+    let fx = preview_fixture();
+
+    let out = fx.run(&["preview", "implement"]);
+    assert!(out.status.success(), "preview failed: {}", combined(&out));
+    let text = stdout(&out);
+
+    for expected in [
+        "PREV-1 — state `implement`",
+        "reference         `implement` (name, local-first)",
+        "description       Local override.",
+        "model flag        --model frontmatter-model:max",
+        "provider          anthropic",
+        "transition mode   constrained",
+        "reachable         verify",
+        "env               TICKET_ID, STATE, CYCLE, ATTEMPT",
+        "session id        PREV-1-implement-1-1",
+        // Which loop variables this body actually writes — and which `$NAME`s
+        // it writes that substitution will leave alone.
+        "referenced        $TICKET_ID, $CYCLE, $TASK, $LEDGER_DIGEST",
+        "passed through    $HOME",
+        // The render, and the limits printed next to it.
+        "representative render",
+        "Cycle 1, attempt 1, no previous state, no artifacts, empty ledger digest.",
+        "NOT the prompt a future run will send",
+        "--- system prompt ---",
+        "Work on PREV-1, cycle 1.",
+        "Ship the thing.",
+        // Unknown names survive rendering, exactly as they will at run time.
+        "Home is $HOME.",
+        "--- entry message ---",
+        "You are entering **implement**, cycle 1.",
+        // The stage names an MCP server, so the entry message leads with the
+        // connect instruction the Worker would really receive.
+        r#"mcp({connect: "warehouse"})"#,
+    ] {
+        assert!(text.contains(expected), "missing `{expected}` in:\n{text}");
+    }
+
+    // The skills the Worker is handed, by the path pi's `--skill` would take.
+    assert!(
+        text.contains(
+            &fx.project
+                .join(".loop/skills/local-only.md")
+                .display()
+                .to_string()
+        ),
+        "{text}"
+    );
+    // The prompt file the run *would* write is named, but preview does not
+    // write it — the path carries placeholders rather than a cycle.
+    assert!(
+        text.contains("implement-<cycle>-<attempt>-system.md"),
+        "{text}"
+    );
+}
+
+/// Validation errors are shown, then fatal: preview must not hand back an
+/// exit-0 report for a machine that cannot run.
+#[test]
+fn preview_prints_diagnostics_then_fails_on_a_validation_error() {
+    let fx = Fixture::new(r#"{"steps":[]}"#);
+    fx.run(&["init", "PREV-2"]);
+    fx.machine(&TINY_MACHINE.replace(r#":playbook "implement""#, r#":playbook "nonexistent""#));
+
+    let out = fx.run(&["preview"]);
+    assert!(
+        !out.status.success(),
+        "a machine with errors must not preview clean: {}",
+        combined(&out)
+    );
+    let text = combined(&out);
+    // The report still prints — the diagnostics are the point of running it.
+    assert!(text.contains("TINY-1 — 1 state(s)"), "{text}");
+    // ...reusing `validate`'s own wording, not a preview-only paraphrase.
+    assert!(
+        text.contains("error  implement: playbook for state `implement` does not resolve"),
+        "{text}"
+    );
+    assert!(text.contains("error: 1 error(s)"), "{text}");
+
+    // And the same diagnostic comes out of `validate`, which is the guarantee
+    // that preview is not linting with a weaker rule set.
+    let validate = fx.run(&["validate"]);
+    assert!(!validate.status.success());
+    assert!(
+        combined(&validate).contains("playbook for state `implement` does not resolve"),
+        "{}",
+        combined(&validate)
+    );
+}
+
+#[test]
+fn preview_rejects_an_unknown_state_and_lists_the_real_ones() {
+    let fx = preview_fixture();
+
+    let out = fx.run(&["preview", "implementt"]);
+    assert!(!out.status.success(), "{}", combined(&out));
+    let text = combined(&out);
+    assert!(text.contains("no state `implementt`"), "{text}");
+    assert!(text.contains("states: implement, verify"), "{text}");
+}
+
+/// Both forms are pure reads: identical output run twice, and not one byte
+/// written to the ledger, the artifact store, the vendored ext, or the render
+/// directory under `LOOP_STATE_DIR`.
+#[test]
+fn preview_is_deterministic_and_creates_no_run_or_render_files() {
+    let fx = preview_fixture();
+
+    // Delete the ext `init` vendored: preview must not put it back.
+    std::fs::remove_dir_all(fx.config.join("ext")).unwrap();
+
+    let first = fx.run(&["preview"]);
+    let second = fx.run(&["preview"]);
+    assert!(first.status.success(), "{}", combined(&first));
+    assert_eq!(
+        stdout(&first),
+        stdout(&second),
+        "the whole-machine preview must be byte-identical across runs"
+    );
+
+    let first_state = fx.run(&["preview", "implement"]);
+    let second_state = fx.run(&["preview", "implement"]);
+    assert!(first_state.status.success(), "{}", combined(&first_state));
+    assert_eq!(
+        stdout(&first_state),
+        stdout(&second_state),
+        "the state preview must be byte-identical across runs"
+    );
+
+    for must_not_exist in [
+        fx.project.join(".loop/ledger.jsonl"),
+        fx.project.join(".loop/artifacts"),
+        fx.config.join("ext"),
+        fx.state.join("render"),
+    ] {
+        assert!(
+            !must_not_exist.exists(),
+            "preview created {}",
+            must_not_exist.display()
+        );
+    }
 }
 
 const TINY_MACHINE: &str = r#"

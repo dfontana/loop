@@ -150,6 +150,26 @@ stateDiagram-v2
 
 Every edge label tells you how that edge is gated: `check`, `judge`, both, or `unguarded`. Redraw after each edit — `diagram` never touches the toolbox, so a machine with a playbook that does not resolve yet still draws.
 
+The diagram shows the shape. To see what the stages inside it actually resolve to — which playbook file wins, which model each one ends up on after the four config layers are merged, what the edge guards really are — preview it:
+
+```
+loop preview
+```
+
+Every number in that report is computed by the code the run itself uses, so it is what you will get rather than what the file appears to say. It is where a `:thinking "high"` you forgot to delete, a playbook resolving to the toolbox copy instead of your local one, or a `:check` still commented out becomes visible.
+
+Then look at one stage in full:
+
+```
+loop preview implement
+```
+
+That adds the resolved playbook and its frontmatter, the exact `--skill` paths and MCP names the Worker gets, the variables the playbook body actually interpolates — and a **representative render**: the prompt with the template variables filled in.
+
+Read that render for shape, not for text. It is built with cycle 1, attempt 1, no previous state, no artifacts, and an empty ledger digest, because those values do not exist until a run has been somewhere. `$PREV_STATE`, `$LEDGER_DIGEST`, `$CYCLE`, `$ATTEMPT`, `$CRASHED`, `$ENTRY_ADDENDUM` and the `$ARTIFACT_*` paths will all differ in a real run — the report says so next to the render. What it does tell you exactly is whether your playbook wired the variables in at all, which is the mistake that actually happens: a stage whose prompt never writes `$TASK` gets no task.
+
+Both forms are read-only. Preview spawns nothing, runs no `:check`, connects to no MCP server, and writes no ledger, artifact, or rendered prompt file — you can run it as often as you edit.
+
 The whole vocabulary — every key, how playbooks and skills resolve, how models are chosen per stage — is in [the machine reference](03-customizing.md#machinefnl--the-ticket-machine). Do not try to learn it before your first run. Change the ticket's task, plan, and test command; leave the rest.
 
 ## Validate before you run

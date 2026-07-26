@@ -10,17 +10,11 @@ bin = "fennel"
 
 [tasks.test]
 description = "Build the workspace and run all Rust tests"
-run = [
-    "cargo build --workspace",
-    "cargo test --workspace",
-]
+run = ["cargo build --workspace", "cargo test --workspace"]
 
 [tasks.format]
 description = "Format Rust and Markdown sources"
-run = [
-    "cargo fmt",
-    "prettier --write --prose-wrap never '**/*.md'",
-]
+run = ["cargo fmt", "prettier --write --prose-wrap never '**/*.md'"]
 
 [tasks.lint]
 description = "Run all linters"

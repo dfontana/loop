@@ -2,7 +2,7 @@
 
 `loop` — "A local, ticket-level agent orchestrator".
 
-Nine subcommands: [`init`](#loop-init), [`validate`](#loop-validate), [`diagram`](#loop-diagram), [`run`](#loop-run), [`resume`](#loop-resume), [`status`](#loop-status), [`logs`](#loop-logs), [`session`](#loop-session), [`doctor`](#loop-doctor).
+Ten subcommands: [`init`](#loop-init), [`validate`](#loop-validate), [`preview`](#loop-preview), [`diagram`](#loop-diagram), [`run`](#loop-run), [`resume`](#loop-resume), [`status`](#loop-status), [`logs`](#loop-logs), [`session`](#loop-session), [`doctor`](#loop-doctor).
 
 For what the runtime actually does with the machine, see [02-how-it-works.md](02-how-it-works.md). For the keys inside `config.fnl` and `machine.fnl`, see [03-customizing.md](03-customizing.md).
 
@@ -136,6 +136,81 @@ Clean run (zero diagnostics of any severity):
 - **Terminal-reachability ignores `on_fail: route` edges.** The reverse BFS covers declared `:transitions` only, so a state whose only way forward is a guard-failure route is reported as having no path to a terminal.
 
 Skills and MCP servers are checked as the **effective union** — `config.fnl`'s `:default-skills` / `:default-mcp`, the machine's `:defaults`, and the state's own — because that union is what a spawn loads. A diagnostic for a name that came from the global config says so.
+
+## `loop preview`
+
+```
+loop preview [<STATE>]
+```
+
+> Show what a run would resolve to, without spawning anything.
+
+| Flag / arg | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `<STATE>` | string, optional | — | "Detail one state instead of summarizing the whole machine." |
+
+Answers "what will this loop do?" using the run's own resolvers. Every value in the report comes from the same code path `loop run` uses to build a stage — the four-layer model merge, local-first playbook and skill resolution, the effective skill/MCP unions, `$VAR` substitution — stopped short of every write that stage building does.
+
+### Read-only guarantees
+
+Preview performs **no** side effect. Specifically it does not:
+
+- spawn `pi`, or any Worker, Judge, or Navigator;
+- run a `:check` command, connect to an MCP server, or test a credential;
+- materialize `ext/*.ts` (unlike `init`, `run`, and `resume`, a missing or stale vendored ext is left alone);
+- create `.loop/ledger.jsonl` or `.loop/artifacts/`;
+- write anything under `LOOP_STATE_DIR` — the representative render is built in memory, and the rendered-prompt path it reports is where a run _would_ write.
+
+It reads `config.fnl`, `machine.fnl`, the task/plan prose, and whatever playbooks and skills resolve. Output is deterministic: the same inputs produce byte-identical output, since every collection is printed in the machine's own order (states alphabetically by id from the IR's `BTreeMap`, transitions and loops in declaration order).
+
+### Whole-machine form
+
+Sections, in order:
+
+| Section | Contents |
+| --- | --- |
+| header | ticket, state / transition / loop counts |
+| — | source path, entry, terminals, escalation state, transition mode, effective budgets, Judge and Navigator models with the invocation cap |
+| `context` | task and plan line/char counts with their first line, and the QA case ids |
+| `states` | every state: description, resolved playbook name and path, resolved `provider/model:thinking`, effective skills with resolved paths, effective MCP names, reachable states, then each outgoing edge with its check command, timeout, criteria, `:on-fail` action, and backoff |
+| `loops` | each loop's head, member states, `:max-cycles`, and exhaustion behavior |
+| `validation` | the diagnostics, or `no problems found` |
+
+Values are printed in one column; an absent optional value or an empty list reads `(none)`. Budget durations use the same formatting as [`loop run`](#loop-run).
+
+### State form
+
+`loop preview <STATE>` prints that state's block from the whole-machine form, then adds:
+
+| Section | Contents |
+| --- | --- |
+| `playbook` | how the state names it (`name` / `path` / inline `:prompt`) and the file it resolved to |
+| `playbook frontmatter` | `name`, `description`, `model`, `thinking` as parsed |
+| `worker invocation` | the `--model` flag, provider, each skill's `--skill` path, MCP names, transition mode, reachable states, cwd, the injected `transition-tool.ts` path, the rendered-prompt path pattern, the four exported environment variable names, and the deterministic session id |
+| `template variables` | the `$NAME`s the body writes that are loop variables, and the ones that will pass through untouched |
+| `playbook body` | the body as authored, unrendered |
+| `representative render` | the substituted system prompt and the entry message, under the limitation notice below |
+
+Only environment **names** are listed, never inherited process environment or credentials.
+
+### The representative render is not the future prompt
+
+It is built with **cycle 1, attempt 1, no previous state, no artifacts, and an empty ledger digest**, and the report says so beside it. `$PREV_STATE`, `$LEDGER_DIGEST`, `$CYCLE`, `$ATTEMPT`, `$CRASHED`, `$ENTRY_ADDENDUM`, the `$ARTIFACT_*` paths, and the Navigator's addendum all depend on where a run has already been, so none of them can be known before the run exists. What the render does establish exactly is **which** variables the playbook interpolates — the thing that is wrong often enough to be worth checking.
+
+The digest is empty rather than the header block `$LEDGER_DIGEST` renders to on a fresh ledger, so the render is not exact even for the entry state on a first run.
+
+### Validation
+
+Preview runs the full [`loop validate`](#loop-validate) linter — the same function, the same diagnostics, the same `{tag}  {where}: {message}` wording. There is no weaker preview-only check.
+
+The report is printed **first**, then the diagnostics, so problems are the last thing on screen. A state whose playbook or skills do not resolve still gets a block; the fields it cannot compute read `unresolved` with the searched paths.
+
+### Exit and edge cases
+
+- Any validation **error** → the full report and diagnostics print, then exit 1 with `error: {n} error(s) — this machine will not run as previewed` on stderr.
+- **Warnings alone exit 0**, with the warning lines under `validation`.
+- An unknown `<STATE>` exits 1 **before printing anything**, listing the states that do exist: ``no state `{id}` in {path} — states: {a, b, c}``. A terminal is not a state, so `loop preview done` is this error.
+- A missing or unparseable `machine.fnl` errors the same way it does for every command that loads the graph.
 
 ## `loop diagram`
 
@@ -549,6 +624,7 @@ Per command:
 | --- | --- | --- |
 | `init` | scaffold written | `.loop/machine.fnl` already exists; template missing; any write fails |
 | `validate` | no diagnostics, **or warnings only** | one or more errors (`{n} error(s)`); machine missing or fails to load |
+| `preview` | report printed with no errors, **or warnings only** | one or more validation errors; unknown `<STATE>`; machine missing or fails to load |
 | `diagram` | mermaid printed | machine missing or fails to load |
 | `run` | outcome `Done` | outcome `Failed` or `Aborted`; ledger already has a run; machine missing or fails to load |
 | `resume` | outcome `Done` | as `run`, plus an empty ledger |

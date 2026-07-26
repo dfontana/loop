@@ -9,6 +9,7 @@ use loop_core::Paths;
 
 mod commands;
 mod output;
+mod report;
 mod session_picker;
 mod session_ui;
 mod stage;
@@ -40,6 +41,11 @@ enum Command {
     },
     /// Lint the machine: reachability, dangling references, guard sanity.
     Validate,
+    /// Show what a run would resolve to, without spawning anything.
+    Preview {
+        /// Detail one state instead of summarizing the whole machine.
+        state: Option<String>,
+    },
     /// Render the machine as a mermaid state diagram, on stdout.
     Diagram,
     /// Drive the machine to a terminal.
@@ -103,6 +109,7 @@ fn try_main() -> anyhow::Result<()> {
     match cli.command {
         Command::Init { ticket, template } => commands::init(paths, &ticket, &template),
         Command::Validate => commands::validate(paths),
+        Command::Preview { state } => commands::preview(paths, state),
         Command::Diagram => commands::diagram(paths),
         Command::Run {
             max_transitions,

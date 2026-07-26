@@ -1,4 +1,4 @@
-//! The eight subcommands.
+//! The ten subcommands.
 
 use std::collections::BTreeMap;
 use std::io::Write as _;
@@ -6,16 +6,17 @@ use std::path::Path;
 
 use anyhow::{Context as _, Result, bail};
 use loop_core::{Config, LedgerSink, Machine, Paths};
-use loop_engine::{Engine, Severity};
+use loop_engine::{Diagnostic, Engine, Severity};
 use loop_fennel::FennelVm;
 use loop_ledger::{ArtifactStore, Ledger};
 use loop_runner::PiRunner;
 use loop_toolbox::Toolbox;
 
 use crate::output::{summarize, truncate};
+use crate::report::{self, fmt_duration};
 use crate::session_picker::{self, Candidate, Picker, Scope};
 use crate::session_ui;
-use crate::stage::CliStage;
+use crate::stage::{CliStage, Resolver};
 
 // Templates shipped in the binary, so a fresh install needs no fetch.
 const CONFIG_FNL: &str = include_str!("../templates/config.fnl");
@@ -131,28 +132,35 @@ fn load(paths: Paths) -> Result<(FennelVm, Config, Machine)> {
     Ok((vm, config, machine))
 }
 
-pub fn validate(paths: Paths) -> Result<()> {
-    let (_vm, config, machine) = load(paths)?;
-    let toolbox = Toolbox::new(&config);
-    let diagnostics = loop_engine::validate(
-        &machine,
+/// Lint a loaded machine against the toolbox on disk. `validate` and `preview`
+/// share it, so preview reports exactly the problems `validate` would — there
+/// is no weaker preview-only linter.
+fn diagnose(config: &Config, machine: &Machine) -> Vec<Diagnostic> {
+    let toolbox = Toolbox::new(config);
+    loop_engine::validate(
+        machine,
         &|r| toolbox.resolve_playbook(r, &machine.dir).is_ok(),
         &|name| toolbox.resolve_skill(name, &machine.dir).is_ok(),
         config.pi_extensions.iter().any(|e| e == "mcp"),
         &config.default_skills,
         &config.default_mcp,
-    );
+    )
+}
 
-    let errors = diagnostics
+fn error_count(diagnostics: &[Diagnostic]) -> usize {
+    diagnostics
         .iter()
         .filter(|d| d.severity == Severity::Error)
-        .count();
+        .count()
+}
+
+pub fn validate(paths: Paths) -> Result<()> {
+    let (_vm, config, machine) = load(paths)?;
+    let diagnostics = diagnose(&config, &machine);
+
+    let errors = error_count(&diagnostics);
     for d in &diagnostics {
-        let tag = match d.severity {
-            Severity::Error => "error",
-            Severity::Warning => "warn ",
-        };
-        println!("{tag}  {}: {}", d.where_, d.message);
+        println!("{}  {}: {}", report::tag(d.severity), d.where_, d.message);
     }
     if diagnostics.is_empty() {
         println!(
@@ -175,6 +183,55 @@ pub fn validate(paths: Paths) -> Result<()> {
 pub fn diagram(paths: Paths) -> Result<()> {
     let (_vm, _config, machine) = load(paths)?;
     print!("{}", loop_engine::mermaid(&machine));
+    Ok(())
+}
+
+/// `loop preview` — what this machine will do, answered before anything is
+/// spawned.
+///
+/// Read-only and deterministic by construction: it resolves through
+/// [`Resolver`], the same code `build_stage` runs, but stops short of every
+/// write that stage building does. No `ext/*.ts` is materialized, no ledger or
+/// artifact directory is created, and nothing lands under `LOOP_STATE_DIR` —
+/// the render a state preview shows is built in memory and printed.
+pub fn preview(paths: Paths, state: Option<String>) -> Result<()> {
+    let (_vm, config, machine) = load(paths)?;
+
+    // An unknown state is the operator's typo, not the machine's problem: fail
+    // on it before printing a report about something they did not ask for.
+    if let Some(id) = &state
+        && !machine.states.contains_key(id)
+    {
+        bail!(
+            "no state `{id}` in {} — states: {}",
+            machine.source_path.display(),
+            machine
+                .states
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+
+    let resolver = Resolver::new(&machine, &config);
+    print!(
+        "{}",
+        match &state {
+            Some(id) => report::state_preview(&resolver, id),
+            None => report::machine_preview(&resolver),
+        }
+    );
+
+    // Diagnostics come last so the report reads top-down and the problems are
+    // the final thing on screen — the same reason `run`'s summary precedes its
+    // error.
+    let diagnostics = diagnose(&config, &machine);
+    print!("{}", report::validation(&diagnostics));
+    let errors = error_count(&diagnostics);
+    if errors > 0 {
+        bail!("{errors} error(s) — this machine will not run as previewed");
+    }
     Ok(())
 }
 
@@ -567,12 +624,4 @@ fn which(bin: &str) -> Option<std::path::PathBuf> {
             .map(|dir| dir.join(bin))
             .find(|p| p.is_file())
     })
-}
-
-fn fmt_duration(secs: u64) -> String {
-    match secs {
-        s if s < 60 => format!("{s}s"),
-        s if s < 3600 => format!("{}m{}s", s / 60, s % 60),
-        s => format!("{}h{}m", s / 3600, (s % 3600) / 60),
-    }
 }

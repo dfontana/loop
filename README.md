@@ -16,6 +16,7 @@ loop init PROJ-1487                   # scaffolds ./.loop/ and ~/.config/loop/
 $EDITOR .loop/task.md .loop/plan.md   # what to do, and how
 $EDITOR .loop/machine.fnl             # the stages and the edges between them
 
+loop preview                          # what each stage resolves to, before spawning anything
 loop validate                         # lint the graph and every reference
 loop diagram                          # see what you actually declared
 loop run                              # drive it to a terminal
