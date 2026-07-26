@@ -2,7 +2,7 @@
 
 `loop` — "A local, ticket-level agent orchestrator".
 
-Eight subcommands: [`init`](#loop-init), [`validate`](#loop-validate), [`diagram`](#loop-diagram), [`run`](#loop-run), [`resume`](#loop-resume), [`status`](#loop-status), [`logs`](#loop-logs), [`doctor`](#loop-doctor).
+Nine subcommands: [`init`](#loop-init), [`validate`](#loop-validate), [`diagram`](#loop-diagram), [`run`](#loop-run), [`resume`](#loop-resume), [`status`](#loop-status), [`logs`](#loop-logs), [`session`](#loop-session), [`doctor`](#loop-doctor).
 
 For what the runtime actually does with the machine, see [02-how-it-works.md](02-how-it-works.md). For the keys inside `config.fnl` and `machine.fnl`, see [03-customizing.md](03-customizing.md).
 
@@ -343,6 +343,133 @@ no run yet — `loop run` starts one
 
 Valid ledger content goes only to stdout. A ledger read or parse failure is reported to stderr and exits 1; successful commands exit 0.
 
+## `loop session`
+
+```
+loop session [<STATE>] [--latest]
+```
+
+> Reopen a Worker's pi session: pick an attempt, then hand the terminal to pi.
+
+| Flag / arg | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `<STATE>` | string, optional | — | "Only offer attempts at exactly this state, e.g. `implement`." |
+| `--latest` | bool | false | "Skip the picker and take the newest usable attempt." |
+
+Reads the ledger, builds one candidate per `state_entered` that carries a non-empty `session_id`, selects one, and executes `pi --session <id>` in the project directory.
+
+Requires **neither the machine nor the toolbox**. Only the ledger and the project path are needed; the machine is loaded opportunistically for state descriptions and a load failure costs nothing but those. Opening the ledger repairs a torn trailing line, exactly as [`loop status`](#loop-status) does, so an attempt interrupted mid-write is still selectable.
+
+Judge and Navigator spawns run with `--no-session` and never appear here.
+
+### Candidates
+
+One per `state_entered` with a session id, ordered **newest-first in reverse ledger order**. Ledger position is the ordering key; `ts` is display metadata only, so a skewed clock cannot reorder history.
+
+Each candidate's evidence comes from its **ledger episode** — from its own `state_entered` up to the next one. Within that window a `worker_output` with the same `state` and `cycle` supplies the summary, usage, and artifacts, and any `error` supplies the failure detail. `worker_output` has no `attempt` field, so the episode boundary is what keeps a retry's summary off the crashed attempt's row.
+
+| Outcome label | Condition                                         |
+| ------------- | ------------------------------------------------- |
+| `finished`    | a matching `worker_output` in the episode         |
+| `crashed`     | no `worker_output`, but an `error` in the episode |
+| `incomplete`  | neither                                           |
+
+### Selection
+
+| Invocation | Behavior |
+| --- | --- |
+| `loop session` | picker, all Worker attempts |
+| `loop session <STATE>` | picker, filtered to that exact state |
+| `loop session --latest` | newest usable attempt, no picker |
+| `loop session <STATE> --latest` | newest usable attempt at that state, no picker |
+
+`<STATE>` is an **exact** match, not a prefix or fuzzy one: `implement` never offers `implement-hotfix`. It is a prefilter, not an instruction to open immediately — without `--latest` it still shows the picker.
+
+`--latest` takes the first candidate in the (newest-first) filtered list. There is no `--cycle` or `--attempt`; older attempts are what the picker is for.
+
+### The picker
+
+Requires **both stdin and stdout to be terminals**. Otherwise:
+
+```
+error: `loop session` needs a terminal to show the picker (stdin and stdout must both be TTYs) — use `loop session --latest` to select without one
+```
+
+The state filter, when given, is echoed into the suggested command (`loop session implement --latest`). This check is deliberate: output being piped means something is consuming it, and choosing a session anyway would be worse than failing.
+
+Drawn as a small **inline viewport** on stderr — no alternate screen — so stdout carries only the selection line. Raw mode and the viewport are released on every exit path, including errors and cancellation, before pi is launched.
+
+| Key                         | Action                          |
+| --------------------------- | ------------------------------- |
+| printable characters        | append to the fuzzy query       |
+| `Backspace`                 | delete the last query character |
+| `↑` / `Ctrl+P`              | move up                         |
+| `↓` / `Ctrl+N`              | move down                       |
+| `Ctrl+O`                    | next candidate mode             |
+| `Enter`                     | open the highlighted attempt    |
+| `Esc` / `Ctrl+C` / `Ctrl+D` | cancel                          |
+
+`Ctrl+O` cycles `All attempts` → `Latest per state` → `Incomplete` → `All attempts`. The current mode is in the header; the `<STATE>` prefilter holds in every mode.
+
+| Mode               | Candidates                               |
+| ------------------ | ---------------------------------------- |
+| `All attempts`     | every `state_entered` with a session id  |
+| `Latest per state` | the newest attempt for each exact state  |
+| `Incomplete`       | attempts whose outcome is not `finished` |
+
+Two lines per row:
+
+```
+implement — cycle 2, attempt 1 — 2026-07-26 12:04 — finished
+  Added the retry guard and updated the tests. · claude-sonnet-5:high · $0.11 · 1 artifact
+```
+
+The timestamp renders in the local timezone to the minute. When the machine loaded and the state has a `:description`, it is appended to the first line — the state id stays either way, so no two rows become indistinguishable. The second line is the summary, else the error detail, else `no worker_output — still running, or killed without a trace`; then the model, thinking level, cost, and artifact count.
+
+Fuzzy search matches the visible row text — state id, cycle/attempt, timestamp, outcome label, description, and summary. It does **not** match the session id, and it does not match the model or cost (a query for `sonnet` should not return the whole run). An empty query applies no filter at all, leaving the newest-first order intact. Equal scores keep that order rather than reshuffling between keystrokes.
+
+Cancelling prints `cancelled` and exits 0, having launched nothing.
+
+### Launch
+
+```
+opening <TICKET>  <state> — cycle N, attempt M — <ts> — <outcome> — <summary, 72 chars>
+```
+
+One line on stdout, before the process is replaced. The opaque session id is **not** printed as the selection: it is a key for pi, not a name for a person.
+
+If the chosen attempt is not `finished`, stderr gets:
+
+```
+warning: no worker_output for this attempt — the session may still be active, or the spawn crashed
+warning: the ledger recorded: <error detail, 120 chars>
+```
+
+The second line only when the episode recorded an error. Both on stderr, so a piped stdout stays clean, and the attempt still opens.
+
+Then, with stdin/stdout/stderr inherited unchanged and the cwd set to the project directory:
+
+```
+<pi_bin> --session <id>
+```
+
+`--session`, not `--session-id`. This command exists to read history, so a session pi no longer has must fail loudly; `--session-id` would create an empty replacement under the same id, which is indistinguishable from a Worker that did nothing. `pi_bin` comes from `Config::defaults`, so `LOOP_PI_BIN` applies and `config.fnl` is not consulted.
+
+loop never reads, parses, writes, or deletes a pi session file, and never copies a transcript into `.loop/`. For the session format and pi's own navigation controls, see pi's upstream session documentation.
+
+### Errors
+
+| Condition | Message |
+| --- | --- |
+| no usable candidate | ``no Worker session in <ledger> matching <state `X`\|any state> (selection mode: <--latest\|All attempts>) — sessions come from `state_entered.session_id`; `loop status` shows what the ledger holds`` |
+| no terminal, no `--latest` | `` `loop session` needs a terminal to show the picker … `` |
+| pi could not be spawned | ``launching `<pi_bin> --session <id>` — install pi, or set LOOP_PI_BIN`` |
+| pi exited non-zero | `` `<pi_bin> --session <id>` exited <code\|on a signal> `` |
+
+The no-candidate message names both the requested filter and the selection mode, so it distinguishes "that state never ran" from "nothing in this ledger has a session id at all" — which is what a ledger written before session ids looks like.
+
+pi's exit status is the command's exit status: a non-zero pi is a non-zero `loop session`.
+
 ## `loop doctor`
 
 ```
@@ -386,7 +513,7 @@ All four pass → blank line, then `all good`, exit 0. Otherwise exit 1 with `er
 | --- | --- | --- |
 | `LOOP_CONFIG_DIR` | toolbox root (`config.fnl`, `playbooks/`, `skills/`, `machines/`, `ext/`) | `$XDG_CONFIG_HOME/loop` → `$HOME/.config/loop` → relative `.config/loop` |
 | `LOOP_STATE_DIR` | generated state root (`render/`) | `$XDG_STATE_HOME/loop` → `$HOME/.local/state/loop` → relative `.local/state/loop` |
-| `LOOP_PI_BIN` | the pi executable to spawn | `pi` |
+| `LOOP_PI_BIN` | the pi executable to spawn, for stages and for [`loop session`](#loop-session) | `pi` |
 | `HOME` | fallback base for both roots | must be non-empty to count |
 | `XDG_CONFIG_HOME` | config-root fallback | **ignored unless absolute** |
 | `XDG_STATE_HOME` | state-root fallback | **ignored unless absolute** |
@@ -427,6 +554,7 @@ Per command:
 | `resume` | outcome `Done` | as `run`, plus an empty ledger |
 | `status` | always, including the empty-ledger message | ledger unreadable or has a corrupt interior line |
 | `logs` | human tail, or complete JSONL with `--raw` | ledger unreadable or has a corrupt interior line |
+| `session` | pi exited 0, **or** the picker was cancelled | no usable candidate; no terminal and no `--latest`; pi could not be spawned; pi exited non-zero |
 | `doctor` | all four checks pass | `{n} problem(s)` |
 
 `loop run` and `loop resume` exit 1 on `Failed` and `Aborted` deliberately, so `loop run && gh pr merge` and CI wrappers gate correctly. To distinguish the two, read `status` from [`loop status --json`](#loop-status).

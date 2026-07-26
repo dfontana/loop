@@ -232,6 +232,23 @@ loop logs -n 50      # a larger human-readable tail
 
 `loop status --json` gives you a machine-readable folded summary for scripting.
 
+`status` tells you _that_ the review failed twice. When you want to know _why_, reach for the transcript:
+
+```
+loop session
+```
+
+That opens a picker over every worker attempt in the run, newest first — stage, cycle, attempt, time, outcome, and the worker's own summary on each row. Type to narrow it, `Ctrl+O` to switch between all attempts / the latest per stage / the ones that never reported, `Enter` to open. loop then hands the terminal to pi, in the same session that stage ran in, with its full history: every message, tool call, and result. Nothing is copied or re-rendered — the transcript was always pi's, and `loop` only kept the id.
+
+Two shortcuts, for when you already know what you want:
+
+```
+loop session implement            # only attempts at that stage
+loop session implement --latest   # the newest one, no picker
+```
+
+`--latest` is also the escape hatch when there is no terminal to draw a picker on. Without it, a piped or scripted invocation **fails** rather than silently choosing for you.
+
 If the run was interrupted — you hit Ctrl-C, the machine slept, a spawn crashed — use:
 
 ```

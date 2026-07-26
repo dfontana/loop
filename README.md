@@ -26,7 +26,16 @@ While it runs, or after it stops:
 ```sh
 loop status          # where it is and how it got there
 loop logs            # recent ledger events
+loop session         # pick a stage and reopen what that worker actually did
 loop resume          # continue an interrupted run
+```
+
+`status` folds the ledger into a summary; `session` is how you read the full transcript behind any line of it. loop keeps no transcript of its own — it records the session id pi filed each stage under, and hands it back:
+
+```sh
+loop session                    # pick from every worker attempt
+loop session implement          # only attempts at that stage
+loop session implement --latest # newest one, no picker (scripts, CI)
 ```
 
 Full walkthrough: [Getting started](docs/01-getting-started.md).

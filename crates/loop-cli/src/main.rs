@@ -9,6 +9,8 @@ use loop_core::Paths;
 
 mod commands;
 mod output;
+mod session_picker;
+mod session_ui;
 mod stage;
 
 #[derive(Parser)]
@@ -71,6 +73,14 @@ enum Command {
         #[arg(long, short = 'v')]
         verbose: bool,
     },
+    /// Reopen a Worker's pi session: pick an attempt, then hand the terminal to pi.
+    Session {
+        /// Only offer attempts at exactly this state, e.g. `implement`.
+        state: Option<String>,
+        /// Skip the picker and take the newest usable attempt.
+        #[arg(long)]
+        latest: bool,
+    },
     /// Check the environment: pi on PATH, toolbox staged, machine present.
     Doctor,
 }
@@ -104,6 +114,7 @@ fn try_main() -> anyhow::Result<()> {
         } => commands::run(paths, max_transitions, true, verbose),
         Command::Status { json } => commands::status(paths, json),
         Command::Logs { n, raw } => commands::logs(paths, n, raw),
+        Command::Session { state, latest } => commands::session(paths, state, latest),
         Command::Doctor => commands::doctor(paths),
     }
 }

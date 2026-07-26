@@ -51,7 +51,7 @@ pub(crate) fn summarize(e: &Event) -> String {
     }
 }
 
-fn truncate(s: &str, n: usize) -> String {
+pub fn truncate(s: &str, n: usize) -> String {
     let one_line = s.replace('\n', " ");
     if one_line.chars().count() <= n {
         one_line

@@ -344,6 +344,18 @@ Note that `LOOP_STATE_DIR` does **not** move it. The ledger always lives beside 
 | `note` | `text` | 3 crashes → escalating; otherwise a human annotation slot |
 | `run_finished` | `status` (`done`\|`failed`\|`aborted`), `terminal_state`, `totals{cost_usd,wallclock_s,transitions}` | terminal |
 
+### The ledger is a record, not a transcript
+
+Two different things are being kept, and it matters which one you are reading.
+
+The **ledger** is loop's own concise account of the run: decisions, evidence, spend. `worker_output.summary` is the Worker's digest of its own turn, not a log of it — the fields above are the whole schema, and there is deliberately no room in them for messages or tool calls.
+
+The **transcript** is pi's. Every Worker spawn gets `--session-id <ticket>-<state>-<cycle>-<attempt>` (see [Worker](#worker)), and pi persists that session with the assistant messages, tool calls, tool results, commands, usage, and branching in it. `state_entered.session_id` is the only link between the two, and it is the entire reason it is on the line: loop stores the id so it never has to store the history.
+
+Judge and Navigator spawns are sessionless on purpose (`--no-session`) — an independent verdict that leaves a resumable session behind is one more thing to accidentally continue — so they have no `session_id` and cannot be reopened.
+
+`loop session` is how you cross from one to the other.
+
 Every line also carries `elapsed_s`: the run's accumulated wallclock at the moment it was written, summed across every process that has driven this ledger. That is what lets `loop resume` keep counting instead of handing the run a fresh time budget — `ts` alone cannot, since the gap between an interrupted run and its resume is time during which nothing was running.
 
 **Durability.** The file is opened once with append mode and held open. Each append stamps `ts` and `elapsed_s`, writes the line and its newline in a single `write_all`, then `sync_data()` — an fsync per event. Lines are never rewritten. A power cut loses at most the event currently being written.
@@ -436,6 +448,56 @@ loop logs --raw | jq '…'
 ```
 
 Raw mode emits the entire repaired ledger as JSONL, byte-for-byte, with no heading or status text. It is the path-independent replacement for reading `.loop/ledger.jsonl` directly; an empty ledger emits zero bytes. `--raw` and an explicit `-n` cannot be combined.
+
+### `loop session`
+
+```
+loop session                          # picker over every Worker attempt
+loop session implement                # picker, filtered to that exact state
+loop session implement --latest       # newest implement attempt, no picker
+loop session --latest                 # newest Worker attempt, no picker
+```
+
+Reopens a Worker's pi session. `status` and the ledger tell you what was decided; this is how you read what was actually said.
+
+It reads nothing but the ledger. Every candidate is a `state_entered` with a non-empty `session_id`; the command then runs `pi --session <id>` in the project directory and hands over stdin, stdout, and stderr untouched. No machine, no toolbox, and no staged prompts are required — a mid-edit `machine.fnl` is often exactly when you want this.
+
+**The picker is the normal path.** The ids are `<ticket>-<state>-<cycle>-<attempt>`: findable by a program, not memorable by a person. So you pick a row instead, newest-first:
+
+```
+implement — cycle 2, attempt 1 — 2026-07-26 12:04 — finished
+  Added the retry guard and updated the tests. · claude-sonnet-5:high · $0.11 · 1 artifact
+```
+
+The first line is the identity — state, cycle, attempt, timestamp, outcome. When a machine happens to load, its state description is appended; the state id stays regardless, so rows never collapse into each other. The second line is the evidence: the Worker's own summary, or the recorded error, or a note that neither exists, then what ran the attempt and what it cost.
+
+Controls: type to fuzzy-filter, `↑`/`↓` to move, `Ctrl+O` to change mode, `Enter` to open, `Esc`/`Ctrl+C` to cancel without launching anything. `Ctrl+O` cycles three candidate sets, named in the header:
+
+| Mode               | Shows                                     |
+| ------------------ | ----------------------------------------- |
+| `All attempts`     | every `state_entered` with a session id   |
+| `Latest per state` | the newest attempt for each exact state   |
+| `Incomplete`       | attempts with no matching `worker_output` |
+
+An optional positional state is an **exact prefilter** — `implement` never matches `implement-hotfix` — and it stays in force in all three modes. Search covers the visible row text and deliberately _not_ the session id: an opaque key should never be something a query has to name.
+
+Three things it will not do quietly:
+
+- **Choose without a terminal.** Without `--latest`, both stdin and stdout must be TTYs. A piped invocation fails with a hint rather than picking for you.
+- **Hide a missing session.** It passes `--session`, not `--session-id`, so a session pi no longer holds is an error. `--session-id` would create an empty replacement under the same id, which looks identical to a Worker that did nothing.
+- **Pretend an attempt finished.** An attempt with no `worker_output` still opens — that is precisely the transcript you want after a crash — but it warns on stderr first, because the session may also still be running.
+
+The three outcome labels are evidence, read off the attempt's ledger episode (its own `state_entered` up to the next one, since `worker_output` carries no attempt field):
+
+| Label        | Means                                              |
+| ------------ | -------------------------------------------------- |
+| `finished`   | a matching `worker_output` landed                  |
+| `crashed`    | no `worker_output`, but an `error` in the episode  |
+| `incomplete` | neither — still running, or killed without a trace |
+
+Nothing here is written: loop neither parses nor mutates pi's session files, and never copies a transcript into `.loop/`. For what the sessions themselves contain and how to navigate one once it is open, see pi's own session documentation.
+
+`--latest` selects the last usable candidate in reverse ledger order after the prefilter. There is no `--cycle` or `--attempt`: reaching further back is what the picker is for.
 
 ### `loop diagram`
 

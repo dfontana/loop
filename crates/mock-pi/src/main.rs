@@ -80,6 +80,24 @@
 //! prints an error to stderr and exits 1 (emitting no stdout at all) — that
 //! is a harness misconfiguration, not something `parse_stream` needs to
 //! tolerate.
+//!
+//! # The session store
+//!
+//! `loop session` does not spawn a stage; it reopens one, with
+//! `pi --session <id>` and nothing else. Modelling that needs a store rather
+//! than a script, so two more variables (both optional, both ignored unless
+//! set) stand in for pi's own session directory:
+//!
+//! - `LOOP_MOCK_SESSIONS` — a directory. A spawn given `--session-id <id>`
+//!   records `<dir>/<id>.jsonl`; a spawn given `--session <id>` requires it and
+//!   **exits 1 if it is absent**, which is exactly why loop passes `--session`:
+//!   reopening history that is gone must fail rather than silently create an
+//!   empty session under the same id.
+//! - `LOOP_MOCK_ARGV_LOG` — a file. Every `--session` invocation appends one
+//!   JSON line, `{"argv": [...], "cwd": "..."}`, so a test can assert on the
+//!   argv and working directory a real pi would have received.
+//!
+//! With neither set, `--session <id>` is a successful no-op.
 
 use std::collections::BTreeSet;
 use std::io::Write;
@@ -460,9 +478,67 @@ fn run_stream<W: Write>(out: W, role: &str, inv: &Invocation, step: &Step) -> Ex
     ExitCode::SUCCESS
 }
 
+/// The value following `flag` in `argv`, if present.
+fn flag_value(argv: &[String], flag: &str) -> Option<String> {
+    argv.iter()
+        .position(|a| a == flag)
+        .and_then(|i| argv.get(i + 1))
+        .cloned()
+}
+
+fn session_file(id: &str) -> Option<PathBuf> {
+    env_str("LOOP_MOCK_SESSIONS").map(|dir| PathBuf::from(dir).join(format!("{id}.jsonl")))
+}
+
+/// `pi --session <id>`: reopen a persisted session interactively.
+///
+/// No stream, no script — the whole point of `loop session` is that this process
+/// inherits the terminal and takes over, so there is nothing for the harness to
+/// parse. All mock-pi has to be faithful about is the two observable facts loop
+/// depends on: what it was called with, and that a vanished session fails.
+fn reopen_session(argv: &[String], id: &str) -> ExitCode {
+    let cwd = std::env::current_dir().unwrap_or_default();
+    if let Some(log) = env_str("LOOP_MOCK_ARGV_LOG") {
+        let line = json!({"argv": argv, "cwd": cwd}).to_string();
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log)
+        {
+            let _ = writeln!(f, "{line}");
+        }
+    }
+
+    if let Some(path) = session_file(id) {
+        if !path.exists() {
+            eprintln!("mock-pi: no session named {id}");
+            return ExitCode::from(1);
+        }
+    }
+    println!("mock-pi: reopened session {id}");
+    ExitCode::SUCCESS
+}
+
 fn main() -> ExitCode {
-    // Accept (and ignore) every real pi flag: we drive entirely off env vars.
-    let _ = std::env::args();
+    // Accept (and ignore) every real pi flag: we drive entirely off env vars —
+    // except the two that identify a session, which have no env equivalent.
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+
+    if let Some(id) = flag_value(&argv, "--session") {
+        return reopen_session(&argv, &id);
+    }
+    // A stage spawn: leave a session behind for `loop session` to reopen later.
+    if let (Some(id), Some(_)) = (
+        flag_value(&argv, "--session-id"),
+        env_str("LOOP_MOCK_SESSIONS"),
+    ) {
+        if let Some(path) = session_file(&id) {
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let _ = std::fs::write(&path, format!("{{\"id\":{id:?}}}\n"));
+        }
+    }
 
     let role = env_str("LOOP_MOCK_ROLE").unwrap_or_else(|| "worker".to_string());
     let inv = Invocation {
@@ -628,6 +704,24 @@ mod tests {
             }
         }
         assert!(saw_transition);
+    }
+
+    /// `--session` and `--session-id` differ by four characters and mean
+    /// opposite things (reopen vs. create), so the lookup has to be exact.
+    #[test]
+    fn flag_value_reads_the_exact_flag_not_a_prefix_of_it() {
+        let argv: Vec<String> = ["--print", "--session-id", "abc", "--model", "m"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(flag_value(&argv, "--session-id").as_deref(), Some("abc"));
+        assert_eq!(flag_value(&argv, "--session"), None);
+
+        let reopen: Vec<String> = vec!["--session".into(), "abc".into()];
+        assert_eq!(flag_value(&reopen, "--session").as_deref(), Some("abc"));
+        assert_eq!(flag_value(&reopen, "--session-id"), None);
+        // A trailing flag with nothing after it is not a value.
+        assert_eq!(flag_value(&["--session".to_string()], "--session"), None);
     }
 
     #[test]
