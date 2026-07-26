@@ -18,9 +18,11 @@ use loop_core::{
     NavigatorSpec, Result, Verdict, WorkerResult, WorkerSpec,
 };
 
+pub mod check;
 pub mod command;
 pub mod stream;
 
+pub use check::exec_check;
 pub use stream::{StreamOutcome, parse_stream};
 
 /// Spawns real `pi` subprocesses.

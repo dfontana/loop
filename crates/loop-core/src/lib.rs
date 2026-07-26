@@ -23,11 +23,12 @@ pub use event::{
 };
 pub use fold::{FoldStatus, ResumePoint, RunState, fold, fold_with_loop_heads};
 pub use machine::{
-    Budgets, Defaults, LoopSpec, Machine, ModelChoice, ModelSpec, OnExhausted, OnFail, PlaybookRef,
-    QaCase, State, StateId, Thinking, Transition, TransitionMode,
+    Budgets, Check, DEFAULT_CHECK_TIMEOUT_S, Defaults, LoopSpec, Machine, ModelChoice, ModelSpec,
+    OnExhausted, OnFail, PlaybookRef, QaCase, State, StateId, Thinking, Transition, TransitionMode,
 };
 pub use runner::{
-    AgentRunner, Choice, JudgeSpec, NavigatorSpec, Proposal, Verdict, WorkerResult, WorkerSpec,
+    AgentRunner, CheckOutcome, CheckRunner, Choice, JudgeSpec, NavigatorSpec, Proposal, Verdict,
+    WorkerResult, WorkerSpec,
 };
 pub use sink::{ArtifactSink, LedgerSink};
 

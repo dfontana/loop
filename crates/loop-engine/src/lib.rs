@@ -12,8 +12,8 @@
 //! TASK T5 implements this crate, plus `loop_core::fold`.
 
 use loop_core::{
-    AgentRunner, ArtifactRef, ArtifactSink, Config, ErrorKind, Event, EventPayload, FoldStatus,
-    GuardOutcome, LedgerSink, LoopSpec, Machine, OnExhausted, OnFail, Proposal, Result,
+    AgentRunner, ArtifactRef, ArtifactSink, CheckRunner, Config, ErrorKind, Event, EventPayload,
+    FoldStatus, GuardOutcome, LedgerSink, LoopSpec, Machine, OnExhausted, OnFail, Proposal, Result,
     ResumePoint, RunState, RunStatus, StateId, Totals, Transition, fold_with_loop_heads,
 };
 
@@ -38,6 +38,9 @@ pub struct Engine<'a> {
     pub machine: &'a Machine,
     pub config: &'a Config,
     pub runner: &'a dyn AgentRunner,
+    /// Runs a transition's deterministic check — the harness acting for
+    /// itself, with no agent in the path.
+    pub checks: &'a dyn CheckRunner,
     pub ledger: &'a mut dyn LedgerSink,
     pub artifacts: &'a dyn ArtifactSink,
     /// Renders prompts and assembles spawn specs. Implemented in the CLI over
@@ -134,6 +137,18 @@ impl Engine<'_> {
     fn fold(&self, events: &[Event]) -> RunState {
         let is_loop_head = |s: &str| self.machine.loop_with_head(s).is_some();
         fold_with_loop_heads(events, &is_loop_head)
+    }
+
+    /// The `(cycle, attempt)` a state is currently on — the same numbers
+    /// [`Self::enter_state`] stamped on `state_entered`, so a check runs with
+    /// the identity of the stage that just finished.
+    fn position_of(&self, rs: &RunState, state: &str) -> (u32, u32) {
+        let cycle = if self.machine.loop_with_head(state).is_some() {
+            rs.cycle_of(state).max(1)
+        } else {
+            1
+        };
+        (cycle, rs.attempts_of(state, cycle).max(1))
     }
 
     fn elapsed_s(&self) -> u64 {
@@ -393,7 +408,9 @@ impl Engine<'_> {
                     from: from.to_string(),
                     to: target.clone(),
                     structural: GuardOutcome::Fail,
+                    check: GuardOutcome::Skip,
                     criteria: GuardOutcome::Skip,
+                    check_output: None,
                     judge_rationale: None,
                 })?;
                 return self.escalate(rs, from);
@@ -402,24 +419,31 @@ impl Engine<'_> {
 
         let events = self.ledger.read_all()?;
         let (worker_summary, worker_artifacts) = last_worker_output_for(&events, from);
+        let (cycle, attempt) = self.position_of(rs, from);
 
-        let judge_spec = match &edge.criteria {
-            Some(criteria_text) => Some(self.stage.build_judge(
-                criteria_text,
-                &worker_summary,
-                &worker_artifacts,
-            )?),
-            None => None,
-        };
-        let report = guard_check(self.runner, &edge, |_criteria| {
-            judge_spec.expect("check() only calls judge() when criteria is Some")
-        })?;
+        // The Judge spec is built *after* the check runs so the verdict can be
+        // grounded in what the check printed. Borrow `stage` out of `self`
+        // first — the closure runs while `self.ledger` is still live.
+        let stage = self.stage;
+        let report = guard_check(
+            self.runner,
+            self.checks,
+            &edge,
+            &from.to_string(),
+            cycle,
+            attempt,
+            |criteria, check_output| {
+                stage.build_judge(criteria, &worker_summary, &worker_artifacts, check_output)
+            },
+        )?;
 
         self.ledger.append(EventPayload::GuardChecked {
             from: from.to_string(),
             to: target.clone(),
             structural: report.structural,
+            check: report.check,
             criteria: report.criteria,
+            check_output: report.check_output.clone(),
             judge_rationale: report.judge_rationale.clone(),
         })?;
 

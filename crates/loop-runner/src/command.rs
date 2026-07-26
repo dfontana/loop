@@ -120,6 +120,17 @@ fn judge_message(spec: &JudgeSpec) -> String {
             message.push_str(&format!("- {}\n", p.display()));
         }
     }
+    // Labelled as the harness's own, because that is exactly what makes it
+    // worth more than everything above it: the digest and the artifacts came
+    // from the worker, this did not.
+    if let Some(output) = &spec.check_output {
+        message.push_str(
+            "\n\nOutput of the harness's own check for this transition (the worker did not \
+             produce this, and it exited zero):\n```\n",
+        );
+        message.push_str(output);
+        message.push_str("\n```\n");
+    }
     message
 }
 
@@ -282,6 +293,7 @@ mod tests {
             criteria: "All three checklist items must be present.".into(),
             worker_digest: "Added churn_score column; build green.".into(),
             artifact_paths: vec![PathBuf::from(".loop/artifacts/implement-1-diff.patch")],
+            check_output: None,
             model: ModelSpec {
                 provider: "anthropic".into(),
                 model: "claude-haiku-4-5".into(),
@@ -311,6 +323,29 @@ mod tests {
         assert_eq!(args[e_positions[0] + 1], "/tmp/ext/verdict-tool.ts");
         assert!(!args.contains(&"--tools".to_string()));
         assert!(args.contains(&"--no-session".to_string()));
+    }
+
+    /// The check's output is the only evidence in the Judge's message the
+    /// worker did not author, so it has to arrive labelled as such rather than
+    /// blended into the digest.
+    #[test]
+    fn judge_message_labels_check_output_as_the_harnesss_own() {
+        let spec = JudgeSpec {
+            check_output: Some("test result: ok. 41 passed".into()),
+            ..judge_spec()
+        };
+        let message = judge_message(&spec);
+        assert!(message.contains("test result: ok. 41 passed"));
+        assert!(
+            message.contains("the worker did not produce this"),
+            "got: {message}"
+        );
+    }
+
+    #[test]
+    fn judge_message_omits_the_check_block_when_there_is_no_check() {
+        let message = judge_message(&judge_spec());
+        assert!(!message.contains("harness's own check"), "got: {message}");
     }
 
     #[test]

@@ -166,12 +166,47 @@ pub enum OnFail {
     Route(StateId),
 }
 
-/// An edge. Two guard tiers, checked cheapest-first: structural (does this edge
-/// exist) and `criteria` (an LLM Judge).
+/// A deterministic check the **harness** runs for itself before letting a
+/// transition through.
+///
+/// This is the one signal in the system a worker cannot author. It is not run
+/// by the agent, not routed through the agent's session, and not scraped off
+/// the agent's transcript: the CLI shells out, and the exit code decides.
+/// Anything the worker touches — its summary, its claimed artifacts, its
+/// proposal — is evidence for the Judge to weigh, never a gate on its own.
+///
+/// Exit 0 passes. Any other exit fails the edge, and `on_fail` decides what
+/// happens next. Combined stdout/stderr is recorded on the `guard_checked`
+/// event and handed to the Judge, so a criterion can be phrased against what
+/// the check actually printed.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Check {
+    /// Run via `bash -c` in the project root. `$UPPER_SNAKE` context
+    /// placeholders are substituted before it runs.
+    pub cmd: String,
+    pub timeout_s: u64,
+}
+
+/// The default check timeout, matching the `scoped-tools` convention.
+pub const DEFAULT_CHECK_TIMEOUT_S: u64 = 120;
+
+impl Check {
+    pub fn new(cmd: impl Into<String>) -> Self {
+        Self {
+            cmd: cmd.into(),
+            timeout_s: DEFAULT_CHECK_TIMEOUT_S,
+        }
+    }
+}
+
+/// An edge. Three guard tiers, checked cheapest-first: structural (does this
+/// edge exist), `check` (a deterministic command the harness runs), and
+/// `criteria` (an LLM Judge).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Transition {
     pub from: StateId,
     pub to: StateId,
+    pub check: Option<Check>,
     pub criteria: Option<String>,
     pub on_fail: OnFail,
     /// Sleep this long before re-entering the target (transient retry self-loops).

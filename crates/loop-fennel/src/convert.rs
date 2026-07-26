@@ -75,9 +75,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use loop_core::{
-    Budgets, Config, ContextMode, CoreError, Defaults, LoopSpec, Machine, ModelChoice, ModelSpec,
-    OnExhausted, OnFail, PlaybookRef, QaCase, Result, State, StateId, Thinking, Transition,
-    TransitionMode,
+    Budgets, Check, Config, ContextMode, CoreError, DEFAULT_CHECK_TIMEOUT_S, Defaults, LoopSpec,
+    Machine, ModelChoice, ModelSpec, OnExhausted, OnFail, PlaybookRef, QaCase, Result, State,
+    StateId, Thinking, Transition, TransitionMode,
 };
 
 // ── small Lua table readers ────────────────────────────────────────────────
@@ -417,6 +417,41 @@ fn parse_budgets(table: &mlua::Table) -> Result<Budgets> {
     }
 }
 
+/// `:check` is either a bare command string or a `{:cmd .. :timeout-s ..}`
+/// table. The bare form is the common case, so it stays a one-liner.
+fn parse_check(t: &mlua::Table, ctx: &str) -> Result<Option<Check>> {
+    match get_value(t, "check")? {
+        mlua::Value::Nil => Ok(None),
+        mlua::Value::String(s) => {
+            let cmd = s.to_str().map(|s| s.to_string()).map_err(|e| {
+                CoreError::machine(format!("{ctx}: `:check` is not valid UTF-8: {e}"))
+            })?;
+            check_from_parts(cmd, None, ctx)
+        }
+        mlua::Value::Table(inner) => {
+            let cmd = require_str(&inner, "cmd", ctx)?;
+            let timeout_s = get_u64(&inner, "timeout-s")?;
+            check_from_parts(cmd, timeout_s, ctx)
+        }
+        other => Err(CoreError::machine(format!(
+            "{ctx}: `:check` must be a command string or a `{{:cmd ..}}` table, got {}",
+            other.type_name()
+        ))),
+    }
+}
+
+fn check_from_parts(cmd: String, timeout_s: Option<u64>, ctx: &str) -> Result<Option<Check>> {
+    if cmd.trim().is_empty() {
+        return Err(CoreError::machine(format!(
+            "{ctx}: `:check` command is empty — omit the key instead"
+        )));
+    }
+    Ok(Some(Check {
+        cmd,
+        timeout_s: timeout_s.unwrap_or(DEFAULT_CHECK_TIMEOUT_S),
+    }))
+}
+
 fn parse_transitions(table: &mlua::Table) -> Result<Vec<Transition>> {
     let mut out = Vec::new();
     let Some(arr) = get_table(table, "transitions")? else {
@@ -440,16 +475,18 @@ fn parse_transitions(table: &mlua::Table) -> Result<Vec<Transition>> {
         // say so rather than ignoring the key and silently unguarding an edge.
         if !matches!(get_value(&t, "when")?, mlua::Value::Nil) {
             return Err(CoreError::machine(format!(
-                "{ctx}: `:when` guards were removed — express the condition as \
-                 `:criteria` for the Judge to evaluate"
+                "{ctx}: `:when` guards were removed — express the condition as a `:check` \
+                 command the harness runs, or as `:criteria` for the Judge to evaluate"
             )));
         }
+        let check = parse_check(&t, &ctx)?;
         let criteria = get_str(&t, "criteria")?;
         let on_fail = parse_on_fail(get_value(&t, "on-fail")?, &ctx)?;
         let backoff_s = get_u64(&t, "backoff-s")?;
         out.push(Transition {
             from,
             to,
+            check,
             criteria,
             on_fail,
             backoff_s,

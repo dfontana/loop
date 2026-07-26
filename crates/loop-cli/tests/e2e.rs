@@ -314,6 +314,57 @@ fn validate_reports_a_fennel_syntax_error_against_the_source_file() {
     );
 }
 
+/// The check tier, end to end through the real binary: a real `bash`
+/// subprocess the harness spawns for itself, whose exit code overrules a
+/// worker that claims success. Nothing else in the system can do this — every
+/// other signal reaching a guard passed through the worker's session first.
+#[test]
+fn a_failing_check_overrules_a_worker_that_claims_success() {
+    let fx = Fixture::new(
+        r#"{"steps":[
+          {"match":{"role":"worker","state":"implement"},"summary":"all green, promise",
+           "transition":{"to":"done","rationale":"finished"},"repeat":true},
+          {"match":{"role":"judge"},"verdict":{"pass":true,"rationale":"looks fine"},"repeat":true}
+        ]}"#,
+    );
+    fx.run(&["init", "TINY-1"]);
+    // `marker.txt` does not exist, so the check exits non-zero — the worker's
+    // claim and the Judge's blessing both count for nothing.
+    fx.machine(&TINY_MACHINE.replace(
+        r#":criteria "The work is done.""#,
+        r#":check "test -f marker.txt" :criteria "The work is done." :on-fail "abort""#,
+    ));
+
+    let run = fx.run(&["run"]);
+    assert!(!run.status.success(), "a failed check must fail the run");
+
+    let events = fx.ledger();
+    let guard = events
+        .iter()
+        .find(|e| e["type"] == "guard_checked")
+        .expect("a guard_checked line");
+    assert_eq!(guard["check"], "fail");
+    assert_eq!(
+        guard["criteria"], "skip",
+        "a failed check must not be appealable to the Judge"
+    );
+
+    // And with the file present, the same machine and the same script pass.
+    std::fs::write(fx.project.join("marker.txt"), "x").unwrap();
+    std::fs::remove_file(fx.project.join(".loop/ledger.jsonl")).unwrap();
+    let _ = std::fs::remove_file(fx.script.with_extension("json.consumed.json"));
+
+    let rerun = fx.run(&["run"]);
+    assert!(rerun.status.success(), "rerun failed: {}", combined(&rerun));
+    let guard = fx
+        .ledger()
+        .into_iter()
+        .find(|e| e["type"] == "guard_checked")
+        .expect("a guard_checked line");
+    assert_eq!(guard["check"], "pass");
+    assert_eq!(guard["criteria"], "pass");
+}
+
 /// A two-state machine with no toolbox dependencies, for the tests that care
 /// about harness mechanics rather than the shipped template's shape.
 const TINY_MACHINE: &str = r#"

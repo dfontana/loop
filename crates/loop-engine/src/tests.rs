@@ -16,6 +16,15 @@ fn config() -> Config {
 }
 
 fn run(machine: &loop_core::Machine, runner: &FakeRunner, ledger: &mut FakeLedger) -> Outcome {
+    run_with_checks(machine, runner, &FakeChecks::default(), ledger)
+}
+
+fn run_with_checks(
+    machine: &loop_core::Machine,
+    runner: &FakeRunner,
+    checks: &FakeChecks,
+    ledger: &mut FakeLedger,
+) -> Outcome {
     let cfg = config();
     let artifacts = FakeArtifacts;
     let stage = FakeStageBuilder { machine };
@@ -23,6 +32,7 @@ fn run(machine: &loop_core::Machine, runner: &FakeRunner, ledger: &mut FakeLedge
         machine,
         config: &cfg,
         runner,
+        checks,
         ledger,
         artifacts: &artifacts,
         stage: &stage,
@@ -212,6 +222,170 @@ fn on_fail_abort_finishes_run_failed() {
 
     assert_eq!(outcome.status, RunStatus::Failed);
     assert_eq!(outcome.terminal_state.as_deref(), Some("implement"));
+}
+
+// ── the check tier ───────────────────────────────────────────────────────
+
+/// The whole point of the tier: the check runs in the harness's own
+/// subprocess, and its exit code decides. Nothing the worker said is consulted.
+#[test]
+fn a_failing_check_blocks_the_edge_and_never_reaches_the_judge() {
+    let mut m = base_machine();
+    m.entry = "implement".into();
+    m.terminals.insert("done".into());
+    m.states.insert("implement".into(), state("implement"));
+    m.transitions.push(loop_core::Transition {
+        criteria: Some("the plan is done".into()),
+        on_fail: OnFail::Abort,
+        ..checked_edge("implement", "done", "cargo test")
+    });
+
+    let runner = FakeRunner::default();
+    runner.script_worker(
+        "implement",
+        worker_result(proposal_to("done", "all green, promise")),
+    );
+    let checks = FakeChecks::default();
+    checks.script_fail("2 tests failed");
+
+    let mut ledger = FakeLedger::default();
+    let outcome = run_with_checks(&m, &runner, &checks, &mut ledger);
+
+    assert_eq!(outcome.status, RunStatus::Failed);
+    assert_eq!(
+        runner.judge_calls.borrow().len(),
+        0,
+        "a failed check must not be appealable to the Judge"
+    );
+
+    match ledger.payloads_of("guard_checked")[0] {
+        loop_core::EventPayload::GuardChecked {
+            check,
+            criteria,
+            check_output,
+            ..
+        } => {
+            assert_eq!(*check, loop_core::GuardOutcome::Fail);
+            assert_eq!(*criteria, loop_core::GuardOutcome::Skip);
+            assert_eq!(check_output.as_deref(), Some("2 tests failed"));
+        }
+        _ => unreachable!(),
+    }
+}
+
+/// A passing check does not by itself pass the edge — it is a precondition,
+/// and the semantic criterion still gets its say.
+#[test]
+fn a_passing_check_still_defers_to_the_judge_and_hands_it_the_output() {
+    let mut m = base_machine();
+    m.entry = "implement".into();
+    m.terminals.insert("done".into());
+    m.states.insert("implement".into(), state("implement"));
+    m.transitions.push(loop_core::Transition {
+        criteria: Some("every plan item is addressed".into()),
+        on_fail: OnFail::Abort,
+        ..checked_edge("implement", "done", "cargo test")
+    });
+
+    let runner = FakeRunner::default();
+    runner.script_worker("implement", worker_result(proposal_to("done", "done")));
+    runner.script_judge(verdict(false, "item 3 was never touched"));
+    let checks = FakeChecks::default();
+    checks.script_pass("test result: ok. 41 passed");
+
+    let mut ledger = FakeLedger::default();
+    let outcome = run_with_checks(&m, &runner, &checks, &mut ledger);
+
+    assert_eq!(outcome.status, RunStatus::Failed);
+    assert_eq!(
+        runner.judge_calls.borrow()[0].check_output.as_deref(),
+        Some("test result: ok. 41 passed"),
+        "the Judge must see the one piece of evidence the worker didn't author"
+    );
+    match ledger.payloads_of("guard_checked")[0] {
+        loop_core::EventPayload::GuardChecked {
+            check, criteria, ..
+        } => {
+            assert_eq!(*check, loop_core::GuardOutcome::Pass);
+            assert_eq!(*criteria, loop_core::GuardOutcome::Fail);
+        }
+        _ => unreachable!(),
+    }
+}
+
+/// An edge with no `:check` skips the tier entirely — no subprocess, no
+/// spurious `check_output` on the ledger line.
+#[test]
+fn an_edge_without_a_check_skips_the_tier() {
+    let mut m = base_machine();
+    m.entry = "implement".into();
+    m.terminals.insert("done".into());
+    m.states.insert("implement".into(), state("implement"));
+    m.transitions
+        .push(judged_edge("implement", "done", "the plan is done"));
+
+    let runner = FakeRunner::default();
+    runner.script_worker("implement", worker_result(proposal_to("done", "done")));
+    runner.script_judge(verdict(true, "checklist covered"));
+    let checks = FakeChecks::default();
+
+    let mut ledger = FakeLedger::default();
+    let outcome = run_with_checks(&m, &runner, &checks, &mut ledger);
+
+    assert_eq!(outcome.status, RunStatus::Done);
+    assert!(checks.commands().is_empty());
+    match ledger.payloads_of("guard_checked")[0] {
+        loop_core::EventPayload::GuardChecked {
+            check,
+            check_output,
+            ..
+        } => {
+            assert_eq!(*check, loop_core::GuardOutcome::Skip);
+            assert!(check_output.is_none());
+        }
+        _ => unreachable!(),
+    }
+}
+
+/// The check runs with the identity of the stage that just finished, so a
+/// cycle-scoped command inspects the namespace that stage actually deployed to.
+#[test]
+fn a_check_runs_with_the_finishing_stages_cycle_and_attempt() {
+    let mut m = base_machine();
+    m.entry = "start".into();
+    m.terminals.insert("done".into());
+    m.states.insert("start".into(), state("start"));
+    m.states.insert("qa".into(), state("qa"));
+    m.transitions.push(edge("start", "qa"));
+    m.transitions.push(loop_core::Transition {
+        backoff_s: Some(0),
+        ..checked_edge("qa", "qa", "contract-check --ns loop-$CYCLE")
+    });
+    m.transitions
+        .push(checked_edge("qa", "done", "contract-check --final"));
+    m.loops
+        .push(loop_spec("qa", &["qa"], 4, OnExhausted::Escalate));
+
+    let runner = FakeRunner::default();
+    runner.script_worker("start", worker_result(proposal_to("qa", "go")));
+    runner.script_worker("qa", worker_result(proposal_to("qa", "flaky, retry")));
+    runner.script_worker("qa", worker_result(proposal_to("done", "green")));
+    let checks = FakeChecks::default();
+
+    let mut ledger = FakeLedger::default();
+    let outcome = run_with_checks(&m, &runner, &checks, &mut ledger);
+    assert_eq!(outcome.status, RunStatus::Done);
+
+    let ran = checks.ran.borrow();
+    let positions: Vec<(String, u32)> = ran
+        .iter()
+        .map(|(_, from, cycle, _)| (from.clone(), *cycle))
+        .collect();
+    assert_eq!(
+        positions,
+        vec![("qa".to_string(), 1), ("qa".to_string(), 2)],
+        "the self-loop's second check runs on cycle 2, not cycle 1"
+    );
 }
 
 // ── select_edge ─────────────────────────────────────────────────────────
@@ -493,10 +667,12 @@ fn wallclock_budget_aborts() {
     let cfg = config();
     let artifacts = FakeArtifacts;
     let stage = FakeStageBuilder { machine: &m };
+    let checks = FakeChecks::default();
     let mut engine = Engine {
         machine: &m,
         config: &cfg,
         runner: &runner,
+        checks: &checks,
         ledger: &mut ledger,
         artifacts: &artifacts,
         stage: &stage,

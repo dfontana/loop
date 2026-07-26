@@ -310,7 +310,9 @@ mod tests {
             from: from.into(),
             to: to.into(),
             structural: GuardOutcome::Pass,
+            check: GuardOutcome::Skip,
             criteria: GuardOutcome::Skip,
+            check_output: None,
             judge_rationale: None,
         })
     }

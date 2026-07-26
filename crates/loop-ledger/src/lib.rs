@@ -274,7 +274,9 @@ mod tests {
                 from: "implement".into(),
                 to: "review".into(),
                 structural: GuardOutcome::Pass,
+                check: GuardOutcome::Pass,
                 criteria: GuardOutcome::Pass,
+                check_output: Some("build: OK".into()),
                 judge_rationale: Some("Looks fine.".into()),
             },
             EventPayload::NavigatorInvoked {

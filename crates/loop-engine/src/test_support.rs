@@ -7,10 +7,11 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::path::PathBuf;
 
 use loop_core::{
-    AgentRunner, ArtifactClaim, ArtifactRef, ArtifactSink, Budgets, Choice, Context, CoreError,
-    Defaults, Event, EventPayload, JudgeSpec, LoopSpec, Machine, ModelChoice, ModelSpec,
-    NavigatorSpec, OnExhausted, OnFail, PlaybookRef, Proposal, QaCase, Result, State, StateId,
-    Thinking, Totals, Transition, TransitionMode, Usage, Verdict, WorkerResult, WorkerSpec,
+    AgentRunner, ArtifactClaim, ArtifactRef, ArtifactSink, Budgets, Check, CheckOutcome,
+    CheckRunner, Choice, Context, CoreError, Defaults, Event, EventPayload, JudgeSpec, LoopSpec,
+    Machine, ModelChoice, ModelSpec, NavigatorSpec, OnExhausted, OnFail, PlaybookRef, Proposal,
+    QaCase, Result, State, StateId, Thinking, Totals, Transition, TransitionMode, Usage, Verdict,
+    WorkerResult, WorkerSpec,
 };
 
 use crate::prompts::{StageBuilder, StagePlan};
@@ -74,6 +75,7 @@ pub fn edge(from: &str, to: &str) -> Transition {
     Transition {
         from: from.into(),
         to: to.into(),
+        check: None,
         criteria: None,
         on_fail: OnFail::default(),
         backoff_s: None,
@@ -83,6 +85,14 @@ pub fn edge(from: &str, to: &str) -> Transition {
 pub fn judged_edge(from: &str, to: &str, criteria: &str) -> Transition {
     Transition {
         criteria: Some(criteria.into()),
+        ..edge(from, to)
+    }
+}
+
+/// An edge gated by a deterministic check the harness runs.
+pub fn checked_edge(from: &str, to: &str, cmd: &str) -> Transition {
+    Transition {
+        check: Some(Check::new(cmd)),
         ..edge(from, to)
     }
 }
@@ -98,6 +108,68 @@ pub fn loop_spec(
         states: states.iter().map(|s| s.to_string()).collect(),
         max_cycles,
         on_exhausted,
+    }
+}
+
+// ── CheckRunner fake ──────────────────────────────────────────────────────
+
+/// Scriptable stand-in for the harness's own subprocess. Queued outcomes are
+/// consumed in order; an empty queue passes, which keeps every test that
+/// doesn't care about checks free of setup.
+#[derive(Default)]
+pub struct FakeChecks {
+    queued: RefCell<VecDeque<CheckOutcome>>,
+    /// Every command the engine asked for, in order — so a test can assert the
+    /// check ran at all, and ran with the right substitutions.
+    pub ran: RefCell<Vec<(String, StateId, u32, u32)>>,
+}
+
+impl FakeChecks {
+    pub fn script(&self, outcome: CheckOutcome) {
+        self.queued.borrow_mut().push_back(outcome);
+    }
+
+    pub fn script_pass(&self, output: &str) {
+        self.script(CheckOutcome {
+            passed: true,
+            exit_code: Some(0),
+            output: output.into(),
+        });
+    }
+
+    pub fn script_fail(&self, output: &str) {
+        self.script(CheckOutcome {
+            passed: false,
+            exit_code: Some(1),
+            output: output.into(),
+        });
+    }
+
+    pub fn commands(&self) -> Vec<String> {
+        self.ran.borrow().iter().map(|(c, ..)| c.clone()).collect()
+    }
+}
+
+impl CheckRunner for FakeChecks {
+    fn run_check(
+        &self,
+        check: &Check,
+        from: &StateId,
+        cycle: u32,
+        attempt: u32,
+    ) -> Result<CheckOutcome> {
+        self.ran
+            .borrow_mut()
+            .push((check.cmd.clone(), from.clone(), cycle, attempt));
+        Ok(self
+            .queued
+            .borrow_mut()
+            .pop_front()
+            .unwrap_or(CheckOutcome {
+                passed: true,
+                exit_code: Some(0),
+                output: String::new(),
+            }))
     }
 }
 
@@ -268,8 +340,10 @@ impl<'m> StageBuilder for FakeStageBuilder<'m> {
         criteria: &str,
         worker_summary: &str,
         artifacts: &[ArtifactRef],
+        check_output: Option<&str>,
     ) -> Result<JudgeSpec> {
         Ok(JudgeSpec {
+            check_output: check_output.map(str::to_string),
             criteria: criteria.into(),
             worker_digest: worker_summary.into(),
             artifact_paths: artifacts.iter().map(|a| PathBuf::from(&a.path)).collect(),

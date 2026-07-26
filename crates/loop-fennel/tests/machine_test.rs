@@ -122,6 +122,48 @@ fn missing_entry_with_multiple_states_is_a_clear_error() {
     assert!(matches!(err, loop_core::CoreError::Machine(_)));
 }
 
+/// `:check` accepts a bare command string (the common case) and a
+/// `{:cmd .. :timeout-s ..}` table for the rest.
+#[test]
+fn check_parses_from_both_the_string_and_table_forms() {
+    let vm = common::vm();
+    let config = common::default_config();
+    let path = common::fixture("checks.fnl");
+
+    let machine = vm.load_machine(&path, &config).expect("load_machine");
+
+    let bare = machine.edge("a", "b").expect("edge a->b");
+    let check = bare.check.as_ref().expect("a bare-string check");
+    assert_eq!(check.cmd, "cargo test");
+    assert_eq!(check.timeout_s, loop_core::DEFAULT_CHECK_TIMEOUT_S);
+
+    let table = machine.edge("b", "done").expect("edge b->done");
+    let check = table.check.as_ref().expect("a table check");
+    assert_eq!(check.cmd, "sbt -batch compile");
+    assert_eq!(check.timeout_s, 600);
+
+    assert!(
+        machine
+            .edge("a", "done")
+            .expect("edge a->done")
+            .check
+            .is_none(),
+        "an edge without `:check` carries none"
+    );
+}
+
+/// An empty command would run `bash -c ''`, exit 0, and read as a passing
+/// gate that checks nothing — the most dangerous way for this to fail.
+#[test]
+fn an_empty_check_command_is_rejected() {
+    let vm = common::vm();
+    let config = common::default_config();
+    let path = common::fixture("check_empty.fnl");
+
+    let err = vm.load_machine(&path, &config).unwrap_err();
+    assert!(err.to_string().contains("empty"), "got: {err}");
+}
+
 /// A leftover `:when` must fail the load rather than being ignored — silently
 /// dropping it would leave the edge with no guard at all.
 #[test]

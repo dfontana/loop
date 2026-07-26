@@ -29,11 +29,16 @@ pub trait StageBuilder {
 
     /// Assemble the Judge spawn for a `criteria` guard. The digest passed on
     /// must exclude the worker's own pass/fail claim (docs/07-risks.md #1).
+    ///
+    /// `check_output` is what the edge's deterministic check printed, when it
+    /// has one — the only evidence the Judge gets that the worker had no hand
+    /// in producing.
     fn build_judge(
         &self,
         criteria: &str,
         worker_summary: &str,
         artifacts: &[ArtifactRef],
+        check_output: Option<&str>,
     ) -> Result<JudgeSpec>;
 
     /// Assemble the Navigator spawn, including the graph summary it routes over.

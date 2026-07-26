@@ -33,7 +33,7 @@ impl CliStage<'_> {
         Ledger::open(&self.ledger_path)?.read_all()
     }
 
-    /// The context pack: task, plan, digest, artifacts, vars — the engineered
+    /// The context pack: task, plan, digest, artifacts — the engineered
     /// continuity that replaces shared chat memory between stages.
     fn context(
         &self,
@@ -95,9 +95,19 @@ impl CliStage<'_> {
         }
         out.push_str(&format!("\n## Edges out of `{from}`\n\n"));
         for e in self.machine.edges_from(from) {
-            let guard = match &e.criteria {
-                Some(c) => format!(" (criteria: {})", first_line(c)),
-                None => String::new(),
+            // Both tiers, so the Navigator can see that an edge is gated on a
+            // command it cannot talk its way past, not just on a criterion.
+            let mut guards = Vec::new();
+            if let Some(c) = &e.check {
+                guards.push(format!("check: `{}`", first_line(&c.cmd)));
+            }
+            if let Some(c) = &e.criteria {
+                guards.push(format!("criteria: {}", first_line(c)));
+            }
+            let guard = if guards.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", guards.join("; "))
             };
             out.push_str(&format!("- `{from}` → `{}`{guard}\n", e.to));
         }
@@ -176,6 +186,7 @@ impl StageBuilder for CliStage<'_> {
         criteria: &str,
         worker_summary: &str,
         artifacts: &[ArtifactRef],
+        check_output: Option<&str>,
     ) -> Result<JudgeSpec> {
         Ok(JudgeSpec {
             criteria: criteria.to_string(),
@@ -184,6 +195,7 @@ impl StageBuilder for CliStage<'_> {
                 .iter()
                 .map(|a| self.config.paths.project_dir.join(&a.path))
                 .collect(),
+            check_output: check_output.map(str::to_string),
             model: self.config.judge.clone(),
             ext_path: self.ext.verdict.clone(),
             cwd: self.config.paths.project_dir.clone(),
@@ -206,5 +218,36 @@ impl StageBuilder for CliStage<'_> {
             ext_path: self.ext.choose.clone(),
             cwd: self.config.paths.project_dir.clone(),
         })
+    }
+}
+
+impl loop_core::CheckRunner for CliStage<'_> {
+    /// Substitute the context namespace into the check's command, then shell
+    /// out in the project root.
+    ///
+    /// The environment is the same small scalar pack a worker spawn gets, so a
+    /// check can key on the cycle the way a stage's tooling does — an
+    /// idempotent re-check of `loop-$TICKET_ID-$CYCLE` looks at exactly the
+    /// namespace the stage just deployed to.
+    fn run_check(
+        &self,
+        check: &loop_core::Check,
+        from: &StateId,
+        cycle: u32,
+        attempt: u32,
+    ) -> Result<loop_core::CheckOutcome> {
+        let context = self.context(from, cycle, attempt, None)?;
+        let cmd = render::substitute(&check.cmd, &context.to_map());
+        let env: Vec<(String, String)> = [
+            ("TICKET_ID", context.ticket_id.clone()),
+            ("STATE", context.state.clone()),
+            ("CYCLE", context.cycle.to_string()),
+            ("ATTEMPT", context.attempt.to_string()),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v))
+        .collect();
+
+        loop_runner::exec_check(&cmd, &self.config.paths.project_dir, &env, check.timeout_s)
     }
 }

@@ -150,7 +150,11 @@ pub enum EventPayload {
         from: StateId,
         to: StateId,
         structural: GuardOutcome,
+        check: GuardOutcome,
         criteria: GuardOutcome,
+        /// What the edge's deterministic check printed, truncated. The one
+        /// piece of evidence on this line the worker did not author.
+        check_output: Option<String>,
         judge_rationale: Option<String>,
     },
     /// Only when a proposal was invalid or `blocked`.

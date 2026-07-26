@@ -70,16 +70,48 @@ pub struct WorkerResult {
     pub exit_ok: bool,
 }
 
-/// What the Judge sees: the criteria, a digest of the worker's output, and
-/// artifact paths. Never the worker's self-assessment of whether it passed.
+/// What the Judge sees: the criteria, a digest of the worker's output,
+/// artifact paths, and whatever the edge's deterministic check printed. Never
+/// the worker's self-assessment of whether it passed.
 #[derive(Clone, Debug)]
 pub struct JudgeSpec {
     pub criteria: String,
     pub worker_digest: String,
     pub artifact_paths: Vec<PathBuf>,
+    /// Output of the edge's [`crate::Check`], when it has one. Unlike every
+    /// other field here, the worker had no hand in producing it.
+    pub check_output: Option<String>,
     pub model: ModelSpec,
     pub ext_path: PathBuf,
     pub cwd: PathBuf,
+}
+
+/// The result of running a [`crate::Check`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CheckOutcome {
+    /// Exit status 0.
+    pub passed: bool,
+    /// `None` when the check was killed (timeout) or died on a signal.
+    pub exit_code: Option<i32>,
+    /// Combined stdout/stderr, truncated. Recorded on `guard_checked` and fed
+    /// to the Judge.
+    pub output: String,
+}
+
+/// Runs a transition's deterministic check.
+///
+/// Separate from [`AgentRunner`] on purpose: a check is the harness acting on
+/// its own behalf, in its own subprocess, with no agent anywhere in the path.
+/// The implementation substitutes the context namespace into the command and
+/// supplies the working directory and environment.
+pub trait CheckRunner {
+    fn run_check(
+        &self,
+        check: &crate::machine::Check,
+        from: &StateId,
+        cycle: u32,
+        attempt: u32,
+    ) -> Result<CheckOutcome>;
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

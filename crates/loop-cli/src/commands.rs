@@ -205,6 +205,7 @@ pub fn run(paths: Paths, max_transitions: Option<u32>, resuming: bool) -> Result
         machine: &machine,
         config: &config,
         runner: &runner,
+        checks: &stage,
         ledger: &mut ledger,
         artifacts: &artifacts,
         stage: &stage,
@@ -397,8 +398,12 @@ fn summarize(e: &loop_core::Event) -> String {
             }
         }
         GuardChecked {
-            from, to, criteria, ..
-        } => format!("guard {from}→{to}: criteria={criteria:?}"),
+            from,
+            to,
+            check,
+            criteria,
+            ..
+        } => format!("guard {from}→{to}: check={check:?} criteria={criteria:?}"),
         NavigatorInvoked {
             from, chosen_to, ..
         } => format!("navigator {from} → {chosen_to}"),
