@@ -396,3 +396,42 @@ fn a_misspelled_check_key_is_rejected_by_name() {
         "must list the fields that do exist: {msg}"
     );
 }
+
+/// The shipped example's ledger records the hash of the machine beside it, and
+/// `loop recap` compares the two to decide whether it may explain the run with
+/// the machine on disk. They are only equal if someone keeps them equal — so
+/// this fails the moment `examples/proj-1487/machine.fnl` is edited without
+/// the ledger being re-stamped, rather than letting the example quietly
+/// degrade into demonstrating only the "machine has changed" path.
+#[test]
+fn the_example_ledger_records_the_hash_of_the_example_machine() {
+    let example = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/proj-1487")
+        .canonicalize()
+        .expect("examples/proj-1487 exists");
+
+    let source = std::fs::read_to_string(example.join("machine.fnl")).expect("machine.fnl");
+    let on_disk = {
+        use sha2::Digest as _;
+        hex::encode(sha2::Sha256::digest(source.as_bytes()))
+    };
+
+    let first = std::fs::read_to_string(example.join("ledger.jsonl"))
+        .expect("ledger.jsonl")
+        .lines()
+        .next()
+        .expect("a run_started line")
+        .to_string();
+    let recorded =
+        serde_json::from_str::<serde_json::Value>(&first).expect("valid JSON")["machine_hash"]
+            .as_str()
+            .expect("run_started carries machine_hash")
+            .to_string();
+
+    assert_eq!(
+        recorded, on_disk,
+        "examples/proj-1487/ledger.jsonl records a stale machine_hash — re-stamp it \
+         with the sha256 of machine.fnl, or `loop recap` on the example only ever \
+         demonstrates the CHANGED path"
+    );
+}

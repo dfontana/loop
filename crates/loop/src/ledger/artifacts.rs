@@ -12,7 +12,9 @@ use std::fs;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
-use crate::core::{ArtifactClaim, ArtifactRef, ArtifactSink, CoreError, IoContext, Result};
+use crate::core::{
+    ArtifactClaim, ArtifactRef, ArtifactSink, CoreError, IoContext, Result, sanitize_component,
+};
 
 pub struct ArtifactStore {
     root: PathBuf,
@@ -80,8 +82,8 @@ impl ArtifactSink for ArtifactStore {
         // different vector: the destination this time, not the source).
         let dest_name = format!(
             "{}-{cycle}-{}",
-            sanitize_component(state),
-            sanitize_component(&claim.name)
+            sanitize_component(state, "state"),
+            sanitize_component(&claim.name, "artifact")
         );
         let dest_path = self.root.join(&dest_name);
         write_atomic(&self.root, &dest_path, &bytes)?;
@@ -102,27 +104,6 @@ fn relativize(project_root: &Path, path: &Path) -> String {
     path.strip_prefix(project_root)
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|_| path.to_string_lossy().into_owned())
-}
-
-/// Collapse anything that isn't safe as a single path component down to `-`,
-/// so a worker-supplied string can never introduce a `/` (or a bare `..`)
-/// into a filename we build by string interpolation.
-fn sanitize_component(s: &str) -> String {
-    let cleaned: String = s
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
-                c
-            } else {
-                '-'
-            }
-        })
-        .collect();
-    if cleaned.is_empty() || cleaned.chars().all(|c| c == '.') {
-        "artifact".to_string()
-    } else {
-        cleaned
-    }
 }
 
 /// Write `bytes` to `dest` atomically: a temp file in `dir` (so the rename is
@@ -313,16 +294,5 @@ mod tests {
             !leftover_tmp,
             "atomic write must not leave temp files behind"
         );
-    }
-
-    #[test]
-    fn sanitize_component_strips_path_traversal() {
-        // `.` is kept (harmless in a single filename with no `/` beside it),
-        // but every path separator becomes `-`, so the result can never be
-        // interpreted as multiple components or as a bare `..`.
-        assert_eq!(sanitize_component("../../etc/passwd"), "..-..-etc-passwd");
-        assert_eq!(sanitize_component("normal-name_1.2"), "normal-name_1.2");
-        assert_eq!(sanitize_component(""), "artifact");
-        assert_eq!(sanitize_component(".."), "artifact");
     }
 }

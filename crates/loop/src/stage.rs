@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 use crate::core::{
     ArtifactRef, Config, Context, JudgeSpec, Machine, ModelSpec, NavigatorSpec, Proposal, Result,
-    State, StateId, WorkerSpec,
+    State, StateId, WorkerSpec, sanitize_component,
 };
 use crate::engine::{StageBuilder, StagePlan};
 use crate::ledger::{Ledger, digest};
@@ -78,15 +78,10 @@ impl<'a> Resolver<'a> {
     /// The deterministic session id, so a crashed stage's transcript stays
     /// findable in pi's session store.
     pub fn session_id(&self, state: &str, cycle: u32, attempt: u32) -> String {
-        let slug = |s: &str| {
-            s.chars()
-                .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-                .collect::<String>()
-        };
         format!(
             "{}-{}-{}-{}",
-            slug(&self.machine.ticket),
-            slug(state),
+            sanitize_component(&self.machine.ticket, "ticket"),
+            sanitize_component(state, "state"),
             cycle,
             attempt
         )

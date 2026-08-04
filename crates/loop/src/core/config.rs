@@ -91,30 +91,58 @@ impl Paths {
     /// would produce. Only this one sanitized, so a state id containing a `/`
     /// wrote its handoff correctly and its prompt to a path that did not exist.
     fn run_file(&self, state: &str, cycle: u32, attempt: u32, tail: &str) -> PathBuf {
-        self.run_dir()
-            .join(format!("{}-{cycle}-{attempt}-{tail}", sanitize(state)))
+        self.run_dir().join(format!(
+            "{}-{cycle}-{attempt}-{tail}",
+            sanitize_component(state, "state")
+        ))
     }
 
     /// The rendered-prompt path with the cycle and attempt left as placeholders
     /// — what `loop preview` shows for a stage that has not run. Built from the
     /// same sanitizer as the real thing, so the two cannot drift.
     pub fn render_file_pattern(&self, state: &str, suffix: &str) -> PathBuf {
-        self.run_dir()
-            .join(format!("{}-<cycle>-<attempt>-{suffix}.md", sanitize(state)))
+        self.run_dir().join(format!(
+            "{}-<cycle>-<attempt>-{suffix}.md",
+            sanitize_component(state, "state")
+        ))
     }
 }
 
-/// Replace anything that isn't safe in a path component.
-fn sanitize(s: &str) -> String {
-    s.chars()
+/// Collapse anything that isn't safe as a **single** path component down to
+/// `-`, falling back to `fallback` when nothing usable survives.
+///
+/// One function for every name the harness interpolates into a path: run-file
+/// names, artifact filenames, and session ids. There used to be three, and they
+/// disagreed — `.loop/run/` kept `_`, session ids did not, and artifact names
+/// kept `.` as well — so a state named `open_pr` wrote `open_pr-1-1-handoff.json`
+/// beside a session id of `PROJ-open-pr-1-1`: two spellings of one state, ten
+/// files apart.
+///
+/// Two properties are load-bearing rather than cosmetic:
+/// - **No `/` survives**, so a name the harness did not choose can never
+///   introduce a path separator into a filename built by interpolation. `.` is
+///   kept, because it is harmless in a lone component and keeps an artifact
+///   called `report.md` readable.
+/// - **The result is never empty and never all dots**, so it can never be a
+///   bare `..`. That guard used to protect artifact names alone, on the grounds
+///   that those are worker-supplied — but a state id reaches a path too, and
+///   there was no reason for the weaker rule to hold anywhere.
+pub fn sanitize_component(s: &str, fallback: &str) -> String {
+    let cleaned: String = s
+        .chars()
         .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
                 c
             } else {
                 '-'
             }
         })
-        .collect()
+        .collect();
+    if cleaned.is_empty() || cleaned.chars().all(|c| c == '.') {
+        fallback.to_string()
+    } else {
+        cleaned
+    }
 }
 
 fn home() -> Option<PathBuf> {
@@ -204,5 +232,62 @@ impl Config {
             pi_bin: std::env::var("LOOP_PI_BIN").unwrap_or_else(|_| "pi".into()),
             paths,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// One sanitizer now spells run-file names, artifact filenames, and session
+    /// ids, so the properties every one of them relies on are pinned here
+    /// rather than three times over.
+    #[test]
+    fn sanitize_component_holds_the_properties_all_three_callers_need() {
+        // Nothing that could split a path survives — this is the one that
+        // matters, because artifact names come from the worker.
+        assert_eq!(
+            sanitize_component("../../etc/passwd", "artifact"),
+            "..-..-etc-passwd"
+        );
+        assert!(!sanitize_component("a/b", "x").contains('/'));
+
+        // `.`, `-` and `_` are kept, so ordinary names stay readable.
+        assert_eq!(
+            sanitize_component("normal-name_1.2", "artifact"),
+            "normal-name_1.2"
+        );
+        // Previously this was the disagreement: the run-file sanitizer kept
+        // `_` and the session-id one did not, so one state had two spellings.
+        assert_eq!(sanitize_component("open_pr", "state"), "open_pr");
+
+        // Never empty, never a bare `..` — the guard that used to apply to
+        // artifact names alone.
+        assert_eq!(sanitize_component("", "state"), "state");
+        assert_eq!(sanitize_component("..", "artifact"), "artifact");
+        assert_eq!(sanitize_component("...", "state"), "state");
+        // A name that is only separators collapses to dashes, which is not
+        // all-dots, so it keeps its own (harmless) spelling.
+        assert_eq!(sanitize_component("///", "state"), "---");
+    }
+
+    /// The two run-file builders and the pattern `loop preview` prints must
+    /// agree, since preview's whole job is to name the file a run would write.
+    #[test]
+    fn preview_pattern_matches_the_file_a_run_would_write() {
+        let paths = Paths::discover("/proj");
+        let real = paths.render_file("open_pr", 2, 3, "system");
+        let pattern = paths.render_file_pattern("open_pr", "system");
+
+        assert_eq!(
+            real.file_name().unwrap(),
+            "open_pr-2-3-system.md",
+            "the `_` survives, as it does in the session id"
+        );
+        assert_eq!(
+            pattern.file_name().unwrap(),
+            "open_pr-<cycle>-<attempt>-system.md"
+        );
+        assert_eq!(real.parent(), pattern.parent());
     }
 }
