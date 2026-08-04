@@ -26,6 +26,13 @@ pub struct Paths {
     pub project_dir: PathBuf,
 }
 
+/// The two subdirectories a machine resolves names against. Named here because
+/// [`Paths`] builds them for `loop init` while `toolbox` builds them again
+/// against the machine file's own directory — the two have to agree, and a
+/// string literal in each is how they quietly stop agreeing.
+pub const PLAYBOOKS_DIR: &str = "playbooks";
+pub const SKILLS_DIR: &str = "skills";
+
 impl Paths {
     pub fn discover(project_dir: impl Into<PathBuf>) -> Self {
         Self {
@@ -43,10 +50,10 @@ impl Paths {
         self.loop_dir().join("machine.fnl")
     }
     pub fn playbooks(&self) -> PathBuf {
-        self.loop_dir().join("playbooks")
+        self.loop_dir().join(PLAYBOOKS_DIR)
     }
     pub fn skills(&self) -> PathBuf {
-        self.loop_dir().join("skills")
+        self.loop_dir().join(SKILLS_DIR)
     }
 
     // ── recorded ──────────────────────────────────────────────────────────
@@ -69,10 +76,31 @@ impl Paths {
     /// a retry can never read the previous attempt's proposal — and the
     /// harness deletes it before spawning anyway, belt and braces.
     pub fn handoff_file(&self, state: &str, cycle: u32, attempt: u32) -> PathBuf {
-        self.run_dir().join(format!(
-            "{}-{cycle}-{attempt}-handoff.json",
-            sanitize(state)
-        ))
+        self.run_file(state, cycle, attempt, "handoff.json")
+    }
+
+    /// Where a rendered prompt for one attempt lands.
+    pub fn render_file(&self, state: &str, cycle: u32, attempt: u32, suffix: &str) -> PathBuf {
+        self.run_file(state, cycle, attempt, &format!("{suffix}.md"))
+    }
+
+    /// The one place that knows how a `run/` filename is spelled.
+    ///
+    /// It was three: this, the rendered-prompt name in `toolbox`, and a third
+    /// literal in `report` so `loop preview` could *guess* what the second one
+    /// would produce. Only this one sanitized, so a state id containing a `/`
+    /// wrote its handoff correctly and its prompt to a path that did not exist.
+    fn run_file(&self, state: &str, cycle: u32, attempt: u32, tail: &str) -> PathBuf {
+        self.run_dir()
+            .join(format!("{}-{cycle}-{attempt}-{tail}", sanitize(state)))
+    }
+
+    /// The rendered-prompt path with the cycle and attempt left as placeholders
+    /// — what `loop preview` shows for a stage that has not run. Built from the
+    /// same sanitizer as the real thing, so the two cannot drift.
+    pub fn render_file_pattern(&self, state: &str, suffix: &str) -> PathBuf {
+        self.run_dir()
+            .join(format!("{}-<cycle>-<attempt>-{suffix}.md", sanitize(state)))
     }
 }
 
@@ -115,11 +143,10 @@ pub fn expand_tilde(p: &Path) -> PathBuf {
 /// the two things a machine has no business setting (`paths`, `pi_bin`).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Config {
-    /// The provider every role falls back to. Each role spec below carries its
-    /// own resolved `provider`; this is the value they take when their table
-    /// does not name one, which is what makes setting it alone switch the
-    /// whole toolbox.
-    pub provider: String,
+    // No bare `provider` here. Each role spec below carries its own, and the
+    // machine's `:provider` key is what rewrites all three at once — a
+    // separate fallback field read by nothing was a fourth tier waiting to be
+    // wired to something that never merged it.
     /// Default Worker model when a state doesn't specify one.
     pub worker: ModelSpec,
     pub judge: ModelSpec,
@@ -148,10 +175,9 @@ pub struct Config {
 }
 
 impl Config {
-    /// The defaults a fresh install runs with, before `config.fnl` is read.
+    /// The built-in floor, before the machine overlays its own keys.
     pub fn defaults(paths: Paths) -> Self {
         Self {
-            provider: "anthropic".into(),
             worker: ModelSpec {
                 provider: "anthropic".into(),
                 model: "claude-sonnet-5".into(),

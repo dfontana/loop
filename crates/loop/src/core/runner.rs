@@ -16,7 +16,6 @@ use crate::core::machine::{ModelSpec, StateId};
 /// from the state's config plus the rendered prompt files.
 #[derive(Clone, Debug)]
 pub struct WorkerSpec {
-    pub ticket: String,
     pub state: StateId,
     pub cycle: u32,
     pub attempt: u32,
@@ -35,17 +34,12 @@ pub struct WorkerSpec {
     pub system_prompt_path: PathBuf,
     /// The short positional kickoff message.
     pub entry_message: String,
-    /// Neighbors of the current state — the targets the handoff protocol
-    /// block lists as valid. Advisory rather than enforced: the harness
-    /// re-checks the proposed target against the graph either way, and an
-    /// off-graph target routes to the Navigator.
-    pub reachable: Vec<StateId>,
     /// Where this spawn is told to write its proposal, exported as
     /// [`crate::core::HANDOFF_ENV`]. The harness reads it once the process exits.
     ///
     /// There is no list of pi-extensions to enable beside it: pi has no flag
     /// for that. A worker spawn simply omits `--no-extensions` and gets pi's
-    /// ambient discovery, which is why `config.fnl`'s `:pi-extensions` is a
+    /// ambient discovery, which is why the machine's `:pi-extensions` is a
     /// declaration the linter reads rather than a switch this struct carries.
     pub handoff_path: PathBuf,
     /// Where pi runs — the project root.
@@ -56,6 +50,14 @@ pub struct WorkerSpec {
     /// read `$TICKET_ID` / `$CYCLE` and key its idempotency on them.
     pub env: Vec<(String, String)>,
 }
+
+/// The rationale the engine synthesizes when a Worker leaves no usable
+/// handoff. It lands on the ledger and is spliced into the Navigator's prompt,
+/// so it has to describe the protocol the Worker was actually given — it lives
+/// here, in the module that owns [`Proposal`], because the engine reaches for
+/// nothing but [`crate::core`].
+pub const ABSENT_HANDOFF_RATIONALE: &str =
+    "worker ended its turn without writing a usable handoff file";
 
 /// The worker's proposal, as read back out of its handoff file.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

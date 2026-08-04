@@ -3,7 +3,7 @@
 //! docs/02-how-it-works.md is the spec; this module is its transcription. The
 //! loop body contains no LLM call: every decision an agent makes (the worker's
 //! proposal, the judge's verdict, the navigator's choice) arrives through a
-//! constrained tool schema, is recorded, and is bounded.
+//! fixed contract, is recorded, and is bounded.
 //!
 //! This module reaches for nothing but [`crate::core`] and its traits, so the
 //! entire control flow is testable against in-process fakes — no Lua, no
@@ -17,11 +17,9 @@
 //! process to keep passing, and that is the cost that keeps this honest.
 //! Nothing else does. Treat a new `use crate::` line in this module as a design
 //! change, not a convenience.
-//!
-//! TASK T5 implements this module, plus [`crate::core::fold`].
 
 use crate::core::{
-    AgentRunner, ArtifactRef, ArtifactSink, CheckRunner, Config, ErrorKind, Event, EventPayload,
+    AgentRunner, ArtifactRef, ArtifactSink, CheckRunner, ErrorKind, Event, EventPayload,
     FoldStatus, GuardOutcome, LedgerSink, LoopSpec, Machine, OnExhausted, OnFail, Proposal, Result,
     ResumePoint, RunState, RunStatus, StateId, Totals, Transition, fold_with_loop_heads,
 };
@@ -32,7 +30,6 @@ pub mod prompts;
 pub mod validate;
 
 use guards::check as guard_check;
-use guards::select_edge;
 
 pub use mermaid::mermaid;
 pub use prompts::{StageBuilder, StagePlan};
@@ -47,14 +44,10 @@ mod tests;
 /// its collaborators as traits; the CLI supplies the real ones.
 pub struct Engine<'a> {
     pub machine: &'a Machine,
-    /// The resolved config, for symmetry with the rest of the bundle. Nothing
-    /// in the loop body reads it today — every setting it would want has
-    /// already been folded into the `Machine` or into `stage` by the time the
-    /// engine runs — but it stays because a caller assembling an `Engine`
-    /// shouldn't have to know which of its collaborators the loop happens to
-    /// consult this month.
-    #[allow(dead_code)]
-    pub config: &'a Config,
+    // No `config` field. Everything the loop body would want from it has
+    // already been folded into the `Machine` or into `stage` by the time the
+    // engine runs, so holding one only made `Engine`'s signature stop
+    // describing what the loop actually consults.
     pub runner: &'a dyn AgentRunner,
     /// Runs a transition's deterministic check — the harness acting for
     /// itself, with no agent in the path.
@@ -90,7 +83,7 @@ pub struct Outcome {
 impl Engine<'_> {
     /// Drive the machine to a terminal, appending every decision to the ledger.
     ///
-    /// TASK T5. The loop, per docs/02-how-it-works.md:
+    /// The loop, per docs/02-how-it-works.md:
     ///
     /// 1. Fold the ledger. A fresh run appends `run_started`; a resume picks up at the folded
     ///    [`crate::core::ResumePoint`].
@@ -422,7 +415,7 @@ impl Engine<'_> {
             return self.commit(rs, from, &target, None);
         }
 
-        let edge = match select_edge(self.machine, from, &target) {
+        let edge = match self.machine.edge(from, &target) {
             Some(e) => e.clone(),
             None => {
                 // Structurally unreachable even after navigator routing —
@@ -617,7 +610,7 @@ impl Engine<'_> {
         let proposal = result.proposal.unwrap_or(Proposal {
             to: None,
             blocked: true,
-            rationale: "worker ended its turn without calling transition".into(),
+            rationale: crate::core::ABSENT_HANDOFF_RATIONALE.into(),
             artifacts: Vec::new(),
         });
 

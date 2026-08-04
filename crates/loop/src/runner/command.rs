@@ -17,11 +17,12 @@
 //! No `-e` anywhere. loop used to inject three vendored TypeScript tools whose
 //! only job was to echo their arguments back as a marker line; the Worker now
 //! writes a handoff file instead, and the two tool-less roles answer against a
-//! first-line contract. See `crate::toolbox::render::handoff_protocol`.
+//! first-line contract. See [`crate::runner::reply::handoff_protocol`].
 
 use std::process::Command;
 
 use crate::core::{HANDOFF_ENV, JudgeSpec, NavigatorSpec, WorkerSpec};
+use crate::runner::reply::{VERDICT_FAIL, VERDICT_PASS};
 
 /// The sentinel a Navigator names when no reachable state fits. Not a state:
 /// it takes the same "unknown target" path through the engine that any
@@ -88,44 +89,74 @@ pub fn worker_command(pi_bin: &str, spec: &WorkerSpec) -> Command {
     cmd
 }
 
-/// The Judge gets no tools whatsoever: `--no-builtin-tools` disables the
-/// built-ins, `--no-extensions` stops any *installed* pi-extension (`mcp`, …)
-/// from being auto-discovered and handing it a side door, and there is nothing
-/// injected to replace them. That independence is what makes its verdict
-/// trustworthy (docs/05-design-notes.md) — do not add `read` "for convenience".
+/// A spawn for one of the two tool-less roles.
 ///
-/// Having no tools is also why its answer is prose against a fixed contract
-/// rather than a file: it could not write one if it wanted to.
-pub fn judge_command(pi_bin: &str, spec: &JudgeSpec) -> Command {
+/// The Judge and the Navigator get no tools whatsoever: `--no-builtin-tools`
+/// disables the built-ins, `--no-extensions` stops any *installed*
+/// pi-extension (`mcp`, …) from being auto-discovered and handing them a side
+/// door, `--no-skills` stops ambient skill discovery, and there is nothing
+/// injected to replace any of it. That independence is what makes the Judge's
+/// verdict trustworthy (docs/05-design-notes.md) — do not add `read` "for
+/// convenience".
+///
+/// It is one builder rather than two because that isolation is a property of
+/// the *role class*, not of either role. With a copy each, a flag added to one
+/// and missed on the other silently gives that role ambient tools back, and no
+/// test that checks for the presence of flags would notice an absent one.
+///
+/// Having no tools is also why both answer in prose against a fixed first-line
+/// contract rather than by writing a file: neither could write one if it
+/// wanted to.
+fn isolated_command(
+    pi_bin: &str,
+    model: &crate::core::ModelSpec,
+    system_prompt: String,
+    message: String,
+    cwd: &std::path::Path,
+    role: &str,
+) -> Command {
     let mut cmd = Command::new(pi_bin);
     cmd.arg("--print")
         .arg("--mode")
         .arg("json")
         .arg("--no-session");
 
-    cmd.arg("--provider").arg(&spec.model.provider);
-    cmd.arg("--model").arg(spec.model.pi_model_arg());
+    cmd.arg("--provider").arg(&model.provider);
+    cmd.arg("--model").arg(model.pi_model_arg());
 
     cmd.arg("--no-builtin-tools")
         .arg("--no-extensions")
         .arg("--no-skills");
 
-    cmd.arg("--append-system-prompt").arg(judge_prompt(spec));
-    cmd.arg(judge_message(spec));
+    cmd.arg("--append-system-prompt").arg(system_prompt);
+    cmd.arg(message);
 
-    cmd.current_dir(&spec.cwd);
-    cmd.env("LOOP_MOCK_ROLE", "judge");
+    cmd.current_dir(cwd);
+    cmd.env("LOOP_MOCK_ROLE", role);
 
     cmd
 }
 
+pub fn judge_command(pi_bin: &str, spec: &JudgeSpec) -> Command {
+    isolated_command(
+        pi_bin,
+        &spec.model,
+        judge_prompt(spec),
+        judge_message(spec),
+        &spec.cwd,
+        "judge",
+    )
+}
+
 /// The Judge's system prompt: the reply contract, then the criteria.
 ///
-/// The contract leads because it is the part the harness parses. `PASS`/`FAIL`
-/// on a line of its own is deliberately the narrowest thing a model can be
-/// asked for — one token, no punctuation, no JSON to get subtly wrong — and
-/// [`crate::runner::parse_verdict`] fails closed on anything else, so a model that
-/// ignores the format cannot accidentally pass work through.
+/// The contract leads because it is the part the harness parses. The two
+/// tokens come from [`VERDICT_PASS`]/[`VERDICT_FAIL`] rather than being typed
+/// out here, so the prompt cannot drift away from what
+/// [`crate::runner::parse_verdict`] accepts. One bare token on its own line is
+/// deliberately the narrowest thing a model can be asked for — no punctuation,
+/// no JSON to get subtly wrong — and the parser fails closed on anything else,
+/// so a model that ignores the format cannot accidentally pass work through.
 pub fn judge_prompt(spec: &JudgeSpec) -> String {
     format!(
         "You are an independent reviewer. You have no tools: you cannot read files, \
@@ -133,17 +164,19 @@ pub fn judge_prompt(spec: &JudgeSpec) -> String {
          Judge only what you were given, against the criteria.\n\n\
          Reply in exactly this shape:\n\n\
          ```\n\
-         PASS\n\
+         {pass}\n\
          <one or two sentences citing the specific evidence behind the verdict>\n\
          ```\n\n\
-         The first line must be the single word `PASS` or `FAIL` and nothing else. \
-         A reply that does not start that way is read as a failure, so do not \
-         preface it with anything.\n\n\
+         The first line must be the single word `{pass}` or `{fail}` and nothing \
+         else. A reply that does not start that way is read as a failure, so do \
+         not preface it with anything.\n\n\
          Pass only if every part of the criteria is satisfied by the evidence. \
          Absence of evidence is not satisfaction: if the criteria says something \
-         was run and you cannot see that it was run, that is a `FAIL`.\n\n\
-         ## Criteria\n\n{}\n",
-        spec.criteria
+         was run and you cannot see that it was run, that is a `{fail}`.\n\n\
+         ## Criteria\n\n{criteria}\n",
+        pass = VERDICT_PASS,
+        fail = VERDICT_FAIL,
+        criteria = spec.criteria
     )
 }
 
@@ -169,33 +202,20 @@ fn judge_message(spec: &JudgeSpec) -> String {
     message
 }
 
-/// Same isolation as the Judge — `--no-builtin-tools --no-extensions
-/// --no-skills`, and nothing injected. It routes within the declared graph or
-/// escalates; it never invents structure, because the harness only accepts a
-/// reply that exactly names one of the choices it was given.
+/// Same isolation as the Judge, by construction rather than by repetition. It
+/// routes within the declared graph or escalates; it never invents structure,
+/// because the harness only accepts a reply that exactly names one of the
+/// choices it was given.
 pub fn navigator_command(pi_bin: &str, spec: &NavigatorSpec) -> Command {
-    let mut cmd = Command::new(pi_bin);
-    cmd.arg("--print")
-        .arg("--mode")
-        .arg("json")
-        .arg("--no-session");
-
-    cmd.arg("--provider").arg(&spec.model.provider);
-    cmd.arg("--model").arg(spec.model.pi_model_arg());
-
-    cmd.arg("--no-builtin-tools")
-        .arg("--no-extensions")
-        .arg("--no-skills");
-
-    cmd.arg("--append-system-prompt")
-        .arg(navigator_prompt(spec));
-    cmd.arg(navigator_message(spec));
-
-    cmd.current_dir(&spec.cwd);
-
-    cmd.env("LOOP_MOCK_ROLE", "navigator");
+    let mut cmd = isolated_command(
+        pi_bin,
+        &spec.model,
+        navigator_prompt(spec),
+        navigator_message(spec),
+        &spec.cwd,
+        "navigator",
+    );
     cmd.env("LOOP_MOCK_STATE", &spec.from);
-
     cmd
 }
 
@@ -282,7 +302,6 @@ mod tests {
 
     fn worker_spec() -> WorkerSpec {
         WorkerSpec {
-            ticket: "PROJ-1487".into(),
             state: "implement".into(),
             cycle: 1,
             attempt: 1,
@@ -297,7 +316,6 @@ mod tests {
             ],
             system_prompt_path: PathBuf::from("/tmp/playbook.md"),
             entry_message: "Entering implement, cycle 1".into(),
-            reachable: vec!["review".into(), "debug".into()],
             mcp: vec!["linear".into()],
             handoff_path: PathBuf::from("/tmp/render/implement-1-1-handoff.json"),
             cwd: PathBuf::from("/tmp/project"),

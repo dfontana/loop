@@ -1,9 +1,9 @@
-//! The one error type every crate in the workspace returns.
+//! The one error type every module returns.
 //!
 //! Deliberately coarse: the harness's job is to explain a failure to a human
-//! reading a terminal, not to let callers branch on failure kinds. The one
-//! exception is [`CoreError::Transient`], which the engine *does* branch on to
-//! decide between a retry and an abort.
+//! reading a terminal, not to let callers branch on failure kinds. Nothing
+//! matches on a variant — the retry/abort decision is made from
+//! [`crate::core::ErrorKind`] on the ledger event, not from the error type.
 
 use std::path::PathBuf;
 
@@ -12,10 +12,6 @@ pub enum CoreError {
     /// The machine or config file is malformed, or the graph is invalid.
     #[error("machine: {0}")]
     Machine(String),
-
-    /// A Fennel guard closure failed to evaluate.
-    #[error("guard `{guard}`: {detail}")]
-    Guard { guard: String, detail: String },
 
     /// A `pi` spawn failed, or its event stream could not be understood.
     #[error("agent ({role}): {detail}")]
@@ -32,10 +28,6 @@ pub enum CoreError {
     /// A guardrail tripped: budget, wallclock, transition count, cycle cap.
     #[error("budget exceeded: {0}")]
     BudgetExceeded(String),
-
-    /// Something failed but is worth retrying (a flaky spawn, a partial read).
-    #[error("transient: {0}")]
-    Transient(String),
 
     #[error("{context}: {source}")]
     Io {
@@ -72,11 +64,6 @@ impl CoreError {
             context: context.into(),
             source,
         }
-    }
-
-    /// True when the engine should consider re-running rather than aborting.
-    pub fn is_transient(&self) -> bool {
-        matches!(self, Self::Transient(_))
     }
 }
 

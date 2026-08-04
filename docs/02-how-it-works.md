@@ -55,7 +55,7 @@ The engine's outer loop reads the whole ledger, folds it into a run state, and d
 8. **If the process itself failed** (non-zero exit, spawn error), append a transient `error` and return; the fold will re-enter the state. After `MAX_CRASH_ATTEMPTS = 3` consecutive crashes the engine appends a `note` and escalates. The `error` carries the tail of pi's stderr, so a spawn failure leaves a diagnosis rather than just an exit code.
 9. **Capture artifacts** claimed in the handoff — copy into the store. This happens _before_ the output event is written. A claim that cannot be resolved is recorded as an `error` and dropped; the rest proceed.
 10. **Append `worker_output`** — the last non-empty assistant message as the summary, the captured artifact refs, and token/cost usage.
-11. **If no proposal was emitted**, synthesize one: `{to: null, blocked: true, rationale: "worker ended its turn without calling transition"}`.
+11. **If no proposal was emitted**, synthesize one: `{to: null, blocked: true, rationale: "worker ended its turn without writing a usable handoff file"}`.
 12. **Append `transition_proposed`.**
 13. **Re-read and re-fold the ledger**, then route the proposal.
 
@@ -63,7 +63,7 @@ The engine's outer loop reads the whole ledger, folds it into a run state, and d
 
 1. **Decide whether the Navigator is needed.** It is, if `blocked` is true, or `to` is null, or `to` is not a declared neighbor of the current state.
 2. **If so, invoke the Navigator.** It picks a target or escalates; its choice may finish the run.
-3. **If the target is the escalation state, commit directly** — no `select_edge`, no guard tiers.
+3. **If the target is the escalation state, commit directly** — no edge selection, no guard tiers.
 4. **Select the edge.** The first `:transitions` entry matching `(from, to)` wins; duplicates after it are dead (`loop validate` flags them). No match means the harness writes `guard_checked{structural: fail}` and escalates.
 5. **Run the guard pipeline** — structural, then check, then criteria.
 6. **Append `guard_checked`** with each tier's outcome, the check's captured output, and the Judge's rationale.

@@ -1,17 +1,10 @@
 //! Engine integration tests, against the fakes in [`crate::engine::test_support`].
 //! No Lua, no subprocess, no filesystem, no API key.
 
-use crate::core::{Config, OnExhausted, OnFail, Paths, PlaybookRef, RunStatus};
+use crate::core::{OnExhausted, OnFail, PlaybookRef, RunStatus};
 
-use crate::engine::guards::select_edge;
 use crate::engine::test_support::*;
 use crate::engine::{Engine, Outcome};
-
-fn config() -> Config {
-    Config::defaults(Paths {
-        project_dir: "proj".into(),
-    })
-}
 
 fn run(machine: &crate::core::Machine, runner: &FakeRunner, ledger: &mut FakeLedger) -> Outcome {
     run_with_checks(machine, runner, &FakeChecks::default(), ledger)
@@ -23,12 +16,10 @@ fn run_with_checks(
     checks: &FakeChecks,
     ledger: &mut FakeLedger,
 ) -> Outcome {
-    let cfg = config();
     let artifacts = FakeArtifacts;
     let stage = FakeStageBuilder::new(machine);
     let mut engine = Engine {
         machine,
-        config: &cfg,
         runner,
         checks,
         ledger,
@@ -387,24 +378,24 @@ fn a_check_runs_with_the_finishing_stages_cycle_and_attempt() {
     );
 }
 
-// ── select_edge ─────────────────────────────────────────────────────────
+// ── Machine::edge ───────────────────────────────────────────────────────
 
 /// Parallel edges used to be told apart by their `when` guards. Without those,
 /// the first declared edge wins and the rest are dead — which is why
 /// [`crate::engine::validate`] rejects the duplicate rather than letting it silently
 /// decide which `criteria` applies.
 #[test]
-fn select_edge_takes_the_first_declared_edge_and_none_when_absent() {
+fn edge_takes_the_first_declared_edge_and_none_when_absent() {
     let mut m = base_machine();
     m.states.insert("a".into(), state("a"));
     m.states.insert("b".into(), state("b"));
     m.transitions.push(judged_edge("a", "b", "first"));
     m.transitions.push(judged_edge("a", "b", "second"));
 
-    let found = select_edge(&m, "a", "b").expect("an edge exists");
+    let found = m.edge("a", "b").expect("an edge exists");
     assert_eq!(found.criteria.as_deref(), Some("first"));
 
-    assert!(select_edge(&m, "b", "a").is_none());
+    assert!(m.edge("b", "a").is_none());
 }
 
 // ── examples/: transient vs real routing, self-loop with backoff ─────────
@@ -663,13 +654,11 @@ fn wallclock_budget_aborts() {
     runner.script_worker("spend", worker_result(proposal_to("done", "go")));
 
     let mut ledger = FakeLedger::default();
-    let cfg = config();
     let artifacts = FakeArtifacts;
     let stage = FakeStageBuilder::new(&m);
     let checks = FakeChecks::default();
     let mut engine = Engine {
         machine: &m,
-        config: &cfg,
         runner: &runner,
         checks: &checks,
         ledger: &mut ledger,
@@ -820,7 +809,28 @@ fn validate_catches_loop_head_never_re_entered() {
 }
 
 #[test]
-fn validate_catches_escalation_state_not_a_terminal() {
+fn validate_catches_escalation_state_naming_nothing() {
+    let mut m = base_machine();
+    m.entry = "a".into();
+    m.terminals.insert("done".into());
+    m.escalation_state = Some("nowhere".into());
+    m.states.insert("a".into(), state("a"));
+    m.transitions.push(edge("a", "done"));
+    let diags = crate::engine::validate(&m, &always_resolves, &|_| true);
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.message.contains("names no state or terminal"))
+    );
+}
+
+/// A non-terminal escalation state is legal: the engine commits to it directly
+/// and then runs it as an ordinary stage, which is how a machine gets a "go do
+/// recovery work" destination instead of only a "give up here" one. The linter
+/// used to reject this while the loader accepted it, so a machine could load
+/// and then fail its own `loop validate`.
+#[test]
+fn validate_accepts_a_non_terminal_escalation_state() {
     let mut m = base_machine();
     m.entry = "a".into();
     m.terminals.insert("done".into());
@@ -829,14 +839,13 @@ fn validate_catches_escalation_state_not_a_terminal() {
     m.transitions.push(edge("a", "done"));
     let diags = crate::engine::validate(&m, &always_resolves, &|_| true);
     assert!(
-        diags
-            .iter()
-            .any(|d| d.message.contains("is not a declared terminal"))
+        !diags.iter().any(|d| d.message.contains("escalation_state")),
+        "a declared state is a valid escalation target: {diags:?}"
     );
 }
 
 /// Two edges between the same pair used to be disambiguated by their `when`
-/// guards. Now `select_edge` takes the first and the rest are dead, so the
+/// guards. Now `Machine::edge` takes the first and the rest are dead, so the
 /// duplicate has to be an error — not a silently ignored `criteria`.
 #[test]
 fn validate_rejects_duplicate_edges_between_the_same_pair() {
@@ -1139,14 +1148,12 @@ fn run_capturing_stages(
     runner: &FakeRunner,
     ledger: &mut FakeLedger,
 ) -> (Outcome, Vec<crate::core::Context>) {
-    let cfg = config();
     let artifacts = FakeArtifacts;
     let checks = FakeChecks::default();
     let stage = FakeStageBuilder::new(machine);
     let outcome = {
         let mut engine = Engine {
             machine,
-            config: &cfg,
             runner,
             checks: &checks,
             ledger,
@@ -1275,13 +1282,11 @@ fn an_unresolvable_artifact_claim_is_recorded_and_dropped_not_fatal() {
     let artifacts = RefusingArtifacts {
         refuse: "never-written.md",
     };
-    let cfg = config();
     let checks = FakeChecks::default();
     let stage = FakeStageBuilder::new(&m);
     let outcome = {
         let mut engine = Engine {
             machine: &m,
-            config: &cfg,
             runner: &runner,
             checks: &checks,
             ledger: &mut ledger,

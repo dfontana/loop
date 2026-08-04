@@ -43,7 +43,7 @@ impl Diagnostic {
 
 /// Lint a loaded machine.
 ///
-/// TASK T5. Checks, all of them `Error` unless noted:
+/// Checks, all of them `Error` unless noted:
 /// - `entry` exists; every `terminals` entry exists as a state or is otherwise
 ///   never entered (a terminal needs no state definition — it has no playbook).
 /// - Every transition's `from`/`to` names a state or terminal.
@@ -56,7 +56,7 @@ impl Diagnostic {
 ///   the names the machine writes. Linting the machine's layer alone left a
 ///   typo in the global toolbox config to surface as a failed stage mid-run.
 /// - Every loop's states exist and its head is a state some edge re-enters.
-/// - `escalation_state`, if set, is a terminal.
+/// - `escalation_state`, if set, names a state or terminal.
 /// - Every skill a state names resolves (same caller-supplied filesystem seam).
 /// - A state names MCP servers while `mcp` is absent from `pi-extensions`
 ///   (`mcp_enabled`): the stage would be told to call a tool it wasn't given.
@@ -64,7 +64,7 @@ impl Diagnostic {
 ///   `mcp.json`, which loop never reads.
 /// - **Warning:** an edge with neither `check` nor `criteria` — the worker's
 ///   proposal is committed unexamined.
-/// - No two transitions share a `from`/`to` pair: `select_edge` takes the
+/// - No two transitions share a `from`/`to` pair: `Machine::edge` takes the
 ///   first, so the rest are dead and their `criteria` silently ignored.
 pub fn validate(
     machine: &Machine,
@@ -230,13 +230,19 @@ pub fn validate(
         }
     }
 
-    // escalation_state, if set, is a terminal.
+    // escalation_state, if set, names something. A *state* is as valid as a
+    // terminal here: the engine commits to it directly and then runs it like
+    // any other stage, which is how a machine gets a "go do recovery work"
+    // destination rather than only a "give up here" one. This used to demand a
+    // terminal, disagreeing with the loader, docs/03-customizing.md, and the
+    // engine all at once — so a machine with a non-terminal escalation state
+    // loaded fine and then failed its own linter.
     if let Some(esc) = &machine.escalation_state
-        && !machine.terminals.contains(esc)
+        && !name_exists(esc)
     {
         out.push(Diagnostic::error(
             "machine",
-            format!("escalation_state `{esc}` is not a declared terminal"),
+            format!("escalation_state `{esc}` names no state or terminal"),
         ));
     }
 
@@ -260,7 +266,7 @@ pub fn validate(
     }
 
     // Error: two edges between the same pair. `when` guards used to tell such
-    // edges apart; without them `select_edge` takes the first declared one and
+    // edges apart; without them `Machine::edge` takes the first declared one and
     // the rest are dead, silently discarding whatever `criteria` they carry.
     let mut seen_pairs: BTreeSet<(&str, &str)> = BTreeSet::new();
     for t in &machine.transitions {

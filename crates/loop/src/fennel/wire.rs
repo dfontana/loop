@@ -92,13 +92,30 @@ pub struct ModelChoice {
     pub thinking: Option<Thinking>,
 }
 
+/// The one place that knows how the `provider`/`model`/`thinking` triple
+/// becomes an IR [`crate::core::ModelChoice`].
+///
+/// Four wire types spell that triple — `ModelChoice`, `Navigator`, `Defaults`,
+/// and `State` — because `#[serde(flatten)]` cannot be combined with
+/// `deny_unknown_fields`, and this module's whole premise is that every struct
+/// keeps the latter. They can still share the *conversion*, which is what
+/// stops a fifth model knob from having to be remembered in four constructors
+/// the compiler cannot relate to each other.
+pub fn model_choice(
+    provider: &Option<String>,
+    model: &Option<String>,
+    thinking: Option<Thinking>,
+) -> crate::core::ModelChoice {
+    crate::core::ModelChoice {
+        provider: provider.clone(),
+        model: model.clone(),
+        thinking,
+    }
+}
+
 impl ModelChoice {
     pub fn to_ir(&self) -> crate::core::ModelChoice {
-        crate::core::ModelChoice {
-            provider: self.provider.clone(),
-            model: self.model.clone(),
-            thinking: self.thinking,
-        }
+        model_choice(&self.provider, &self.model, self.thinking)
     }
 }
 
@@ -118,11 +135,7 @@ pub struct Navigator {
 
 impl Navigator {
     pub fn to_ir(&self) -> crate::core::ModelChoice {
-        crate::core::ModelChoice {
-            provider: self.provider.clone(),
-            model: self.model.clone(),
-            thinking: self.thinking,
-        }
+        model_choice(&self.provider, &self.model, self.thinking)
     }
 }
 
@@ -208,16 +221,53 @@ pub struct Transition {
 }
 
 /// `:check` is a bare command string in the common case, or a table when it
-/// needs a non-default timeout. Untagged, so both spellings land here.
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
+/// needs a non-default timeout.
+///
+/// Hand-written rather than `#[serde(untagged)]`, and the reason is the whole
+/// point of this module. `untagged` tries each variant and, on failure,
+/// reports only "data did not match any variant" — so `:check {:cmd "true"
+/// :timeut-s 300}` would be *rejected* but not *explained*, on precisely the
+/// key whose job is to stop a slow check being killed early. Dispatching on
+/// the Lua value's own shape lets [`CheckTable`]'s `deny_unknown_fields` error
+/// through intact, naming the misspelled field and listing the real ones.
+#[derive(Debug)]
 pub enum Check {
     Cmd(String),
-    Table {
-        cmd: String,
-        #[serde(default, rename = "timeout-s")]
-        timeout_s: Option<u64>,
-    },
+    Table(CheckTable),
+}
+
+impl<'de> Deserialize<'de> for Check {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        struct V;
+        impl<'de> serde::de::Visitor<'de> for V {
+            type Value = Check;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a command string, or a table with `:cmd` and optional `:timeout-s`")
+            }
+
+            fn visit_str<E: serde::de::Error>(self, v: &str) -> std::result::Result<Check, E> {
+                Ok(Check::Cmd(v.to_string()))
+            }
+
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                map: A,
+            ) -> std::result::Result<Check, A::Error> {
+                CheckTable::deserialize(serde::de::value::MapAccessDeserializer::new(map))
+                    .map(Check::Table)
+            }
+        }
+        d.deserialize_any(V)
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct CheckTable {
+    pub cmd: String,
+    #[serde(default)]
+    pub timeout_s: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]

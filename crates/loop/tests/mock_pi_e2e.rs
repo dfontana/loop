@@ -113,7 +113,6 @@ fn mock_pi_drives_worker_judge_navigator_and_a_crash() {
 
     // ---- worker -----------------------------------------------------
     let worker_spec = WorkerSpec {
-        ticket: "PROJ-1".into(),
         state: "implement".into(),
         cycle: 1,
         attempt: 1,
@@ -121,7 +120,6 @@ fn mock_pi_drives_worker_judge_navigator_and_a_crash() {
         skill_paths: vec![],
         system_prompt_path: tmp.path().join("playbook.md"),
         entry_message: "Entering implement, cycle 1".into(),
-        reachable: vec!["review".into(), "debug".into()],
         mcp: vec![],
         handoff_path: tmp.path().join("implement-1-1-handoff.json"),
         cwd: tmp.path().to_path_buf(),

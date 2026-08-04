@@ -206,14 +206,14 @@ fn reject_when(table: &mlua::Table) -> Result<()> {
 /// `:transition-mode` chose between two schemas for the injected `transition`
 /// tool's `to` parameter. There is no injected tool any more — a Worker writes
 /// a handoff file — so the key selects between nothing and nothing.
-fn reject_transition_mode(table: &mlua::Table, ctx: &str) -> Result<()> {
+fn reject_transition_mode(table: &mlua::Table) -> Result<()> {
     if present(table, "transition-mode")? {
-        return Err(CoreError::machine(format!(
-            "{ctx}: `:transition-mode` was removed — a worker now ends its stage by writing \
+        return Err(CoreError::machine(
+            "`:transition-mode` was removed — a worker now ends its stage by writing \
              its proposal to `$LOOP_HANDOFF`, and the harness checks the target against the \
              graph either way. An off-graph target routes to the Navigator, which is what \
-             `open` used to mean and is now the only behaviour"
-        )));
+             `open` used to mean and is now the only behaviour",
+        ));
     }
     Ok(())
 }
@@ -262,7 +262,7 @@ fn playbook_ref(state: &wire::State, state_id: &str) -> Result<PlaybookRef> {
 fn check_ir(check: &wire::Check, ctx: &str) -> Result<Check> {
     let (cmd, timeout_s) = match check {
         wire::Check::Cmd(cmd) => (cmd.clone(), None),
-        wire::Check::Table { cmd, timeout_s } => (cmd.clone(), *timeout_s),
+        wire::Check::Table(t) => (t.cmd.clone(), t.timeout_s),
     };
     if cmd.trim().is_empty() {
         return Err(CoreError::machine(format!(
@@ -305,7 +305,7 @@ pub fn machine_from_table(
     source_path: &Path,
     config: &Config,
 ) -> Result<Machine> {
-    reject_transition_mode(table, "machine")?;
+    reject_transition_mode(table)?;
     reject_removed_config_key(table)?;
     reject_when(table)?;
     let m: wire::Machine = from_table(table)?;
@@ -320,11 +320,7 @@ pub fn machine_from_table(
             State {
                 id: id.clone(),
                 playbook: playbook_ref(st, id)?,
-                model: ModelChoice {
-                    provider: st.provider.clone(),
-                    model: st.model.clone(),
-                    thinking: st.thinking,
-                },
+                model: wire::model_choice(&st.provider, &st.model, st.thinking),
                 skills: st.skills.clone(),
                 mcp: st.mcp.clone(),
                 description: st.description.clone(),
@@ -391,11 +387,7 @@ pub fn machine_from_table(
     let defaults = m
         .defaults
         .map(|d| Defaults {
-            model: ModelChoice {
-                provider: d.provider,
-                model: d.model,
-                thinking: d.thinking,
-            },
+            model: wire::model_choice(&d.provider, &d.model, d.thinking),
             skills: d.skills,
             mcp: d.mcp,
         })

@@ -1277,7 +1277,7 @@ fn preview_reports_the_stage_a_run_would_actually_build() {
         "qa cases          1",
         // Four-layer resolution, merged field by field: `thinking` off the
         // state, `model` off the playbook frontmatter (beating the machine
-        // default), `provider` off config.fnl.
+        // default), `provider` off the built-in floor.
         "model           anthropic/frontmatter-model:max",
         // ...and a state with no overrides of its own falls all the way to
         // the machine defaults for both fields.

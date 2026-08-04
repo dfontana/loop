@@ -121,7 +121,13 @@ fn rationale_for(events: &[Event], committed_at: usize, from: &str, to: &str) ->
         })
 }
 
-fn truncate(s: &str, max_chars: usize) -> String {
+/// Keep the first `max_chars` characters, marking elision with a trailing `…`
+/// (so a truncated result is `max_chars + 1` characters long).
+///
+/// Distinct from [`crate::output::truncate`], which bounds the *result* to `n`
+/// and collapses newlines for single-line terminal rows. This one preserves
+/// the text as-is, because what it bounds lands in the ledger and in prompts.
+pub(crate) fn truncate(s: &str, max_chars: usize) -> String {
     if s.chars().count() <= max_chars {
         return s.to_string();
     }

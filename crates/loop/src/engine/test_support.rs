@@ -327,7 +327,6 @@ impl<'m> StageBuilder for FakeStageBuilder<'m> {
         let skills = self.machine.resolve_skills(st);
         let mcp = self.machine.resolve_mcp(st);
         let spec = WorkerSpec {
-            ticket: self.machine.ticket.clone(),
             state: state.clone(),
             cycle,
             attempt,
@@ -337,7 +336,6 @@ impl<'m> StageBuilder for FakeStageBuilder<'m> {
             skill_paths: skills.iter().map(PathBuf::from).collect(),
             system_prompt_path: PathBuf::from("/dev/null"),
             entry_message: format!("enter {state} cycle {cycle} attempt {attempt}"),
-            reachable: self.machine.neighbors(state),
             mcp,
             handoff_path: PathBuf::from("/tmp/handoff.json"),
             cwd: PathBuf::new(),

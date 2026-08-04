@@ -1,9 +1,15 @@
-//! Reading each role's answer back out.
+//! Each role's answer: the contract it is given, and reading it back out.
 //!
 //! Three roles, three shapes, one principle: **every unreadable answer fails
 //! toward a human**, never toward the next state. A Worker with no usable
 //! handoff becomes a blocked proposal and goes to the Navigator; a Judge with
 //! no usable verdict fails closed; a Navigator with no usable choice escalates.
+//!
+//! The Worker's half of its contract ([`handoff_protocol`], the block appended
+//! to every rendered playbook) lives here beside the parser that has to accept
+//! it — the Judge's and Navigator's prompts sit beside theirs in
+//! [`crate::runner::command`] for the same reason. A contract stated in one
+//! module and parsed in another drifts, and the drift is silent.
 //!
 //! This module is what replaced `transition-tool.ts`, `verdict-tool.ts`, and
 //! `choose-tool.ts`. The Worker's answer is still structured data parsed with
@@ -15,6 +21,68 @@
 use std::path::Path;
 
 use crate::core::{Proposal, Result, StateId};
+
+/// The handoff protocol, appended by the harness to every rendered Worker
+/// prompt. This is the entire agent-side contract for ending a stage.
+///
+/// It replaces an injected `transition` tool. That tool's one advantage was a
+/// `to` parameter typed as an enum of reachable states — but the harness
+/// re-checks the target against the graph regardless (see the engine's
+/// `route_proposal`), so the enum only ever saved a Navigator spawn, never a
+/// bad commit. What it cost was a TypeScript extension, pi's
+/// extension ABI, and a JSON round-trip through a scraped marker line.
+///
+/// A file keeps the part that mattered — the decision arrives as structured
+/// data the harness parses with serde, not as prose it has to interpret — and
+/// drops the coupling. Any agent CLI that can write a file can drive a loop.
+///
+/// Writing no file, or writing something unparseable, both land in
+/// [`read_handoff`] as `None`: the engine synthesizes a blocked proposal
+/// carrying [`crate::core::ABSENT_HANDOFF_RATIONALE`] and the Navigator routes
+/// it.
+pub fn handoff_protocol(handoff_path: &std::path::Path, reachable: &[String]) -> String {
+    let mut out = String::from("\n\n---\n\n## Ending this stage\n\n");
+    out.push_str(&format!(
+        "When this stage's goal is met — and only then — write your handoff to \
+         `{}` and stop. The harness reads that file after you exit; it is the \
+         only way your decision reaches it. Nothing you write in prose moves \
+         the run.\n\n",
+        handoff_path.display()
+    ));
+
+    out.push_str("```json\n{\n");
+    out.push_str("  \"to\": \"<next state>\",\n");
+    out.push_str("  \"blocked\": false,\n");
+    out.push_str("  \"rationale\": \"why this is the right next step\",\n");
+    out.push_str("  \"artifacts\": [{\"name\": \"diff\", \"path\": \"relative/path.patch\"}]\n");
+    out.push_str("}\n```\n\n");
+
+    if reachable.is_empty() {
+        out.push_str(
+            "This state has no outgoing edges, so there is no valid `to`. If you \
+             reach the end of your work here, set `\"blocked\": true` with a \
+             rationale.\n\n",
+        );
+    } else {
+        out.push_str("`to` must be one of:\n\n");
+        for state in reachable {
+            out.push_str(&format!("- `{state}`\n"));
+        }
+        out.push_str(
+            "\nNaming anything else does not create an edge — it sends the run to \
+             the Navigator to be rerouted, which costs a spawn and is capped.\n\n",
+        );
+    }
+
+    out.push_str(
+        "If you cannot make progress, set `\"blocked\": true` and omit `to`, with a \
+         rationale precise enough for someone else to act on. `artifacts` is \
+         optional: list files later stages should receive (diffs, reports, \
+         samples), and the harness snapshots each one.\n\n\
+         Write the file exactly once, as the last thing you do.\n",
+    );
+    out
+}
 
 /// Read a Worker's handoff file.
 ///
@@ -50,8 +118,18 @@ pub fn clear_handoff(path: &Path) -> Result<()> {
     }
 }
 
-/// Parse a Judge's reply: `PASS` or `FAIL` alone on the first non-empty line,
-/// rationale on the rest.
+/// The two tokens a Judge may open with. Named here, beside the parser that
+/// accepts them, and spliced into the prompt by
+/// [`crate::runner::command::judge_prompt`] — the Navigator's token set is
+/// already shared between its prompt and [`parse_choice`] this way, and the
+/// Judge is the role where a silent divergence is worst: an unrecognized first
+/// line fails closed, so a reworded prompt would read as every judgement
+/// suddenly failing rather than as a broken contract.
+pub const VERDICT_PASS: &str = "PASS";
+pub const VERDICT_FAIL: &str = "FAIL";
+
+/// Parse a Judge's reply: [`VERDICT_PASS`] or [`VERDICT_FAIL`] alone on the
+/// first non-empty line, rationale on the rest.
 ///
 /// `None` means the reply did not follow the contract, and the caller must
 /// treat that as a failure — never as a pass. An unavailable or confused
@@ -65,10 +143,13 @@ pub fn clear_handoff(path: &Path) -> Result<()> {
 /// sentence, "PASS with reservations", a bare rationale — is not a verdict.
 pub fn parse_verdict(reply: &str) -> Option<(bool, String)> {
     let (first, rest) = split_first_line(reply)?;
-    let pass = match normalize_token(first).as_str() {
-        "pass" => true,
-        "fail" => false,
-        _ => return None,
+    let token = normalize_token(first);
+    let pass = if token == VERDICT_PASS.to_lowercase() {
+        true
+    } else if token == VERDICT_FAIL.to_lowercase() {
+        false
+    } else {
+        return None;
     };
     Some((pass, rest))
 }
@@ -116,6 +197,32 @@ mod tests {
     use tempfile::tempdir;
 
     // ── worker handoff ───────────────────────────────────────────────────
+
+    /// The JSON example in the prompt has to be a thing [`read_handoff`] will
+    /// actually accept. It is hand-written prose in `handoff_protocol`, and
+    /// [`Proposal`] is a serde struct somewhere else entirely — nothing but
+    /// this test stops a field being added to one and not the other, and the
+    /// failure mode is every Worker writing a handoff the harness discards.
+    #[test]
+    fn the_prompt_example_is_a_proposal_the_parser_accepts() {
+        let dir = tempdir().unwrap();
+        let handoff = dir.path().join("h.json");
+        let prompt = handoff_protocol(&handoff, &["review".to_string()]);
+
+        let json = prompt
+            .split("```json")
+            .nth(1)
+            .and_then(|rest| rest.split("```").next())
+            .expect("the protocol block shows a fenced json example");
+        // The example uses `<next state>` as a placeholder; substitute a real
+        // one, since that is what a Worker is being told to do.
+        let json = json.replace("<next state>", "review");
+        std::fs::write(&handoff, &json).unwrap();
+
+        let p = read_handoff(&handoff).expect("the documented example must parse");
+        assert_eq!(p.to.as_deref(), Some("review"));
+        assert_eq!(p.artifacts.len(), 1, "the example's artifact survived");
+    }
 
     #[test]
     fn handoff_round_trips_a_full_proposal() {

@@ -44,14 +44,14 @@ impl Context {
             task: machine.task.clone(),
             plan: machine.plan.clone(),
             state: state.to_string(),
-            prev_state: None,
             cycle: 1,
             attempt: 1,
-            crashed: false,
-            ledger_digest: String::new(),
-            entry_addendum: None,
             qa_cases: machine.qa_cases.clone(),
-            artifacts: BTreeMap::new(),
+            // Everything else — no previous state, not crashed, empty digest,
+            // no addendum, no artifacts — is exactly `Default`, and spelling
+            // it out again meant a new field had two definitions of "what
+            // preview shows".
+            ..Default::default()
         }
     }
 

@@ -164,7 +164,8 @@ pub enum EventPayload {
         artifacts: Vec<ArtifactRef>,
         usage: Usage,
     },
-    /// The worker's `transition` tool call.
+    /// The worker's handoff, or the blocked proposal the harness synthesized
+    /// when it left none.
     TransitionProposed {
         from: StateId,
         to: Option<StateId>,

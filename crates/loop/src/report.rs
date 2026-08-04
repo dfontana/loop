@@ -349,14 +349,7 @@ pub fn state_preview(r: &Resolver<'_>, id: &StateId) -> String {
     rep.field("cwd", display(&config.paths.project_dir));
     rep.field(
         "system prompt",
-        format!(
-            "{}",
-            config
-                .paths
-                .run_dir()
-                .join(format!("{id}-<cycle>-<attempt>-system.md"))
-                .display()
-        ),
+        display(&config.paths.render_file_pattern(id, "system")),
     );
     rep.field("env", "TICKET_ID, STATE, CYCLE, ATTEMPT");
     rep.field("session id", r.session_id(id, 1, 1));

@@ -11,11 +11,10 @@
 //! another headless agent CLI means writing another `*_command` builder and
 //! nothing else.
 //!
-//! TASK T4 implements this module (and `mock-pi`, which lets everything else
-//! be tested without an API key).
+//! `mock-pi` is this module's offline stand-in, which is what lets everything
+//! else be tested without an API key.
 
 use std::io::{BufRead, BufReader};
-use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 use crate::core::{
@@ -157,10 +156,7 @@ fn off_contract(message: &str, reply: &str) -> String {
     if reply.is_empty() {
         return format!("{message} (the spawn produced no text at all)");
     }
-    let mut shown: String = reply.chars().take(OFF_CONTRACT_REPLY_CHARS).collect();
-    if reply.chars().count() > OFF_CONTRACT_REPLY_CHARS {
-        shown.push('…');
-    }
+    let shown = crate::ledger::digest::truncate(reply, OFF_CONTRACT_REPLY_CHARS);
     format!("{message}; it said:\n{shown}")
 }
 
@@ -270,11 +266,4 @@ impl AgentRunner for PiRunner {
             usage: out.stream.usage,
         })
     }
-}
-
-/// Where the transcript for a spawn lives, for the ledger to reference.
-#[derive(Clone, Debug)]
-pub struct SessionRef {
-    pub id: String,
-    pub path: Option<PathBuf>,
 }

@@ -374,3 +374,25 @@ fn config_only_keys_are_rejected_with_a_migration_message() {
         assert!(err.to_string().contains(expect), "for {key}: got {err}");
     }
 }
+
+/// The `:check` table was the one wire struct that hand-wrote a `rename`
+/// instead of carrying `deny_unknown_fields`, so a misspelled `:timeout-s`
+/// deserialized clean and silently took the default — on precisely the key
+/// whose job is to stop a slow check being killed early.
+#[test]
+fn a_misspelled_check_key_is_rejected_by_name() {
+    let vm = common::vm();
+    let config = common::default_config();
+    let path = common::fixture("typo_check_key.fnl");
+
+    let err = vm.load_machine(&path, &config).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("timeut-s"),
+        "must name the offending key: {msg}"
+    );
+    assert!(
+        msg.contains("timeout-s"),
+        "must list the fields that do exist: {msg}"
+    );
+}

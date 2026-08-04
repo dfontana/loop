@@ -291,8 +291,11 @@ pub fn run(
     }
 
     let ledger_path = paths.ledger_file();
-    let started = Ledger::open(&ledger_path)?.started();
-    match (started, resuming) {
+    // One handle, consulted then kept. Opening repairs a torn tail and reads
+    // the run clock, so throwing the first one away to ask a single question
+    // paid for all of that twice.
+    let mut ledger = Ledger::open(&ledger_path)?;
+    match (ledger.started(), resuming) {
         (false, true) => bail!("nothing to resume: {} is empty", ledger_path.display()),
         (true, false) => bail!(
             "{} already has a run — use `loop resume`, or delete it to start over",
@@ -301,7 +304,6 @@ pub fn run(
         _ => {}
     }
 
-    let mut ledger = Ledger::open(&ledger_path)?;
     // Read before the engine borrows the ledger: the time budget bounds the
     // run, so a resume starts its clock at what the interrupted session
     // already burned rather than at zero.
@@ -317,7 +319,6 @@ pub fn run(
 
     let mut engine = Engine {
         machine: &machine,
-        config: &config,
         runner: &runner,
         checks: &stage,
         ledger: &mut ledger,
@@ -478,9 +479,25 @@ pub fn recap(paths: Paths) -> Result<()> {
         crate::core::EventPayload::RunStarted { machine_hash, .. } => Some(machine_hash.as_str()),
         _ => None,
     });
+    // Hash what is on disk *before* deciding to load it. The hash is the whole
+    // question — a mismatch reports the recorded run and discards the machine
+    // anyway — and a mismatch is the common case, since editing the machine
+    // after a run is the usual reason to read a recap. Loading costs a Lua VM
+    // and a 288 KB Fennel compile; hashing costs a read.
+    //
     // No recorded hash means nothing on disk could ever be proven to be the
-    // machine that ran, so the Fennel VM is never started for one.
-    let loaded = recorded_hash.and_then(|_| load(paths.clone()).ok().map(|(_vm, _cfg, m)| m));
+    // machine that ran, so the VM is never started for one either.
+    let on_disk_hash = recorded_hash.and_then(|_| {
+        std::fs::read_to_string(paths.machine_file())
+            .ok()
+            .map(|src| hex::encode(<sha2::Sha256 as sha2::Digest>::digest(src.as_bytes())))
+    });
+    let loaded = match (recorded_hash, &on_disk_hash) {
+        (Some(recorded), Some(on_disk)) if recorded == on_disk => {
+            load(paths.clone()).ok().map(|(_vm, _cfg, m)| m)
+        }
+        _ => None,
+    };
 
     let machine = match (recorded_hash, &loaded) {
         (Some(recorded), Some(m)) if recorded == m.source_hash => report::Provenance::Matches(m),
@@ -498,6 +515,22 @@ pub fn recap(paths: Paths) -> Result<()> {
                 current: m.source_hash.clone(),
             }
         }
+        // Hashes differed, so nothing was loaded — the on-disk hash is enough
+        // to report the change, and is exactly what the load would have
+        // recomputed.
+        (Some(recorded), None) => match &on_disk_hash {
+            Some(on_disk) => {
+                eprintln!(
+                    "warning: {} has changed since this run started (ledger {recorded}, on disk \
+                     {on_disk}) — the recap reports only what the ledger recorded",
+                    paths.machine_file().display(),
+                );
+                report::Provenance::Changed {
+                    current: on_disk.clone(),
+                }
+            }
+            None => report::Provenance::NotLoaded,
+        },
         _ => report::Provenance::NotLoaded,
     };
 

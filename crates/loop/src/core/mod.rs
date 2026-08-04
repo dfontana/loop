@@ -27,8 +27,8 @@ pub use machine::{
     OnExhausted, OnFail, PlaybookRef, QaCase, State, StateId, Thinking, Transition,
 };
 pub use runner::{
-    AgentRunner, CheckOutcome, CheckRunner, Choice, JudgeSpec, NavigatorSpec, Proposal, Verdict,
-    WorkerResult, WorkerSpec,
+    ABSENT_HANDOFF_RATIONALE, AgentRunner, CheckOutcome, CheckRunner, Choice, JudgeSpec,
+    NavigatorSpec, Proposal, Verdict, WorkerResult, WorkerSpec,
 };
 pub use sink::{ArtifactSink, LedgerSink};
 

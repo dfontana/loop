@@ -368,7 +368,8 @@ impl Machine {
         self.transitions.iter().filter(|t| t.from == from).collect()
     }
 
-    /// The distinct states reachable in one hop — the `transition` tool's enum.
+    /// The distinct states reachable in one hop — the targets the handoff
+    /// protocol block lists for a Worker, and the Navigator's choice set.
     pub fn neighbors(&self, from: &str) -> Vec<StateId> {
         let mut seen = BTreeSet::new();
         self.transitions
@@ -379,6 +380,9 @@ impl Machine {
             .collect()
     }
 
+    /// The edge `from -> to`. First declared wins: a machine may name the same
+    /// pair twice, and `validate` reports the duplicate rather than this
+    /// silently preferring one — so the tie-break is `find`, not `filter`.
     pub fn edge(&self, from: &str, to: &str) -> Option<&Transition> {
         self.transitions
             .iter()
@@ -390,14 +394,6 @@ impl Machine {
         self.loops
             .iter()
             .find(|l| l.head().is_some_and(|h| h == state))
-    }
-
-    /// Every loop that contains `state`.
-    pub fn loops_containing(&self, state: &str) -> Vec<&LoopSpec> {
-        self.loops
-            .iter()
-            .filter(|l| l.states.iter().any(|s| s == state))
-            .collect()
     }
 }
 

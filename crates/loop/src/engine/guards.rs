@@ -1,8 +1,6 @@
 //! The guard tiers, checked cheapest-first.
 
-use crate::core::{
-    AgentRunner, CheckRunner, GuardOutcome, JudgeSpec, Machine, Result, StateId, Transition,
-};
+use crate::core::{AgentRunner, CheckRunner, GuardOutcome, JudgeSpec, Result, StateId, Transition};
 
 /// The verdict on one proposed edge, plus what to write to the ledger.
 #[derive(Clone, Debug)]
@@ -23,22 +21,9 @@ impl GuardReport {
     }
 }
 
-/// The edge a worker's proposal takes.
-///
-/// Parallel edges between the same pair used to be disambiguated by their
-/// `when` guards; with those gone the first declared edge wins, and
-/// [`crate::engine::validate`] flags the duplicate so it never silently decides which
-/// `criteria` applies.
-pub fn select_edge<'m>(machine: &'m Machine, from: &str, to: &str) -> Option<&'m Transition> {
-    machine
-        .transitions
-        .iter()
-        .find(|t| t.from == from && t.to == to)
-}
-
 /// Run the tiers on one edge, cheapest-first.
 ///
-/// TASK T5. Two rules that are load-bearing, not stylistic:
+/// Two rules that are load-bearing, not stylistic:
 /// - The `check` runs **before** the Judge and short-circuits it. It is
 ///   deterministic, costs no tokens, and — unlike anything the Judge reads —
 ///   the worker had no hand in producing it. A failed check is not appealable
@@ -57,8 +42,9 @@ pub fn check(
     judge: impl FnOnce(&str, Option<&str>) -> Result<JudgeSpec>,
 ) -> Result<GuardReport> {
     // Structural: by the time an edge reaches `check`, it was already resolved
-    // out of the machine's declared transitions (by `select_edge` or the
-    // constrained `transition` tool schema), so it always passes here.
+    // out of the machine's declared transitions (by `Machine::edge`, or by
+    // the Navigator picking from the states it was offered), so it always
+    // passes here.
     let structural = GuardOutcome::Pass;
 
     let (check_tier, check_output) = match &edge.check {

@@ -113,7 +113,7 @@ Loads `machine.fnl`, resolves every playbook and skill inside `.loop/`, and prin
 | error | loop name | loop `{n}` declares no states |
 | error | loop name | loop `{n}` references unknown state `{s}` |
 | error | loop name | loop `{n}`'s head `{h}` is never re-entered by any transition |
-| error | `machine` | escalation_state `{e}` is not a declared terminal |
+| error | `machine` | escalation_state `{e}` names no state or terminal |
 | error | `{from}` | duplicate transition `{f}` → `{t}`: only the first is ever taken — merge them into one edge |
 | warn | `{from}` | transition `{f}` → `{t}` has neither `check` nor `criteria`: the worker's proposal is committed unexamined |
 

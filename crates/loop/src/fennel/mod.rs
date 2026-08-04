@@ -1,4 +1,4 @@
-//! Fennel evaluation: `config.fnl` and `machine.fnl` → the [`crate::core`] IR.
+//! Fennel evaluation: `machine.fnl` → the [`crate::core`] IR.
 //!
 //! The Fennel compiler (`vendor/fennel.lua`, 1.5.3, MIT) is embedded in the
 //! binary and loaded into an `mlua` Lua 5.4 VM at startup. A machine file is a
@@ -45,17 +45,6 @@ impl FennelVm {
         eval::install_fennel(&lua)?;
         eval::install_loop_module(&lua)?;
         Ok(Self { lua })
-    }
-
-    /// Compile and run a `.fnl` file, returning the table it evaluates to.
-    /// Compilation errors must carry the **Fennel** file/line, not the
-    /// generated Lua's — that is the documented weakness of this backend
-    /// (docs/05-design-notes.md) and the thing to get right.
-    pub fn eval_file(&self, path: &Path) -> Result<mlua::Value> {
-        let source = std::fs::read_to_string(path)
-            .map_err(|e| CoreError::io(format!("reading {}", path.display()), e))?;
-        let filename = path.to_string_lossy().to_string();
-        eval::eval_fennel(&self.lua, &source, &filename)
     }
 
     /// Load `.loop/machine.fnl`, resolve `:task`/`:plan` file references

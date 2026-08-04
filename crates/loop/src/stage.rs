@@ -218,11 +218,13 @@ impl StageBuilder for CliStage<'_> {
         // way into changing how the stage ends, and the handoff path is the
         // harness's own value rather than one from the context namespace.
         let mut body = render::substitute(&resolved.playbook.body, &vars);
-        body.push_str(&render::handoff_protocol(&handoff_path, &reachable));
+        body.push_str(&crate::runner::reply::handoff_protocol(
+            &handoff_path,
+            &reachable,
+        ));
         let system_prompt_path = self.toolbox.write_rendered(&context, &body, "system")?;
 
         let spec = WorkerSpec {
-            ticket: self.machine.ticket.clone(),
             state: state_id.clone(),
             cycle,
             attempt,
@@ -230,7 +232,6 @@ impl StageBuilder for CliStage<'_> {
             skill_paths: resolved.skill_paths,
             system_prompt_path,
             entry_message: render::entry_message(&context, &resolved.mcp),
-            reachable,
             mcp: resolved.mcp,
             handoff_path,
             cwd: self.config.paths.project_dir.clone(),

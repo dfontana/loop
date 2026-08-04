@@ -63,10 +63,14 @@ impl<'a> Toolbox<'a> {
             }
 
             PlaybookRef::Named(name) => {
-                // Rooted at the machine's own directory, which the caller
-                // passes in rather than reading off `config.paths` — the two
-                // differ under `-C` and under test.
-                let path = machine_dir.join("playbooks").join(format!("{name}.md"));
+                // Rooted at the machine file's own directory, which the caller
+                // passes in rather than reading off `config.paths`: resolution
+                // follows the file that named the playbook. The subdirectory
+                // name is shared with `Paths` so `init` and resolution cannot
+                // disagree about the layout.
+                let path = machine_dir
+                    .join(crate::core::config::PLAYBOOKS_DIR)
+                    .join(format!("{name}.md"));
                 match std::fs::read_to_string(&path) {
                     Ok(src) => playbook::parse(name, &src, Some(path)),
                     Err(_) => Err(CoreError::Unresolved {
@@ -82,7 +86,7 @@ impl<'a> Toolbox<'a> {
     /// Resolve one skill name to the path pi's `--skill` should load, in
     /// `<machine_dir>/skills/`.
     pub fn resolve_skill(&self, name: &str, machine_dir: &Path) -> Result<PathBuf> {
-        skill::resolve(name, &machine_dir.join("skills"))
+        skill::resolve(name, &machine_dir.join(crate::core::config::SKILLS_DIR))
     }
 
     /// Resolve every skill a stage names, in order.
@@ -108,8 +112,10 @@ impl<'a> Toolbox<'a> {
         let dir = self.config.paths.run_dir();
         std::fs::create_dir_all(&dir).io_ctx(format!("creating run dir {}", dir.display()))?;
 
-        let filename = format!("{}-{}-{}-{}.md", ctx.state, ctx.cycle, ctx.attempt, suffix);
-        let path = dir.join(filename);
+        let path = self
+            .config
+            .paths
+            .render_file(&ctx.state, ctx.cycle, ctx.attempt, suffix);
         std::fs::write(&path, rendered).io_ctx(format!("writing {}", path.display()))?;
 
         Ok(path)

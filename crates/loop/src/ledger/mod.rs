@@ -4,9 +4,6 @@
 //! See docs/02-how-it-works.md. The contract, in one line: **state is never stored,
 //! only folded** — so there is no mutable state file to desync from the log.
 //! The fold itself lives in [`crate::core::fold`]; this module is its I/O half.
-//!
-//! TASK T1 implements this module. The signatures below are the contract the
-//! engine is already written against; fill them in, don't reshape them.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
@@ -46,25 +43,26 @@ impl Ledger {
             fs::create_dir_all(parent)
                 .io_ctx(format!("creating ledger directory {}", parent.display()))?;
         }
-        repair_torn_tail(&path)?;
+        // The repair already read and parsed every line to find out whether the
+        // last one was torn, so the clock is read off *that* parse rather than
+        // re-reading the file — opening used to cost two full reads and two
+        // full parses before the caller's own `read_all` made it three.
+        let content = repair_torn_tail(&path)?;
+        let elapsed_offset_s = parse_events(&content, &path)?
+            .last()
+            .map(|e| e.elapsed_s)
+            .unwrap_or_default();
         let file = OpenOptions::new()
             .create(true)
             .append(true)
             .open(&path)
             .io_ctx(format!("opening ledger {}", path.display()))?;
-        let mut ledger = Self {
+        Ok(Self {
             path,
             file,
-            elapsed_offset_s: 0,
+            elapsed_offset_s,
             opened_at: std::time::Instant::now(),
-        };
-        ledger.elapsed_offset_s = ledger
-            .read_all()?
-            .last()
-            .map(|e| e.elapsed_s)
-            .unwrap_or_default();
-        ledger.opened_at = std::time::Instant::now();
-        Ok(ledger)
+        })
     }
 
     /// Only this module's own tests read the path back — every caller opened
@@ -96,13 +94,13 @@ impl Ledger {
     /// Read the repaired ledger without reformatting it.
     ///
     /// The parse validates the same byte snapshot that is returned, so a torn
-    /// tail appended after this handle opened cannot leak into raw JSONL.
+    /// tail appended after this handle opened cannot leak into raw JSONL — the
+    /// repair returns the truncated content, and `parse_events` then either
+    /// accepts all of it or reports interior corruption.
     pub fn read_raw(&self) -> Result<Vec<u8>> {
-        repair_torn_tail(&self.path)?;
-        let content = read_content(&self.path)?;
+        let content = repair_torn_tail(&self.path)?;
         parse_events(&content, &self.path)?;
-        let end = torn_tail_start(&content).unwrap_or(content.len());
-        Ok(content.as_bytes()[..end].to_vec())
+        Ok(content.into_bytes())
     }
 }
 
@@ -163,10 +161,14 @@ fn read_content(path: &Path) -> Result<String> {
 /// truncates") makes the crash cost exactly what it should: the one event that
 /// was still in flight, and nothing else. Idempotent, so opening a healthy
 /// ledger does no I/O beyond the read.
-fn repair_torn_tail(path: &Path) -> Result<()> {
+///
+/// Returns the repaired contents. It has to read and parse the whole file to
+/// decide anything, so handing that back is what lets callers avoid doing the
+/// same read a second time.
+fn repair_torn_tail(path: &Path) -> Result<String> {
     let content = read_content(path)?;
     if content.is_empty() {
-        return Ok(());
+        return Ok(content);
     }
 
     // Only the final non-empty line may be torn. If an earlier line is also
@@ -183,14 +185,14 @@ fn repair_torn_tail(path: &Path) -> Result<()> {
     }
 
     let Some((torn_start, torn_valid)) = nonempty.last().copied() else {
-        return Ok(());
+        return Ok(content);
     };
     if torn_valid
         || nonempty[..nonempty.len() - 1]
             .iter()
             .any(|(_, valid)| !valid)
     {
-        return Ok(());
+        return Ok(content);
     }
 
     let file = OpenOptions::new()
@@ -201,24 +203,10 @@ fn repair_torn_tail(path: &Path) -> Result<()> {
         .io_ctx(format!("truncating torn tail of {}", path.display()))?;
     file.sync_all()
         .io_ctx(format!("fsyncing repaired ledger {}", path.display()))?;
-    Ok(())
-}
 
-/// Return the byte offset of the one tolerated malformed final line.
-fn torn_tail_start(content: &str) -> Option<usize> {
-    let mut last_nonempty = None;
-    let mut offset = 0usize;
-    for line in content.split_inclusive('\n') {
-        let trimmed = line.strip_suffix('\n').unwrap_or(line);
-        if !trimmed.trim().is_empty() {
-            last_nonempty = Some((offset, serde_json::from_str::<Event>(trimmed).is_ok()));
-        }
-        offset += line.len();
-    }
-    match last_nonempty {
-        Some((start, false)) => Some(start),
-        _ => None,
-    }
+    let mut content = content;
+    content.truncate(torn_start);
+    Ok(content)
 }
 
 /// Parse newline-delimited events, tolerating an unparseable *last* line (a

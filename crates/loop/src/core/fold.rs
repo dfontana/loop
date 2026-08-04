@@ -4,8 +4,6 @@
 //! semantics over a slice of events — no I/O — and the engine is its only
 //! consumer. `ledger` owns getting events on and off disk; this owns
 //! what they mean.
-//!
-//! TASK T5 implements [`fold`].
 
 use std::collections::BTreeMap;
 
@@ -83,7 +81,7 @@ impl RunState {
 
 /// Fold the event log into the current run state.
 ///
-/// TASK T5. Rules (docs/02-how-it-works.md):
+/// Rules (docs/02-how-it-works.md):
 /// - `state_entered` bumps `attempts[(state, cycle)]` and sets `current`.
 /// - `transition_committed` sets `current = to`; the caller tells cycles apart
 ///   via [`fold_with_loop_heads`] — plain `fold` counts a re-entry of any state
@@ -103,8 +101,6 @@ pub fn fold(events: &[Event]) -> RunState {
 
 /// Fold, consulting the machine about which states are loop heads (only a loop
 /// head's re-entry increments a cycle counter).
-///
-/// TASK T5.
 pub fn fold_with_loop_heads(events: &[Event], is_loop_head: &dyn Fn(&str) -> bool) -> RunState {
     /// Where the tail of the ledger leaves us, used to derive [`ResumePoint`].
     enum Tail {
@@ -247,15 +243,6 @@ pub fn fold_with_loop_heads(events: &[Event], is_loop_head: &dyn Fn(&str) -> boo
     };
 
     rs
-}
-
-/// Convenience for `status`: the last event of a given kind.
-pub fn last_of<'e>(events: &'e [Event], kind: &str) -> Option<&'e EventPayload> {
-    events
-        .iter()
-        .rev()
-        .find(|e| e.kind() == kind)
-        .map(|e| &e.payload)
 }
 
 #[cfg(test)]
