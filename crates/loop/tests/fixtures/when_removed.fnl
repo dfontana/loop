@@ -6,5 +6,5 @@
  :plan "inline plan"
  :entry "a"
  :terminals ["done"]
- :states {:a {:playbook "a"}}
+ :states {:a {:stage-prompt "a"}}
  :transitions [{:from "a" :to "a" :when "qa.result == 'pass'"}]}

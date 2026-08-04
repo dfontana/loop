@@ -9,5 +9,5 @@
  :entry "a"
  :terminals ["done"]
  :transition-mode "open"
- :states {:a {:playbook "a"}}
+ :states {:a {:stage-prompt "a"}}
  :transitions [{:from "a" :to "done"}]}

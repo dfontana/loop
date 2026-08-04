@@ -1,13 +1,26 @@
-//! Playbooks are pi skills: YAML frontmatter + a markdown body.
+//! A stage prompt: YAML frontmatter + a markdown body, the same shape a pi
+//! skill has on disk. The format is shared; what loop does with it is not.
+//! This one gets opened, rendered, and handed to `--append-system-prompt`, so
+//! its frontmatter can set the stage's model and its body can interpolate the
+//! task, the plan, and the ledger digest. A skill gets none of that — see
+//! [`super::skill`].
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
 use crate::core::{CoreError, Result, Thinking};
 
+/// The single place a bare stage-prompt name is looked for. A one-element list
+/// rather than a bare path so it feeds [`super::resolve_name`] the same way
+/// [`super::skill::candidates`] does — and so growing a second spelling later
+/// is a change to this function rather than to the resolver.
+pub fn candidates(name: &str, stage_prompts_dir: &Path) -> Vec<PathBuf> {
+    vec![stage_prompts_dir.join(format!("{name}.md"))]
+}
+
 #[derive(Clone, Debug, Default)]
-pub struct ResolvedPlaybook {
+pub struct ResolvedStagePrompt {
     pub name: String,
     /// `None` for an inline prompt.
     pub path: Option<PathBuf>,
@@ -29,17 +42,19 @@ struct Frontmatter {
 }
 
 /// Split `---\n<yaml>\n---\n<body>`. A file without frontmatter is all body.
-pub fn parse(name: &str, source: &str, path: Option<PathBuf>) -> Result<ResolvedPlaybook> {
+pub fn parse(name: &str, source: &str, path: Option<PathBuf>) -> Result<ResolvedStagePrompt> {
     let (frontmatter_src, body) = split_frontmatter(source);
 
     let fm: Frontmatter = match frontmatter_src {
         Some(fm_src) => serde_yaml_ng::from_str(fm_src).map_err(|e| {
-            CoreError::machine(format!("playbook `{name}` has malformed frontmatter: {e}"))
+            CoreError::machine(format!(
+                "stage prompt `{name}` has malformed frontmatter: {e}"
+            ))
         })?,
         None => Frontmatter::default(),
     };
 
-    Ok(ResolvedPlaybook {
+    Ok(ResolvedStagePrompt {
         name: fm.name.unwrap_or_else(|| name.to_string()),
         path,
         body: body.to_string(),

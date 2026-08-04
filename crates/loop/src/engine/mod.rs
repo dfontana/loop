@@ -665,7 +665,7 @@ fn last_worker_output_for(events: &[Event], state: &str) -> (String, Vec<Artifac
 /// not always adjacent: a routed target with a guard on the edge puts a
 /// `guard_checked` between the two, which is the ordinary case, and reading
 /// only `commit_idx - 1` meant the note survived exactly when it was useless
-/// (a route to the terminal escalation state, which never renders a playbook).
+/// (a route to the terminal escalation state, which never renders a stage prompt).
 ///
 /// The episode bound is what keeps this from reaching back into an earlier
 /// cycle and re-delivering a stale note the run has long since moved past.

@@ -48,8 +48,8 @@ The engine's outer loop reads the whole ledger, folds it into a run state, and d
 1. **Terminal check.** If the state is a terminal, the run finishes here. The status is `Failed` if that terminal is the machine's `:escalation-state`, and `Done` otherwise.
 2. **Budget check — before any process is spawned.** A breach appends a fatal `error` and `run_finished{status: aborted}` and stops.
 3. **Compute `cycle` and `attempt`.** `cycle` is only meaningful for loop heads; every other state gets `1`. `attempt` is the count of prior attempts at this state in this cycle, plus one.
-4. **Look up a pending Navigator addendum** — the `entry_prompt` the Navigator wrote when it redirected the run here, found by scanning back from the commit through that routing decision's own events. It reaches the playbook as `$ENTRY_ADDENDUM`.
-5. **Build the stage.** Resolve the playbook, resolve the skill list, and render the prompt by substituting `$VAR` template variables into the playbook body.
+4. **Look up a pending Navigator addendum** — the `entry_prompt` the Navigator wrote when it redirected the run here, found by scanning back from the commit through that routing decision's own events. It reaches the stage prompt as `$ENTRY_ADDENDUM`.
+5. **Build the stage.** Resolve the stage prompt, resolve the skill list, and render the prompt by substituting `$VAR` template variables into the stage prompt body.
 6. **Append `state_entered`** — state, cycle, attempt, model, thinking, the resolved skill names, the MCP server names.
 7. **Spawn the Worker** and stream-parse its stdout.
 8. **If the process itself failed** (non-zero exit, spawn error), append a transient `error` and return; the fold will re-enter the state. After `MAX_CRASH_ATTEMPTS = 3` consecutive crashes the engine appends a `note` and escalates. The `error` carries the tail of pi's stderr, so a spawn failure leaves a diagnosis rather than just an exit code.
@@ -81,7 +81,7 @@ They differ in what they are allowed to do.
 
 ### Worker
 
-The Worker is the stage. It does the actual work: reads files, edits code, runs tests, whatever the playbook tells it to. It is the only role with real capability, and the only one that can see your repository.
+The Worker is the stage. It does the actual work: reads files, edits code, runs tests, whatever the stage prompt tells it to. It is the only role with real capability, and the only one that can see your repository.
 
 Its model comes from the resolution chain documented in [customizing](03-customizing.md#model-resolution); the last resort is the machine's `:worker`, over a built-in floor of `claude-sonnet-5` at `medium` thinking.
 
@@ -91,7 +91,7 @@ Its model comes from the resolution chain documented in [customizing](03-customi
 --provider <p> --model <model>:<thinking>
 --no-skills
 --skill <path>            (repeated, one per resolved skill)
---append-system-prompt <path-to-rendered-playbook>
+--append-system-prompt <path-to-rendered-stage prompt>
 <entry message>           (positional, last)
 ```
 
@@ -228,7 +228,7 @@ An edge with neither `:check` nor `:criteria` commits the Worker's proposal unex
 
 **How a check command is executed:**
 
-- The command string goes through the same `$VAR` substitution as a playbook body, so `$TICKET_ID`, `$STATE`, `$CYCLE`, `$ATTEMPT`, `$ARTIFACT_<NAME>` and the rest are all available. The four scalars `TICKET_ID`, `STATE`, `CYCLE`, `ATTEMPT` are _also_ exported as real environment variables to the subprocess.
+- The command string goes through the same `$VAR` substitution as a stage prompt body, so `$TICKET_ID`, `$STATE`, `$CYCLE`, `$ATTEMPT`, `$ARTIFACT_<NAME>` and the rest are all available. The four scalars `TICKET_ID`, `STATE`, `CYCLE`, `ATTEMPT` are _also_ exported as real environment variables to the subprocess.
 - It is run as **`bash -c <cmd>`** — bash specifically, not `sh`, not your login shell. No profile is sourced.
 - Working directory is the project directory. Stdin is null.
 - **stdout and stderr are merged** into one temp file, so a failing command's error message is captured alongside its output.
@@ -492,7 +492,7 @@ loop session --latest                  # newest Worker attempt
 
 `sessions` finds the transcript; `session` opens it. `status` and the ledger tell you what was decided; this pair is how you read what was actually said.
 
-They read nothing but the ledger. Every candidate is a `state_entered` with a non-empty `session_id`; `session` then runs `pi --session <id>` in the project directory and hands over stdin, stdout, and stderr untouched. Neither a loadable machine nor a resolvable playbook is required — a mid-edit `machine.fnl` is often exactly when you want this.
+They read nothing but the ledger. Every candidate is a `state_entered` with a non-empty `session_id`; `session` then runs `pi --session <id>` in the project directory and hands over stdin, stdout, and stderr untouched. Neither a loadable machine nor a resolvable stage prompt is required — a mid-edit `machine.fnl` is often exactly when you want this.
 
 **The listing is a pipeline, not a menu.** One line per attempt, in ledger order, padded into columns:
 
@@ -538,7 +538,7 @@ Nothing here is written: loop neither parses nor mutates pi's session files, and
 loop diagram
 ```
 
-Renders the machine as a mermaid state diagram on stdout, with no fences and no prose, so `loop diagram > machine.mmd` gives you a bare `.mmd` file. It is a pure function of the machine — nothing on disk is consulted beyond the machine file itself — so a machine with a dangling playbook reference still draws. Output is deterministic.
+Renders the machine as a mermaid state diagram on stdout, with no fences and no prose, so `loop diagram > machine.mmd` gives you a bare `.mmd` file. It is a pure function of the machine — nothing on disk is consulted beyond the machine file itself — so a machine with a dangling stage prompt reference still draws. Output is deterministic.
 
 This is the fastest way to check that the machine you _wrote_ is the machine you _meant_. From the bundled `standard-ticket` machine:
 
@@ -651,9 +651,9 @@ The `--append-system-prompt` file the Worker actually received is kept on disk, 
 
 (`sanitize` maps any character outside `[A-Za-z0-9_-]` to `-`. `run/` is derived and gitignored, so deleting it costs nothing but the ability to read back an old attempt's prompt.)
 
-**This is the way to see what the agent was actually told.** Not the playbook source — the rendered result, with every `$VAR` already substituted. When a stage behaves as though it doesn't know the plan, open the render for that attempt and check whether `$PLAN` is in there at all.
+**This is the way to see what the agent was actually told.** Not the stage prompt source — the rendered result, with every `$VAR` already substituted. When a stage behaves as though it doesn't know the plan, open the render for that attempt and check whether `$PLAN` is in there at all.
 
-That question comes up more than you would expect, because there is **no automatically-prepended context header**. Template variables reach the agent only where the playbook author interpolated them. A playbook that never writes `$TASK` gets no task; a playbook that never writes `$LEDGER_DIGEST` gets no digest. The render file is the proof.
+That question comes up more than you would expect, because there is **no automatically-prepended context header**. Template variables reach the agent only where the stage prompt author interpolated them. A stage prompt that never writes `$TASK` gets no task; a stage prompt that never writes `$LEDGER_DIGEST` gets no digest. The render file is the proof.
 
 The other half of the prompt is the positional entry message, which is not written to disk. It is short and contains **no ticket id, task, plan, or digest** — only the MCP connect instructions when the stage names servers, then:
 
@@ -682,6 +682,6 @@ The resume point comes entirely from the **last significant event**:
 
 **The consequence: an interrupted stage re-runs from scratch, at `attempt + 1`.** There is no partial-stage recovery. If the Worker spent twenty minutes editing files and the process died before `worker_output` was appended, those edits are still on disk — but the stage runs again from its rendered prompt with no memory of having run.
 
-**So stages must be idempotent.** A stage that appends to a file, posts a comment, or opens a PR unconditionally will do it twice. Write stages that check before they act: "if the PR already exists, update it"; "if the migration is already applied, skip it". The ledger digest is available to the playbook via `$LEDGER_DIGEST`, and `$ATTEMPT` tells the agent which try this is.
+**So stages must be idempotent.** A stage that appends to a file, posts a comment, or opens a PR unconditionally will do it twice. Write stages that check before they act: "if the PR already exists, update it"; "if the migration is already applied, skip it". The ledger digest is available to the stage prompt via `$LEDGER_DIGEST`, and `$ATTEMPT` tells the agent which try this is.
 
-A re-entry after a crash is marked: the playbook sees `$CRASHED` as `1` (empty on a clean entry), which is the hook for "check whether I already opened that PR" without having to infer it from `$ATTEMPT`.
+A re-entry after a crash is marked: the stage prompt sees `$CRASHED` as `1` (empty on a clean entry), which is the hook for "check whether I already opened that PR" without having to infer it from `$ATTEMPT`.

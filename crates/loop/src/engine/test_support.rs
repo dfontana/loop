@@ -9,8 +9,8 @@ use std::path::PathBuf;
 use crate::core::{
     AgentRunner, ArtifactClaim, ArtifactRef, ArtifactSink, Budgets, Check, CheckOutcome,
     CheckRunner, Choice, Context, CoreError, Defaults, Event, EventPayload, JudgeSpec, LoopSpec,
-    Machine, ModelChoice, ModelSpec, NavigatorSpec, OnExhausted, OnFail, PlaybookRef, Proposal,
-    QaCase, Result, State, StateId, Thinking, Totals, Transition, Usage, Verdict, WorkerResult,
+    Machine, ModelChoice, ModelSpec, NavigatorSpec, OnExhausted, OnFail, Proposal, QaCase, Result,
+    StagePromptRef, State, StateId, Thinking, Totals, Transition, Usage, Verdict, WorkerResult,
     WorkerSpec,
 };
 
@@ -57,7 +57,7 @@ pub fn base_machine() -> Machine {
 pub fn state(id: &str) -> State {
     State {
         id: id.into(),
-        playbook: PlaybookRef::Inline("test playbook".into()),
+        stage_prompt: StagePromptRef::Inline("test stage prompt".into()),
         model: ModelChoice::default(),
         skills: Vec::new(),
         mcp: Vec::new(),
@@ -296,7 +296,7 @@ impl AgentRunner for FakeRunner {
 pub struct FakeStageBuilder<'m> {
     pub machine: &'m Machine,
     /// The context handed to every stage this builder assembled, in order —
-    /// how a test asserts on what actually reached the playbook rather than on
+    /// how a test asserts on what actually reached the stage prompt rather than on
     /// what the engine meant to send.
     pub contexts: RefCell<Vec<Context>>,
 }

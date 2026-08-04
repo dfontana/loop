@@ -4,5 +4,5 @@
  :plan "inline plan"
  :entry "a"
  :terminals ["done"]
- :states {:a {:playbook "a"}}
+ :states {:a {:stage-prompt "a"}}
  :transitions [{:from 42 :to "a"}]}

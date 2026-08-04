@@ -6,7 +6,7 @@
 //! no usable verdict fails closed; a Navigator with no usable choice escalates.
 //!
 //! The Worker's half of its contract ([`handoff_protocol`], the block appended
-//! to every rendered playbook) lives here beside the parser that has to accept
+//! to every rendered stage prompt) lives here beside the parser that has to accept
 //! it — the Judge's and Navigator's prompts sit beside theirs in
 //! [`crate::runner::command`] for the same reason. A contract stated in one
 //! module and parsed in another drifts, and the drift is silent.

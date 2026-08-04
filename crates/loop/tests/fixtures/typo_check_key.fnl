@@ -7,6 +7,6 @@
  :plan "inline plan"
  :entry "a"
  :terminals ["done"]
- :states {:a {:playbook "implement"}}
+ :states {:a {:stage-prompt "implement"}}
  :transitions [{:from "a" :to "done"
                 :check {:cmd "true" :timeut-s 300}}]}

@@ -25,10 +25,10 @@
 //!  :escalation-state "blocked"
 //!
 //!  :states
-//!  {:implement  {:playbook "implement" :thinking "high"
+//!  {:implement  {:stage-prompt "implement" :thinking "high"
 //!                :skills ["spark-build"]
 //!                :description "Implement the plan; keep the build green."}
-//!   :qa-staging {:playbook "qa" :thinking "high"
+//!   :qa-staging {:stage-prompt "qa" :thinking "high"
 //!                :skills ["staging-deploy" "spark-run"]
 //!                :mcp ["warehouse"]}}
 //!
@@ -52,11 +52,12 @@
 //!
 //! Four kinds of thing survive:
 //!
-//! 1. **Removed keys.** `:when`, `:context`, and `:transition-mode` must fail
-//!    with a message naming their replacement, which is more than
-//!    `deny_unknown_fields` would say.
+//! 1. **Removed and renamed keys.** `:when`, `:context`, and
+//!    `:transition-mode` must fail with a message naming their replacement,
+//!    which is more than `deny_unknown_fields` would say — and `:playbook`,
+//!    which was renamed rather than removed, needs one even more badly.
 //! 2. **File resolution.** `:task`/`:plan` may name a file to read.
-//! 3. **Cross-field rules.** A state needs exactly one of `:playbook`/
+//! 3. **Cross-field rules.** A state needs exactly one of `:stage-prompt`/
 //!    `:prompt`; `:entry` may be omitted only for a single-state machine;
 //!    every `:from`/`:to`/`:escalation-state` must name something declared.
 //! 4. **Layering.** Budgets tighten against loop's built-in floor, and role
@@ -72,7 +73,7 @@
 //!   than at load — loop has nothing to check it against.
 //! - `:model`/`:thinking`/`:provider` are all optional at every level — leave
 //!   them `None` and let [`crate::core::Machine::resolve_model`] stack the layers.
-//!   Do **not** eagerly fill in defaults here; the playbook frontmatter layer
+//!   Do **not** eagerly fill in defaults here; the stage prompt frontmatter layer
 //!   sits between the state and the machine defaults.
 //! - Missing `:entry` defaults to the first key of `:states` only if there is
 //!   exactly one; otherwise it is an error. Silent guessing is worse than a
@@ -100,7 +101,7 @@ use std::path::{Path, PathBuf};
 
 use crate::core::{
     Check, Config, CoreError, DEFAULT_CHECK_TIMEOUT_S, Defaults, LoopSpec, Machine, ModelChoice,
-    ModelSpec, OnExhausted, PlaybookRef, Result, State, StateId, Transition,
+    ModelSpec, OnExhausted, Result, StagePromptRef, State, StateId, Transition,
 };
 
 use crate::fennel::wire;
@@ -132,11 +133,16 @@ fn from_table<T: serde::de::DeserializeOwned>(table: &mlua::Table) -> Result<T> 
     })
 }
 
-// ── removed keys ───────────────────────────────────────────────────────────
+// ── removed and renamed keys ───────────────────────────────────────────────
 //
 // `deny_unknown_fields` would already reject each of these, but only with
 // "unknown field". A key that used to do something deserves to be told what
-// replaced it, so these three run first and win.
+// replaced it, so these run first and win.
+//
+// The rename (`:playbook`) has the strongest case of the four, not the
+// weakest: the generic error would offer `stage-prompt` and `prompt` side by
+// side with nothing to choose between them, and choosing wrong loads cleanly
+// and runs the wrong text as a stage's prompt.
 
 fn get_value(table: &mlua::Table, key: &str) -> Result<mlua::Value> {
     table
@@ -158,7 +164,7 @@ fn reject_removed_config_key(table: &mlua::Table) -> Result<()> {
     if present(table, "context")? {
         return Err(CoreError::machine(
             "`:context` was removed — the rolling digest is the only continuity channel between \
-             stages; interpolate `$LEDGER_DIGEST` in a playbook and tune `:digest-last-n`"
+             stages; interpolate `$LEDGER_DIGEST` in a stage prompt and tune `:digest-last-n`"
                 .to_string(),
         ));
     }
@@ -197,6 +203,45 @@ fn reject_when(table: &mlua::Table) -> Result<()> {
             return Err(CoreError::machine(format!(
                 "transitions[{i}]: `:when` guards were removed — express the condition as a \
                  `:check` command the harness runs, or as `:criteria` for the Judge to evaluate"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// `:playbook` was renamed to `:stage-prompt`.
+///
+/// This one is a rename rather than a removal, so the key still does exactly
+/// what it always did — which is precisely why it needs its own message.
+/// `deny_unknown_fields` would report "unknown field `playbook`, expected one
+/// of `stage-prompt`, `prompt`, …", and an author reading that has to guess
+/// whether the replacement is the one that names a file or the one that
+/// carries the text. It is the former, and saying so is cheaper than a wrong
+/// guess that loads and then runs the wrong prompt.
+fn reject_renamed_playbook_key(table: &mlua::Table) -> Result<()> {
+    let Some(states) = table
+        .get::<mlua::Value>("states")
+        .ok()
+        .and_then(|v| match v {
+            mlua::Value::Table(t) => Some(t),
+            _ => None,
+        })
+    else {
+        return Ok(());
+    };
+    for pair in states.pairs::<mlua::Value, mlua::Value>() {
+        let Ok((key, mlua::Value::Table(st))) = pair else {
+            continue;
+        };
+        if present(&st, "playbook")? {
+            let id = key
+                .as_string()
+                .and_then(|s| s.to_str().ok().map(|s| s.to_string()))
+                .unwrap_or_default();
+            return Err(CoreError::machine(format!(
+                "state `{id}`: `:playbook` was renamed to `:stage-prompt` — it still names a \
+                 file in `.loop/stage-prompts/` (or a path containing `/`). The inline-text \
+                 key is still `:prompt`, and `.loop/playbooks/` is now `.loop/stage-prompts/`"
             )));
         }
     }
@@ -244,15 +289,15 @@ fn resolve_prose(raw: String, field: &'static str, machine_dir: &Path) -> Result
     }
 }
 
-/// `:playbook` (bare name or `/`-containing path) or a state-local `:prompt`.
+/// `:stage-prompt` (bare name or `/`-containing path) or a state-local `:prompt`.
 /// Exactly one is required — a cross-field rule serde has no way to state.
-fn playbook_ref(state: &wire::State, state_id: &str) -> Result<PlaybookRef> {
-    match (&state.playbook, &state.prompt) {
-        (Some(p), _) if p.contains('/') => Ok(PlaybookRef::Path(PathBuf::from(p))),
-        (Some(p), _) => Ok(PlaybookRef::Named(p.clone())),
-        (None, Some(prompt)) => Ok(PlaybookRef::Inline(prompt.clone())),
+fn stage_prompt_ref(state: &wire::State, state_id: &str) -> Result<StagePromptRef> {
+    match (&state.stage_prompt, &state.prompt) {
+        (Some(p), _) if p.contains('/') => Ok(StagePromptRef::Path(PathBuf::from(p))),
+        (Some(p), _) => Ok(StagePromptRef::Named(p.clone())),
+        (None, Some(prompt)) => Ok(StagePromptRef::Inline(prompt.clone())),
         (None, None) => Err(CoreError::machine(format!(
-            "state `{state_id}`: needs either `:playbook` or `:prompt`"
+            "state `{state_id}`: needs either `:stage-prompt` or `:prompt`"
         ))),
     }
 }
@@ -307,6 +352,7 @@ pub fn machine_from_table(
 ) -> Result<Machine> {
     reject_transition_mode(table)?;
     reject_removed_config_key(table)?;
+    reject_renamed_playbook_key(table)?;
     reject_when(table)?;
     let m: wire::Machine = from_table(table)?;
 
@@ -319,7 +365,7 @@ pub fn machine_from_table(
             id.clone(),
             State {
                 id: id.clone(),
-                playbook: playbook_ref(st, id)?,
+                stage_prompt: stage_prompt_ref(st, id)?,
                 model: wire::model_choice(&st.provider, &st.model, st.thinking),
                 skills: st.skills.clone(),
                 mcp: st.mcp.clone(),

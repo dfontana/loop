@@ -4,7 +4,7 @@ A local, **ticket-level agent orchestrator**. You write a small state machine fo
 
 The harness is deterministic and cheap. The agents are non-deterministic and expensive. **The harness owns control flow and the ledger; the agent owns the work inside a stage.** An agent ends its stage by _proposing_ where to go next. The harness _disposes_: it runs the edge's check command, asks an independent Judge whether the criteria are met, and only then commits the move. Every step is appended to a JSONL ledger, so a run is auditable, resumable, and greppable.
 
-The per-ticket machine is meant to be hacked together fast and thrown away. Everything a ticket needs lives in one directory, `.loop/` — the machine, its prose, its playbooks, its skills, its ledger — so a ticket is self-contained, and starting a new one is `loop init --from` a directory you keep.
+The per-ticket machine is meant to be hacked together fast and thrown away. Everything a ticket needs lives in one directory, `.loop/` — the machine, its prose, its stage prompts, its skills, its ledger — so a ticket is self-contained, and starting a new one is `loop init --from` a directory you keep.
 
 ## Quickstart
 
@@ -55,7 +55,7 @@ Full walkthrough: [Getting started](docs/01-getting-started.md).
 | --- | --- |
 | [01 — Getting started](docs/01-getting-started.md) | Install, scaffold a ticket, run your first loop, read the result |
 | [02 — How a run works](docs/02-how-it-works.md) | The run loop, the three roles and how each one answers, guards, budgets, the ledger, and how to inspect a run in flight |
-| [03 — Customizing a loop](docs/03-customizing.md) | Every key in `machine.fnl`, plus playbooks, skills, MCP, template variables, and check commands |
+| [03 — Customizing a loop](docs/03-customizing.md) | Every key in `machine.fnl`, plus stage prompts, skills, MCP, template variables, and check commands |
 | [04 — CLI reference](docs/04-cli-reference.md) | Every command, flag, environment variable, and exit code |
 | [05 — Design notes](docs/05-design-notes.md) | Why it works this way, the tradeoffs, and the known gaps |
 | [examples/](examples/) | A complete worked ticket — a real `.loop/`, and the ledger the run produced |
@@ -74,10 +74,10 @@ Which means the only pi-specific code left is one function that builds an argv. 
 
 ## Glossary
 
-- **Machine** — the per-ticket definition: states, transitions, loops, budgets, and QA cases. One Fennel file (`machine.fnl`) that _references_ the task and plan prose and each stage's playbook by name.
-- **State / stage** — a node in the machine, bound to a playbook that supplies its prompt.
-- **Playbook** — a stage's prompt: a markdown file with optional frontmatter, in `./.loop/playbooks/`.
-- **Skill** — situational know-how bound into a stage: a `SKILL.md` plus the scripts beside it, or a bare `.md`. Loaded through `pi --skill`.
+- **Machine** — the per-ticket definition: states, transitions, loops, budgets, and QA cases. One Fennel file (`machine.fnl`) that _references_ the task and plan prose, and names each stage's prompt and skills.
+- **State / stage** — a node in the machine, bound to exactly one stage prompt.
+- **Stage prompt** — what a stage is *told*: a markdown file in `./.loop/stage-prompts/`, rendered with the run's `$VAR`s and handed to `pi --append-system-prompt`. Always in that stage's context.
+- **Skill** — what a stage is *offered*: a `SKILL.md` plus the scripts beside it, or a bare `.md`, passed to `pi --skill`. loop never opens one; the model sees its name and description and decides whether to load it.
 - **Check** — a command the _harness_ runs itself after a stage exits; exit 0 passes the edge. The one signal a worker cannot author, because it never touches the worker's session.
 - **Criteria** — a prose standard an independent Judge evaluates against the stage's output and artifacts.
 - **Ledger** — append-only JSONL at `.loop/ledger.jsonl`. The source of truth for where a run is; all state is folded from it, never stored.

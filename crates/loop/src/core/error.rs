@@ -17,7 +17,7 @@ pub enum CoreError {
     #[error("agent ({role}): {detail}")]
     Agent { role: String, detail: String },
 
-    /// A referenced playbook, tool, or prose file could not be resolved.
+    /// A referenced stage prompt, tool, or prose file could not be resolved.
     #[error("could not resolve {kind} `{name}`{}", .searched.iter().map(|p| format!("\n  searched: {}", p.display())).collect::<String>())]
     Unresolved {
         kind: &'static str,

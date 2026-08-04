@@ -26,10 +26,10 @@ pub struct StagePlan {
 }
 
 pub trait StageBuilder {
-    /// Render the playbook, write it out, and assemble the spawn spec.
+    /// Render the stage prompt, write it out, and assemble the spawn spec.
     ///
     /// `crashed` marks a re-entry that follows a stage which died mid-flight
-    /// rather than a clean arrival, and reaches the playbook as `$CRASHED`. A
+    /// rather than a clean arrival, and reaches the stage prompt as `$CRASHED`. A
     /// stage doing something non-idempotent — opening a PR, kicking a deploy —
     /// is the reason it is worth telling apart from a first attempt.
     fn build_stage(

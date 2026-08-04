@@ -1,7 +1,7 @@
 //! The `StageBuilder` the engine drives.
 //!
 //! This is where the engine's abstract "run state X, cycle N" becomes concrete
-//! files and flags: a playbook resolved and rendered, a context pack assembled
+//! files and flags: a stage prompt resolved and rendered, a context pack assembled
 //! from the ledger, a `pi` invocation described. The engine deliberately knows
 //! none of it.
 
@@ -13,14 +13,14 @@ use crate::core::{
 };
 use crate::engine::{StageBuilder, StagePlan};
 use crate::ledger::{Ledger, digest};
-use crate::toolbox::{ResolvedPlaybook, Toolbox, frontmatter_model, render};
+use crate::toolbox::{ResolvedStagePrompt, Toolbox, frontmatter_model, render};
 
 /// What a state resolves to before any ledger is read or any file is written:
-/// the four-layer model, the local-first playbook, and the effective skill and
+/// the four-layer model, the local-first stage prompt, and the effective skill and
 /// MCP sets.
 pub struct Resolved<'a> {
     pub state: &'a State,
-    pub playbook: ResolvedPlaybook,
+    pub stage_prompt: ResolvedStagePrompt,
     pub model: ModelSpec,
     /// Skill *names*, as the ledger records them.
     pub skills: Vec<String>,
@@ -55,19 +55,19 @@ impl<'a> Resolver<'a> {
             .machine
             .state(state_id)
             .ok_or_else(|| crate::core::CoreError::machine(format!("no such state: {state_id}")))?;
-        let playbook = self
+        let stage_prompt = self
             .toolbox
-            .resolve_playbook(&state.playbook, &self.machine.dir)?;
+            .resolve_stage_prompt(&state.stage_prompt, &self.machine.dir)?;
         let model = self
             .machine
-            .resolve_model(state, &frontmatter_model(&playbook));
+            .resolve_model(state, &frontmatter_model(&stage_prompt));
         let skills = self.machine.resolve_skills(state);
         let skill_paths = self.toolbox.resolve_skills(&skills, &self.machine.dir)?;
         let mcp = self.machine.resolve_mcp(state);
 
         Ok(Resolved {
             state,
-            playbook,
+            stage_prompt,
             model,
             skills,
             skill_paths,
@@ -209,10 +209,10 @@ impl StageBuilder for CliStage<'_> {
         let handoff_path = self.config.paths.handoff_file(state_id, cycle, attempt);
 
         // The protocol block is appended *after* substitution, and is not
-        // itself a template — a playbook must not be able to interpolate its
+        // itself a template — a stage prompt must not be able to interpolate its
         // way into changing how the stage ends, and the handoff path is the
         // harness's own value rather than one from the context namespace.
-        let mut body = render::substitute(&resolved.playbook.body, &vars);
+        let mut body = render::substitute(&resolved.stage_prompt.body, &vars);
         body.push_str(&crate::runner::reply::handoff_protocol(
             &handoff_path,
             &reachable,

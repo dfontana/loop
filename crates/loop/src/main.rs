@@ -29,7 +29,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Scaffold ./.loop/ — the machine, its prose, and its playbooks.
+    /// Scaffold ./.loop/ — the machine, its prose, its stage prompts, and its skills.
     Init {
         /// Ticket id, e.g. PROJ-1487.
         ticket: String,

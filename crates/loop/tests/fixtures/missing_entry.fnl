@@ -3,6 +3,6 @@
  :task "inline task"
  :plan "inline plan"
  :terminals ["done"]
- :states {:a {:playbook "a"}
-          :b {:playbook "b"}}
+ :states {:a {:stage-prompt "a"}
+          :b {:stage-prompt "b"}}
  :transitions [{:from "a" :to "b"}]}

@@ -20,21 +20,21 @@
  :escalation-state "blocked"
 
  :states
- {:implement {:playbook "implement" :thinking "high"
+ {:implement {:stage-prompt "implement" :thinking "high"
               :skills ["spark-build"]
               :description "Implement the plan; keep the build green."}
-  :review {:playbook "review" :thinking "high"
+  :review {:stage-prompt "review" :thinking "high"
            :description "Get an independent review of the diff."}
-  :qa-staging {:playbook "qa" :thinking "high"
+  :qa-staging {:stage-prompt "qa" :thinking "high"
                :skills ["staging-deploy" "spark-run"]
                :description "Run QA against staging."}
-  :debug {:playbook "debug-spark" :thinking "high"
+  :debug {:stage-prompt "debug-spark" :thinking "high"
           :skills ["spark-build" "debug-transient"]
           :description "Diagnose and fix a QA failure."}
-  :validate-contract {:playbook "validate-contract" :thinking "medium"
+  :validate-contract {:stage-prompt "validate-contract" :thinking "medium"
                        :skills ["staging-deploy" "contract-check"]
                        :description "Confirm the API contract matches the OpenAPI schema."}
-  :open-pr {:playbook "open-pr" :thinking "low"
+  :open-pr {:stage-prompt "open-pr" :thinking "low"
             :skills ["open-pr"]
             :description "Open the pull request."}}
 

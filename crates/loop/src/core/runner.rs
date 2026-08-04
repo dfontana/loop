@@ -30,7 +30,7 @@ pub struct WorkerSpec {
     /// travels in the entry message as an instruction, and lives here for the
     /// ledger's record of what the stage was told to connect.
     pub mcp: Vec<String>,
-    /// Rendered playbook, passed as `--append-system-prompt @path`.
+    /// Rendered stage prompt, passed as `--append-system-prompt @path`.
     pub system_prompt_path: PathBuf,
     /// The short positional kickoff message.
     pub entry_message: String,

@@ -20,25 +20,35 @@ use crate::toolbox::Toolbox;
 const STANDARD_TICKET: &str = include_str!("../templates/machines/standard-ticket.fnl");
 const TASK_MD: &str = include_str!("../templates/task.md");
 const PLAN_MD: &str = include_str!("../templates/plan.md");
-const PLAYBOOKS: &[(&str, &str)] = &[
+const STAGE_PROMPTS: &[(&str, &str)] = &[
     (
         "implement.md",
-        include_str!("../templates/playbooks/implement.md"),
+        include_str!("../templates/stage-prompts/implement.md"),
     ),
     (
         "review.md",
-        include_str!("../templates/playbooks/review.md"),
+        include_str!("../templates/stage-prompts/review.md"),
     ),
-    ("qa.md", include_str!("../templates/playbooks/qa.md")),
+    ("qa.md", include_str!("../templates/stage-prompts/qa.md")),
     (
         "open-pr.md",
-        include_str!("../templates/playbooks/open-pr.md"),
-    ),
-    (
-        "debug-transient.md",
-        include_str!("../templates/playbooks/debug-transient.md"),
+        include_str!("../templates/stage-prompts/open-pr.md"),
     ),
 ];
+
+/// Bundled skills. Separate from [`STAGE_PROMPTS`] because they land in a
+/// different directory and are reached a different way: a stage prompt is bound
+/// to one state and always in its system prompt, a skill is offered to whatever
+/// states name it and loaded only if the model elects to.
+///
+/// `debug-transient` used to ship here as a stage prompt, which it never was —
+/// no bundled state named it, and a `:skills ["debug-transient"]` could not
+/// find it, because skills resolve under `skills/` and it was sitting in
+/// `stage-prompts/`.
+const SKILLS: &[(&str, &str)] = &[(
+    "debug-transient.md",
+    include_str!("../templates/skills/debug-transient.md"),
+)];
 
 /// Write `content` to `path` unless it already exists. Returns whether it wrote.
 fn write_if_absent(path: &Path, content: &str) -> Result<bool> {
@@ -127,8 +137,14 @@ pub fn init(paths: Paths, ticket: &str, from: Option<&Path>) -> Result<()> {
             if write_if_absent(&machine_file, &STANDARD_TICKET.replace("$TICKET", ticket))? {
                 created.push(machine_file.display().to_string());
             }
-            for (name, body) in PLAYBOOKS {
-                let p = paths.playbooks().join(name);
+            for (name, body) in STAGE_PROMPTS {
+                let p = paths.stage_prompts().join(name);
+                if write_if_absent(&p, body)? {
+                    created.push(p.display().to_string());
+                }
+            }
+            for (name, body) in SKILLS {
+                let p = paths.skills().join(name);
                 if write_if_absent(&p, body)? {
                     created.push(p.display().to_string());
                 }
@@ -142,7 +158,7 @@ pub fn init(paths: Paths, ticket: &str, from: Option<&Path>) -> Result<()> {
             created.push(p.display().to_string());
         }
     }
-    std::fs::create_dir_all(paths.playbooks())?;
+    std::fs::create_dir_all(paths.stage_prompts())?;
     std::fs::create_dir_all(paths.skills())?;
     ignore_run_dir(&paths, &mut created)?;
 
@@ -179,7 +195,7 @@ fn diagnose(config: &Config, machine: &Machine) -> Vec<Diagnostic> {
     let toolbox = Toolbox::new(config);
     crate::engine::validate(
         machine,
-        &|r| toolbox.resolve_playbook(r, &machine.dir).is_ok(),
+        &|r| toolbox.resolve_stage_prompt(r, &machine.dir).is_ok(),
         &|name| toolbox.resolve_skill(name, &machine.dir).is_ok(),
     )
 }
@@ -216,7 +232,7 @@ pub fn validate(paths: Paths) -> Result<()> {
 /// Print the machine as mermaid. Bare — no fences, no prose — so it pipes:
 /// `loop diagram > machine.mmd`. Unlike `validate` this doesn't touch the
 /// toolbox, since drawing the graph needs nothing off the filesystem beyond
-/// the machine file itself; a machine with a dangling playbook still draws.
+/// the machine file itself; a machine with a dangling stage prompt still draws.
 pub fn diagram(paths: Paths) -> Result<()> {
     let (_vm, _config, machine) = load(paths)?;
     print!("{}", crate::engine::mermaid(&machine));

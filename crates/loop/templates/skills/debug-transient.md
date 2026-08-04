@@ -1,16 +1,20 @@
 ---
 name: debug-transient
-description: Tell an infrastructure flake apart from a real bug before deciding whether to spend a code fix on a failure. Use when a failure could plausibly be either.
-model: claude-sonnet-5
-thinking: medium
+description: Tell an infrastructure flake apart from a real bug before deciding whether to spend a code fix on a failure. Use when a test or pipeline failure could plausibly be either.
 ---
 
 <!--
-  A playbook used as a TOOL, not bound to a state. `debug` gets it via its
-  `:skills` list, which becomes `pi --skill <this file>`; it returns this
-  guidance for the worker to apply in-context. It is deliberately a checklist, not
-  a task with its own handoff — the caller stays in control of its own stage.
-  See docs/03-customizing.md ("Playbooks-as-tools").
+  A SKILL, not a stage prompt. The `test` state names it in `:skills`, which
+  becomes `pi --skill <this file>` — offered by the description above, and
+  loaded only when the stage decides it is in this situation. It is
+  deliberately a checklist rather than a task with its own handoff: the
+  calling stage stays in control of its own transition.
+
+  No `model:`/`thinking:` frontmatter here. Those keys are read off a stage
+  prompt, which is bound to a state and so has a model to influence; loop
+  never opens a skill at all, so they would be silently inert.
+
+  See docs/03-customizing.md.
 -->
 
 # Situational guidance: is this transient, or real?

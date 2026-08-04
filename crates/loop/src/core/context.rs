@@ -1,5 +1,5 @@
 //! The context namespace (docs/03-customizing.md) — the `$UPPER_SNAKE` variables a
-//! playbook template can see.
+//! stage prompt template can see.
 
 use std::collections::BTreeMap;
 
@@ -16,7 +16,7 @@ pub struct Context {
     pub attempt: u32,
     /// True when this entry follows a stage that died mid-flight rather than a
     /// clean arrival — a resumed crash or an in-process retry after the worker
-    /// process failed. A playbook that does something expensive and
+    /// process failed. A stage prompt that does something expensive and
     /// non-idempotent (opening a PR, kicking a deploy) can branch on it to
     /// check for its own half-finished work first.
     pub crashed: bool,
@@ -71,7 +71,7 @@ impl Context {
         m.insert("CYCLE".into(), self.cycle.to_string());
         m.insert("ATTEMPT".into(), self.attempt.to_string());
         // "1" or empty, matching every other optional value in this map: a
-        // playbook tests it by interpolating it, and an absent flag has to
+        // stage prompt tests it by interpolating it, and an absent flag has to
         // render as nothing rather than as the word "false".
         m.insert(
             "CRASHED".into(),

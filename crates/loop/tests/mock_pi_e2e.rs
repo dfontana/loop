@@ -118,7 +118,7 @@ fn mock_pi_drives_worker_judge_navigator_and_a_crash() {
         attempt: 1,
         model: cheap_model(),
         skill_paths: vec![],
-        system_prompt_path: tmp.path().join("playbook.md"),
+        system_prompt_path: tmp.path().join("stage-prompt.md"),
         entry_message: "Entering implement, cycle 1".into(),
         mcp: vec![],
         handoff_path: tmp.path().join("implement-1-1-handoff.json"),

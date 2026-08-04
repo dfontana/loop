@@ -2,12 +2,12 @@
 //!
 //! Machine authoring errors are the cheapest class of failure to catch and the
 //! most annoying to debug at run time: an unreachable state, a dangling
-//! playbook or skill reference, no path to a terminal, two edges between the
+//! stage prompt or skill reference, no path to a terminal, two edges between the
 //! same pair where only the first can ever be taken.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use crate::core::{Machine, PlaybookRef};
+use crate::core::{Machine, StagePromptRef};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Severity {
@@ -45,11 +45,11 @@ impl Diagnostic {
 ///
 /// Checks, all of them `Error` unless noted:
 /// - `entry` exists; every `terminals` entry exists as a state or is otherwise
-///   never entered (a terminal needs no state definition — it has no playbook).
+///   never entered (a terminal needs no state definition — it has no stage prompt).
 /// - Every transition's `from`/`to` names a state or terminal.
 /// - Every state is reachable from `entry`.
 /// - Every state has a path to some terminal (else the run can only exhaust).
-/// - Every state's `playbook` resolves (checked by the caller supplying
+/// - Every state's `stage_prompt` resolves (checked by the caller supplying
 ///   `resolve`, since resolution is filesystem work).
 /// - The skills and MCP servers each state *actually loads*, which is the
 ///   union with the machine's `:defaults {:skills ..}` / `{:mcp ..}` — not just
@@ -68,7 +68,7 @@ impl Diagnostic {
 ///   first, so the rest are dead and their `criteria` silently ignored.
 pub fn validate(
     machine: &Machine,
-    resolve: &dyn Fn(&PlaybookRef) -> bool,
+    resolve: &dyn Fn(&StagePromptRef) -> bool,
     resolve_skill: &dyn Fn(&str) -> bool,
 ) -> Vec<Diagnostic> {
     // Whether the `mcp` extension is declared installed. A stage naming MCP
@@ -154,12 +154,12 @@ pub fn validate(
         }
     }
 
-    // Every state's playbook and skills resolve.
+    // Every state's stage prompt and skills resolve.
     for (id, state) in &machine.states {
-        if !resolve(&state.playbook) {
+        if !resolve(&state.stage_prompt) {
             out.push(Diagnostic::error(
                 id.clone(),
-                format!("playbook for state `{id}` does not resolve in .loop/playbooks/"),
+                format!("stage prompt for state `{id}` does not resolve in .loop/stage-prompts/"),
             ));
         }
         // The effective list, machine defaults included — that union is what

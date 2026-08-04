@@ -3,8 +3,8 @@
 //! An evaluated `machine.fnl` is a Lua table. `mlua`'s serde support turns
 //! that table into these structs, and [`crate::fennel::convert`] turns these into the
 //! [`crate::core`] IR. Two layers rather than one because the authored shape and
-//! the IR genuinely differ: `:playbook`/`:prompt` collapse into one
-//! [`crate::core::PlaybookRef`], `:task` may name a file that has to be read,
+//! the IR genuinely differ: `:stage-prompt`/`:prompt` collapse into one
+//! [`crate::core::StagePromptRef`], `:task` may name a file that has to be read,
 //! and budgets get tightened against the config before anyone downstream sees
 //! them.
 //!
@@ -20,7 +20,7 @@
 //!
 //! This is a deliberate change from the hand-written walker that preceded it,
 //! which read the keys it knew and ignored the rest. `:playbok "implement"`
-//! used to load fine and silently fall through to "needs either `:playbook`
+//! used to load fine and silently fall through to "needs either `:stage-prompt`
 //! or `:prompt`" — or worse, `:max-cycles` misspelled on a loop left the
 //! bound at its default and the run just kept going. A typo in a machine file
 //! is now an error that names the field and lists the ones that exist, which
@@ -67,7 +67,7 @@ pub struct Machine {
     /// The provider every role falls back to. A role naming its own wins.
     #[serde(default)]
     pub provider: Option<String>,
-    /// The Worker floor, under every state and playbook. Distinct from
+    /// The Worker floor, under every state and stage prompt. Distinct from
     /// `:defaults`, which also carries skills and MCP.
     #[serde(default)]
     pub worker: Option<ModelChoice>,
@@ -79,7 +79,7 @@ pub struct Machine {
 
 /// A partial model selection. Every level of the four-layer chain writes the
 /// same three keys, and all three are optional at every level — filling in
-/// defaults here would defeat the layering, since the playbook frontmatter
+/// defaults here would defeat the layering, since the stage prompt frontmatter
 /// layer sits between a state and the machine defaults.
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
@@ -184,7 +184,7 @@ pub struct State {
     /// Mutually exclusive with `prompt`; exactly one is required, which serde
     /// cannot express and `convert` checks.
     #[serde(default)]
-    pub playbook: Option<String>,
+    pub stage_prompt: Option<String>,
     /// An inline prompt, for a stage too one-off to deserve a file.
     #[serde(default)]
     pub prompt: Option<String>,

@@ -4,7 +4,7 @@
 ;; (docs/05-design-notes.md; the schema reference is crates/loop/src/fennel/convert.rs).
 ;;
 ;; Everything this machine references lives beside it: the prose it reads
-;; (task.md, plan.md), the playbooks its states name, the skills those stages
+;; (task.md, plan.md), the stage prompts its states name, the skills those stages
 ;; load, and the ledger the run appended. A ticket directory is self-contained,
 ;; so `loop validate` here resolves every reference without looking anywhere
 ;; else — copy the directory and you have copied the whole setup.
@@ -29,7 +29,7 @@
              :desc "GET /accounts/:id returns churn_score as a number matching the OpenAPI schema."}]
 
  ;; Sits under every state and over loop's built-in floor. A state's own
- ;; :model/:thinking wins; so does its playbook's frontmatter.
+ ;; :model/:thinking wins; so does its stage prompt's frontmatter.
  :defaults {:provider "anthropic" :model "claude-sonnet-5" :thinking "medium"
             :skills [] :mcp []}
 
@@ -45,17 +45,17 @@
  :escalation-state "blocked"
 
  ;; ── States ────────────────────────────────────────────────────────────────
- ;; Every stage's prompt IS its :playbook — a markdown file resolved
- ;; resolved in ./.loop/playbooks/, beside this file.
- ;; A reusable stage names a playbook copied in with the rest; a one-off drops a
+ ;; Every stage's prompt IS its :stage-prompt — a markdown file resolved
+ ;; resolved in ./.loop/stage-prompts/, beside this file.
+ ;; A reusable stage names a stage prompt copied in with the rest; a one-off drops a
  ;; local .md of its own.
  :states
- {:implement {:playbook "implement"
+ {:implement {:stage-prompt "implement"
               :thinking "high"
               :skills ["spark-build"]
               :description "Implement the plan; keep the build green."}
 
-  :review {:playbook "review"              ; this playbook == the run-review skill
+  :review {:stage-prompt "review"              ; this stage prompt == the run-review skill
            :thinking "high"
            :description "Adversarial review of the diff; find real defects."}
 
@@ -67,23 +67,23 @@
   ;; ships that file. Every server starts a session disconnected, so the entry
   ;; message asks this stage to `mcp({connect: "warehouse"})` before it works.
   ;; A stage that doesn't name a server can't reach one.
-  :qa-staging {:playbook "qa"
+  :qa-staging {:stage-prompt "qa"
                :thinking "high"
                :skills ["staging-deploy" "spark-run"]
                :mcp ["warehouse"]
                :description "Deploy to staging, run the pipeline, grade it."}
 
-  :debug {:playbook "debug-spark"
+  :debug {:stage-prompt "debug-spark"
           :thinking "high"
           :skills ["spark-build" "debug-transient"]
           :description "Diagnose a real pipeline failure and fix it."}
 
-  :validate-contract {:playbook "validate-contract"      ; LOCAL: ./.loop/playbooks/
+  :validate-contract {:stage-prompt "validate-contract"      ; LOCAL: ./.loop/stage-prompts/
                       :thinking "medium"
                       :skills ["staging-deploy" "contract-check"]
                       :description "Confirm the API contract matches the OpenAPI schema."}
 
-  :open-pr {:playbook "open-pr"
+  :open-pr {:stage-prompt "open-pr"
             :thinking "low"
             :skills ["open-pr"]
             :description "Open or update the pull request for this branch."}}

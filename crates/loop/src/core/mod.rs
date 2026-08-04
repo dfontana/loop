@@ -24,7 +24,7 @@ pub use event::{
 pub use fold::{FoldStatus, ResumePoint, RunState, fold, fold_with_loop_heads};
 pub use machine::{
     Budgets, Check, DEFAULT_CHECK_TIMEOUT_S, Defaults, LoopSpec, Machine, ModelChoice, ModelSpec,
-    OnExhausted, OnFail, PlaybookRef, QaCase, State, StateId, Thinking, Transition,
+    OnExhausted, OnFail, QaCase, StagePromptRef, State, StateId, Thinking, Transition,
 };
 pub use runner::{
     ABSENT_HANDOFF_RATIONALE, AgentRunner, CheckOutcome, CheckRunner, Choice, JudgeSpec,

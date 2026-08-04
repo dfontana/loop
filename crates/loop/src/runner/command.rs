@@ -10,7 +10,7 @@
 //! One correction against docs/02-how-it-works.md: `--append-system-prompt`
 //! does **not** use an `@path` convention. pi's `resolvePromptInput` calls
 //! `existsSync` on the raw argument and reads it as a file if it exists,
-//! otherwise treats it as literal text — so we pass the rendered playbook's
+//! otherwise treats it as literal text — so we pass the rendered stage prompt's
 //! path bare, no `@` prefix. The Judge and Navigator exploit the other half of
 //! that: their system prompts are short enough to pass as literal text.
 //!
@@ -314,7 +314,7 @@ mod tests {
                 PathBuf::from("/tb/skills/spark-build"),
                 PathBuf::from("/tb/skills/jj"),
             ],
-            system_prompt_path: PathBuf::from("/tmp/playbook.md"),
+            system_prompt_path: PathBuf::from("/tmp/stage-prompt.md"),
             entry_message: "Entering implement, cycle 1".into(),
             mcp: vec!["linear".into()],
             handoff_path: PathBuf::from("/tmp/render/implement-1-1-handoff.json"),
@@ -347,7 +347,7 @@ mod tests {
                 "--skill",
                 "/tb/skills/jj",
                 "--append-system-prompt",
-                "/tmp/playbook.md",
+                "/tmp/stage-prompt.md",
                 "Entering implement, cycle 1",
             ]
         );

@@ -18,8 +18,8 @@ use std::path::Path;
 
 use crate::core::{
     Actor, ArtifactRef, Budgets, Check, Context, Event, EventPayload, GuardOutcome, LoopSpec,
-    Machine, ModelSpec, OnExhausted, OnFail, PlaybookRef, ResumePoint, RunState, StateId, Totals,
-    Transition, Usage,
+    Machine, ModelSpec, OnExhausted, OnFail, ResumePoint, RunState, StagePromptRef, StateId,
+    Totals, Transition, Usage,
 };
 use crate::engine::{Diagnostic, Severity};
 use crate::toolbox::render;
@@ -249,12 +249,12 @@ fn state_block(rep: &mut Report, r: &Resolver<'_>, id: &StateId) {
 
     match r.resolve(id) {
         Ok(res) => {
-            rep.field_at(4, "playbook", fmt_playbook_source(&res));
+            rep.field_at(4, "stage prompt", fmt_stage_prompt_source(&res));
             rep.field_at(4, "model", fmt_model(&res.model));
             rep.field_at(4, "skills", fmt_skills(&res));
             rep.field_at(4, "mcp", join(res.mcp.iter().cloned()));
         }
-        // A state whose playbook or skill does not resolve still gets a block:
+        // A state whose stage prompt or skill does not resolve still gets a block:
         // the diagnostics at the end of the report say the same thing with a
         // severity attached, and preview exits non-zero for it either way.
         Err(e) => rep.field_at(4, "unresolved", e.to_string()),
@@ -287,7 +287,7 @@ fn edge_fields(rep: &mut Report, t: &Transition) {
 // ── the single-state preview ─────────────────────────────────────────────────
 
 /// The detailed report for one state: everything the whole-machine preview
-/// shows for it, plus the resolved playbook, the exact Worker invocation, and
+/// shows for it, plus the resolved stage prompt, the exact Worker invocation, and
 /// a representative render of the prompt.
 pub fn state_preview(r: &Resolver<'_>, id: &StateId) -> String {
     let m = r.machine;
@@ -297,34 +297,44 @@ pub fn state_preview(r: &Resolver<'_>, id: &StateId) -> String {
 
     let resolved = match r.resolve(id) {
         Ok(res) => res,
-        // Nothing below this point exists without a playbook. The report stops
+        // Nothing below this point exists without a stage prompt. The report stops
         // here rather than guessing; the diagnostics still print, and preview
         // still exits non-zero.
         Err(_) => return rep.finish(),
     };
 
-    rep.section("playbook");
-    rep.field("reference", fmt_playbook_ref(&resolved.state.playbook));
+    rep.section("stage prompt");
+    rep.field(
+        "reference",
+        fmt_stage_prompt_ref(&resolved.state.stage_prompt),
+    );
     rep.field(
         "resolved path",
         resolved
-            .playbook
+            .stage_prompt
             .path
             .as_deref()
             .map(display)
             .unwrap_or_else(|| "(inline — no file)".into()),
     );
-    rep.section("playbook frontmatter");
-    rep.field("name", &resolved.playbook.name);
+    rep.section("stage prompt frontmatter");
+    rep.field("name", &resolved.stage_prompt.name);
     rep.field(
         "description",
-        resolved.playbook.description.clone().unwrap_or_default(),
+        resolved
+            .stage_prompt
+            .description
+            .clone()
+            .unwrap_or_default(),
     );
-    rep.field("model", resolved.playbook.model.clone().unwrap_or_default());
+    rep.field(
+        "model",
+        resolved.stage_prompt.model.clone().unwrap_or_default(),
+    );
     rep.field(
         "thinking",
         resolved
-            .playbook
+            .stage_prompt
             .thinking
             .map(|t| t.to_string())
             .unwrap_or_default(),
@@ -355,11 +365,11 @@ pub fn state_preview(r: &Resolver<'_>, id: &StateId) -> String {
     rep.field("session id", r.session_id(id, 1, 1));
 
     // The variables the body actually writes. A variable only reaches the
-    // agent where the playbook interpolates it (docs/03-customizing.md), so
+    // agent where the stage prompt interpolates it (docs/03-customizing.md), so
     // this list is the stage's real context, not the namespace's size.
     let context = Context::representative(m, id);
     let vars = context.to_map();
-    let referenced = render::referenced_vars(&resolved.playbook.body);
+    let referenced = render::referenced_vars(&resolved.stage_prompt.body);
     let (known, passthrough): (Vec<_>, Vec<_>) = referenced
         .into_iter()
         .partition(|name| vars.contains_key(name));
@@ -372,11 +382,11 @@ pub fn state_preview(r: &Resolver<'_>, id: &StateId) -> String {
     );
 
     rep.section(&format!(
-        "playbook body — as authored, {} line(s), unrendered",
-        resolved.playbook.body.lines().count()
+        "stage prompt body — as authored, {} line(s), unrendered",
+        resolved.stage_prompt.body.lines().count()
     ));
     rep.blank();
-    rep.block(2, &resolved.playbook.body);
+    rep.block(2, &resolved.stage_prompt.body);
 
     rep.section("representative render");
     rep.line_at(
@@ -399,7 +409,7 @@ pub fn state_preview(r: &Resolver<'_>, id: &StateId) -> String {
     rep.blank();
     rep.line_at(2, "--- system prompt ---");
     rep.blank();
-    rep.block(2, &render::substitute(&resolved.playbook.body, &vars));
+    rep.block(2, &render::substitute(&resolved.stage_prompt.body, &vars));
     rep.blank();
     rep.line_at(2, "--- entry message ---");
     rep.blank();
@@ -1039,18 +1049,18 @@ fn fmt_budgets(b: &Budgets) -> String {
     parts.join(", ")
 }
 
-fn fmt_playbook_ref(r: &PlaybookRef) -> String {
+fn fmt_stage_prompt_ref(r: &StagePromptRef) -> String {
     match r {
-        PlaybookRef::Named(n) => format!("`{n}` (name)"),
-        PlaybookRef::Path(p) => format!("`{}` (path)", p.display()),
-        PlaybookRef::Inline(_) => "inline `:prompt`".into(),
+        StagePromptRef::Named(n) => format!("`{n}` (name)"),
+        StagePromptRef::Path(p) => format!("`{}` (path)", p.display()),
+        StagePromptRef::Inline(_) => "inline `:prompt`".into(),
     }
 }
 
-fn fmt_playbook_source(res: &Resolved<'_>) -> String {
-    match &res.playbook.path {
-        Some(p) => format!("{} ({})", res.playbook.name, p.display()),
-        None => format!("{} (inline)", res.playbook.name),
+fn fmt_stage_prompt_source(res: &Resolved<'_>) -> String {
+    match &res.stage_prompt.path {
+        Some(p) => format!("{} ({})", res.stage_prompt.name, p.display()),
+        None => format!("{} (inline)", res.stage_prompt.name),
     }
 }
 

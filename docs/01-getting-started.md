@@ -60,19 +60,21 @@ loop init PROJ-1487
 
 ```
   created /home/you/src/yourrepo/.loop/machine.fnl
-  created /home/you/src/yourrepo/.loop/playbooks/implement.md
-  created /home/you/src/yourrepo/.loop/playbooks/review.md
-  created /home/you/src/yourrepo/.loop/playbooks/qa.md
-  created /home/you/src/yourrepo/.loop/playbooks/open-pr.md
-  created /home/you/src/yourrepo/.loop/playbooks/debug-transient.md
+  created /home/you/src/yourrepo/.loop/stage-prompts/implement.md
+  created /home/you/src/yourrepo/.loop/stage-prompts/review.md
+  created /home/you/src/yourrepo/.loop/stage-prompts/qa.md
+  created /home/you/src/yourrepo/.loop/stage-prompts/open-pr.md
+  created /home/you/src/yourrepo/.loop/skills/debug-transient.md
   created /home/you/src/yourrepo/.loop/task.md
   created /home/you/src/yourrepo/.loop/plan.md
   created /home/you/src/yourrepo/.loop/.gitignore
 ```
 
-`machine.fnl` is the bundled `standard-ticket` machine with `$TICKET` replaced by `PROJ-1487`; `task.md` and `plan.md` are stubs. It also creates an empty `skills/`. Everything here is yours to edit — `loop` writes a file only when it is absent, and never rewrites one you have changed.
+`machine.fnl` is the bundled `standard-ticket` machine with `$TICKET` replaced by `PROJ-1487`; `task.md` and `plan.md` are stubs. Everything here is yours to edit — `loop` writes a file only when it is absent, and never rewrites one you have changed.
 
-The `.gitignore` holds one line, `run/`. That directory is where rendered prompts and handoff files land during a run; it is regenerated every stage, so it is the one part of `.loop/` not worth committing. The rest — the machine, the prose, the playbooks, and later the ledger and the artifacts — is the record of how this ticket was driven, and belongs in the branch with the code.
+Note the two different directories, because the difference matters more than it looks. The four files under `stage-prompts/` are the prompts for the four states, one each, and each one is in its stage's context every time that stage runs. The one file under `skills/` is not: the `test` state names it, which makes it *available* — pi shows the model its name and description, and the model opens it only if it hits the situation the description names. "Is this failing test a flake or a real bug" is worth having on hand and not worth spending context on every run. Which of the two a given piece of writing should be is the first real authoring decision, and [customizing](03-customizing.md#stage-prompts-and-skills-are-not-the-same-thing) works through it.
+
+The `.gitignore` holds one line, `run/`. That directory is where rendered prompts and handoff files land during a run; it is regenerated every stage, so it is the one part of `.loop/` not worth committing. The rest — the machine, the prose, the stage prompts, and later the ledger and the artifacts — is the record of how this ticket was driven, and belongs in the branch with the code.
 
 The closing output is your checklist for the rest of this page:
 
@@ -144,15 +146,15 @@ stateDiagram-v2
     end note
 ```
 
-Every edge label tells you how that edge is gated: `check`, `judge`, both, or `unguarded`. Redraw after each edit — `diagram` reads nothing off disk but the machine file, so a machine with a playbook that does not resolve yet still draws.
+Every edge label tells you how that edge is gated: `check`, `judge`, both, or `unguarded`. Redraw after each edit — `diagram` reads nothing off disk but the machine file, so a machine with a stage prompt that does not resolve yet still draws.
 
-The diagram shows the shape. To see what the stages inside it actually resolve to — which playbook file each one gets, which model it ends up on after the four layers are merged, what the edge guards really are — preview it:
+The diagram shows the shape. To see what the stages inside it actually resolve to — which stage prompt file each one gets, which model it ends up on after the four layers are merged, what the edge guards really are — preview it:
 
 ```
 loop preview
 ```
 
-Every number in that report is computed by the code the run itself uses, so it is what you will get rather than what the file appears to say. It is where a `:thinking "high"` you forgot to delete, a playbook name that resolves to nothing, or a `:check` still commented out becomes visible.
+Every number in that report is computed by the code the run itself uses, so it is what you will get rather than what the file appears to say. It is where a `:thinking "high"` you forgot to delete, a stage prompt name that resolves to nothing, or a `:check` still commented out becomes visible.
 
 Then look at one stage in full:
 
@@ -160,13 +162,13 @@ Then look at one stage in full:
 loop preview implement
 ```
 
-That adds the resolved playbook and its frontmatter, the exact `--skill` paths and MCP names the Worker gets, the variables the playbook body actually interpolates — and a **representative render**: the prompt with the template variables filled in.
+That adds the resolved stage prompt and its frontmatter, the exact `--skill` paths and MCP names the Worker gets, the variables the stage prompt body actually interpolates — and a **representative render**: the prompt with the template variables filled in.
 
-Read that render for shape, not for text. It is built with cycle 1, attempt 1, no previous state, no artifacts, and an empty ledger digest, because those values do not exist until a run has been somewhere. `$PREV_STATE`, `$LEDGER_DIGEST`, `$CYCLE`, `$ATTEMPT`, `$CRASHED`, `$ENTRY_ADDENDUM` and the `$ARTIFACT_*` paths will all differ in a real run — the report says so next to the render. What it does tell you exactly is whether your playbook wired the variables in at all, which is the mistake that actually happens: a stage whose prompt never writes `$TASK` gets no task.
+Read that render for shape, not for text. It is built with cycle 1, attempt 1, no previous state, no artifacts, and an empty ledger digest, because those values do not exist until a run has been somewhere. `$PREV_STATE`, `$LEDGER_DIGEST`, `$CYCLE`, `$ATTEMPT`, `$CRASHED`, `$ENTRY_ADDENDUM` and the `$ARTIFACT_*` paths will all differ in a real run — the report says so next to the render. What it does tell you exactly is whether your stage prompt wired the variables in at all, which is the mistake that actually happens: a stage whose prompt never writes `$TASK` gets no task.
 
 Both forms are read-only. Preview spawns nothing, runs no `:check`, connects to no MCP server, and writes no ledger, artifact, or rendered prompt file — you can run it as often as you edit.
 
-The whole vocabulary — every key, how playbooks and skills resolve, how models are chosen per stage — is in [the machine reference](03-customizing.md#machinefnl--the-ticket-machine). Every setting a run uses lives in that one file; there is no second config file anywhere. Do not try to learn it before your first run. Change the ticket's task, plan, and test command; leave the rest.
+The whole vocabulary — every key, how stage prompts and skills resolve, how models are chosen per stage — is in [the machine reference](03-customizing.md#machinefnl--the-ticket-machine). Every setting a run uses lives in that one file; there is no second config file anywhere. Do not try to learn it before your first run. Change the ticket's task, plan, and test command; leave the rest.
 
 ## Validate before you run
 
@@ -174,7 +176,7 @@ The whole vocabulary — every key, how playbooks and skills resolve, how models
 loop validate
 ```
 
-`validate` loads the machine and lints it: unreachable states, states with no path to a terminal, edges pointing at names that do not exist, playbooks and skills that do not resolve, loops whose head is never re-entered. A clean machine prints one line:
+`validate` loads the machine and lints it: unreachable states, states with no path to a terminal, edges pointing at names that do not exist, stage prompts and skills that do not resolve, loops whose head is never re-entered. A clean machine prints one line:
 
 ```
 PROJ-1487 — 4 states, 4 transitions, no problems found
@@ -317,6 +319,6 @@ Underneath all of them is `.loop/ledger.jsonl` — one JSON object per line, app
 ## Where to go next
 
 - [How a run works](02-how-it-works.md) — the three agent roles, the guard tiers, the ledger event schema, and how to read a run after the fact. Read this next if anything above felt like a black box.
-- [Customizing](03-customizing.md) — every machine key, writing your own playbooks and skills, wiring MCP servers, and the full template-variable list. Read this when the default spine stops fitting the ticket.
+- [Customizing](03-customizing.md) — every machine key, writing your own stage prompts and skills, wiring MCP servers, and the full template-variable list. Read this when the default spine stops fitting the ticket.
 - [CLI reference](04-cli-reference.md) — every command, flag, environment variable, and exit code, including `LOOP_PI_BIN`.
 - [Design notes](05-design-notes.md) — why the harness owns control flow instead of the agent, and the known gaps you should be aware of before trusting a run unattended.

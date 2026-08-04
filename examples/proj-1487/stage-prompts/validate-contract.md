@@ -6,12 +6,12 @@ thinking: medium
 ---
 
 <!--
-  A per-ticket playbook, bespoke to PROJ-1487.
-  It answers "how does a bespoke stage get its prompt": a stage's `playbook:`
-  resolves in ./.loop/playbooks/, so dropping this file next to the machine is
+  A per-ticket stage prompt, bespoke to PROJ-1487.
+  It answers "how does a bespoke stage get its prompt": a stage's `stage prompt:`
+  resolves in ./.loop/stage-prompts/, so dropping this file next to the machine is
   the whole of what giving `validate_contract` its own prompt takes.
 
-  qa_staging keeps using the generic `qa` playbook because pipeline
+  qa_staging keeps using the generic `qa` stage prompt because pipeline
   validation is generic; contract validation is specific to this endpoint and
   these fields, so it earns a bespoke prompt rather than overloading `qa`.
 -->

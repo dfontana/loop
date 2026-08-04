@@ -10,10 +10,10 @@ use crate::core::machine::{Budgets, ModelSpec};
 /// Everything loop reads or writes, all of it under `<project>/.loop/`.
 ///
 /// There used to be three roots: a toolbox at `~/.config/loop`, the ticket at
-/// `<project>/.loop`, and generated renders at `~/.local/state/loop`. Playbooks
+/// `<project>/.loop`, and generated renders at `~/.local/state/loop`. Stage prompts
 /// and skills resolved local-first across the first two, which meant "where
 /// does this come from" had two answers, `loop preview` had to report which
-/// one won, and editing a toolbox playbook silently changed the next stage of
+/// one won, and editing a toolbox stage prompt silently changed the next stage of
 /// every in-flight ticket.
 ///
 /// One root instead. A ticket directory is now self-contained: committable,
@@ -30,7 +30,7 @@ pub struct Paths {
 /// [`Paths`] builds them for `loop init` while `toolbox` builds them again
 /// against the machine file's own directory — the two have to agree, and a
 /// string literal in each is how they quietly stop agreeing.
-pub const PLAYBOOKS_DIR: &str = "playbooks";
+pub const STAGE_PROMPTS_DIR: &str = "stage-prompts";
 pub const SKILLS_DIR: &str = "skills";
 
 impl Paths {
@@ -49,8 +49,8 @@ impl Paths {
     pub fn machine_file(&self) -> PathBuf {
         self.loop_dir().join("machine.fnl")
     }
-    pub fn playbooks(&self) -> PathBuf {
-        self.loop_dir().join(PLAYBOOKS_DIR)
+    pub fn stage_prompts(&self) -> PathBuf {
+        self.loop_dir().join(STAGE_PROMPTS_DIR)
     }
     pub fn skills(&self) -> PathBuf {
         self.loop_dir().join(SKILLS_DIR)

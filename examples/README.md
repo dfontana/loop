@@ -1,7 +1,7 @@
 # examples
 
 One worked ticket, complete. **[`proj-1487/`](proj-1487/)** is a real `.loop/`
-directory — the machine, the prose it reads, the playbooks its stages name, the
+directory — the machine, the prose it reads, the stage prompts its stages name, the
 skills those stages load, and the ledger the run actually appended.
 
 It is not an excerpt. Copy it into a project and it runs.
@@ -39,7 +39,7 @@ necessary.
 | [`task.md`](proj-1487/task.md) | What to do. Read into `$TASK`. |
 | [`plan.md`](proj-1487/plan.md) | How. Read into `$PLAN`. |
 | [`ledger.jsonl`](proj-1487/ledger.jsonl) | The append-only record the run produced. Every claim `loop status` and `loop recap` make is folded from this file. |
-| [`playbooks/`](proj-1487/playbooks) | One prompt per stage. `validate-contract.md` is bespoke to this ticket; the rest are the generic ones. |
+| [`stage-prompts/`](proj-1487/stage-prompts) | One prompt per stage. `validate-contract.md` is bespoke to this ticket; the rest are the generic ones. |
 | [`skills/`](proj-1487/skills) | Situational know-how plus the scripts that carry it out. |
 
 Several `.sh` files under `skills/` also back an edge's `:check` command, so the
@@ -60,7 +60,7 @@ run time out of a location you have to remember, which means editing this
 example later cannot change a ticket already in flight — and it means keeping a
 `.loop/` of your own somewhere is the whole of what a shared toolbox used to be.
 
-The cost is real: a fix to a generic playbook does not propagate. You re-copy,
+The cost is real: a fix to a generic stage prompt does not propagate. You re-copy,
 or you edit the ticket that needs it. That trade is argued in
 [design notes](../docs/05-design-notes.md).
 

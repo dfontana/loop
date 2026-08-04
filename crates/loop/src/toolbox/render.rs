@@ -23,7 +23,7 @@ enum Piece<'a> {
 /// from being partially replaced and left with a dangling suffix.
 ///
 /// [`substitute`] and [`referenced_vars`] share it, so what `loop preview`
-/// reports a playbook references is by construction what rendering looks up.
+/// reports a stage prompt references is by construction what rendering looks up.
 ///
 /// Byte-indexed slicing is safe throughout: every boundary this takes is at a
 /// `$` or at an ASCII identifier edge, and no byte of a multi-byte codepoint
@@ -76,7 +76,7 @@ fn pieces(template: &str) -> Vec<Piece<'_>> {
 }
 
 /// Replace every `$NAME` present in `vars`. **Unknown `$NAMES` pass through
-/// untouched** so `$HOME` and shell snippets in a playbook still work.
+/// untouched** so `$HOME` and shell snippets in a stage prompt still work.
 pub fn substitute(template: &str, vars: &BTreeMap<String, String>) -> String {
     let mut out = String::with_capacity(template.len());
     for piece in pieces(template) {

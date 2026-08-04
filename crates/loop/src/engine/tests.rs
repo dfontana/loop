@@ -1,7 +1,7 @@
 //! Engine integration tests, against the fakes in [`crate::engine::test_support`].
 //! No Lua, no subprocess, no filesystem, no API key.
 
-use crate::core::{OnExhausted, OnFail, PlaybookRef, RunStatus};
+use crate::core::{OnExhausted, OnFail, RunStatus, StagePromptRef};
 
 use crate::engine::test_support::*;
 use crate::engine::{Engine, Outcome};
@@ -725,11 +725,11 @@ fn navigator_choosing_escalate_routes_to_escalation_state() {
 
 // ── validate() ────────────────────────────────────────────────────────────
 
-fn always_resolves(_: &PlaybookRef) -> bool {
+fn always_resolves(_: &StagePromptRef) -> bool {
     true
 }
 
-fn never_resolves(_: &PlaybookRef) -> bool {
+fn never_resolves(_: &StagePromptRef) -> bool {
     false
 }
 
@@ -785,7 +785,7 @@ fn validate_catches_no_path_to_terminal() {
 }
 
 #[test]
-fn validate_catches_unresolved_playbook() {
+fn validate_catches_unresolved_stage_prompt() {
     let mut m = base_machine();
     m.entry = "a".into();
     m.terminals.insert("done".into());
@@ -865,7 +865,7 @@ fn validate_rejects_duplicate_edges_between_the_same_pair() {
     );
 }
 
-/// Skills resolve through the same filesystem seam playbooks do, so a typo in
+/// Skills resolve through the same filesystem seam stage prompts do, so a typo in
 /// a skill name is caught by `loop validate` rather than at spawn time.
 #[test]
 fn validate_reports_a_skill_that_does_not_resolve() {
@@ -1142,7 +1142,7 @@ fn a_stage_that_always_crashes_escalates_after_the_cap() {
 // ── what actually reaches the stage ──────────────────────────────────────
 
 /// Runs a machine and hands back the contexts every stage was built with, so a
-/// test can assert on what the playbook would have seen.
+/// test can assert on what the stage prompt would have seen.
 fn run_capturing_stages(
     machine: &crate::core::Machine,
     runner: &FakeRunner,
@@ -1172,7 +1172,7 @@ fn run_capturing_stages(
 /// through a guarded edge, which puts a `guard_checked` between the
 /// `navigator_invoked` and the commit. Reading only the line before the commit
 /// meant the note arrived exactly when it could not be used — on the route to
-/// the terminal escalation state, which never renders a playbook.
+/// the terminal escalation state, which never renders a stage prompt.
 #[test]
 fn the_navigators_addendum_reaches_the_state_it_routed_into() {
     let mut m = base_machine();
@@ -1219,9 +1219,9 @@ fn the_navigators_addendum_reaches_the_state_it_routed_into() {
 
 /// A re-entry after a crash is a different situation from a first attempt —
 /// the stage may have already opened the PR it is about to open again — so the
-/// playbook gets told.
+/// stage prompt gets told.
 #[test]
-fn a_re_entry_after_a_crash_is_marked_for_the_playbook() {
+fn a_re_entry_after_a_crash_is_marked_for_the_stage_prompt() {
     let mut m = base_machine();
     m.entry = "ship".into();
     m.terminals.insert("done".into());

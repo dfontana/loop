@@ -22,7 +22,7 @@ For what the runtime actually does with the machine, see [02-how-it-works.md](02
 loop init <TICKET> [--from <DIR>]
 ```
 
-> Scaffold ./.loop/ — the machine, its prose, and its playbooks.
+> Scaffold ./.loop/ — the machine, its prose, and its stage prompts.
 
 | Flag / arg | Type | Default | Meaning |
 | --- | --- | --- | --- |
@@ -40,11 +40,11 @@ One scaffold phase, into `<project>/.loop/`. Every file is written with a _write
 | Path                                    | From                              |
 | --------------------------------------- | --------------------------------- |
 | `machine.fnl`                            | the bundled `standard-ticket`     |
-| `playbooks/implement.md`                 | bundled                           |
-| `playbooks/review.md`                    | bundled                           |
-| `playbooks/qa.md`                        | bundled                           |
-| `playbooks/open-pr.md`                   | bundled                           |
-| `playbooks/debug-transient.md`           | bundled                           |
+| `stage-prompts/implement.md`                 | bundled                           |
+| `stage-prompts/review.md`                    | bundled                           |
+| `stage-prompts/qa.md`                        | bundled                           |
+| `stage-prompts/open-pr.md`                   | bundled                           |
+| `stage-prompts/debug-transient.md`           | bundled                           |
 
 **With `--from <DIR>`**, the whole tree under `<DIR>` is copied in instead, recursively, never overwriting. A leading `~/` is expanded. Two failures are specific to this path:
 
@@ -59,7 +59,7 @@ Either way, `init` then writes:
 | ------------- | ---------------------------------------- |
 | `task.md`     | the bundled task template, if absent     |
 | `plan.md`     | the bundled plan template, if absent     |
-| `playbooks/`  | created empty if `--from` supplied none  |
+| `stage-prompts/`  | created empty if `--from` supplied none  |
 | `skills/`     | created empty                            |
 | `.gitignore`  | one line, `run/`, if absent              |
 
@@ -90,7 +90,7 @@ loop validate
 
 No flags.
 
-Loads `machine.fnl`, resolves every playbook and skill inside `.loop/`, and prints one line per diagnostic in the form:
+Loads `machine.fnl`, resolves every stage prompt and skill inside `.loop/`, and prints one line per diagnostic in the form:
 
 ```
 {tag}  {where}: {message}
@@ -107,7 +107,7 @@ Loads `machine.fnl`, resolves every playbook and skill inside `.loop/`, and prin
 | error | `{from} -> {to}` | transition `to` `{t}` names no state or terminal |
 | error | state id | state `{id}` is unreachable from entry `{e}` |
 | error | state id | state `{id}` has no path to any terminal |
-| error | state id | playbook for state `{id}` does not resolve in .loop/playbooks/ |
+| error | state id | stage prompt for state `{id}` does not resolve in .loop/stage-prompts/ |
 | error | state id | skill `{n}` on state `{id}` does not resolve in .loop/skills/ — with ``(from `:defaults {:skills ..}`)`` after the state id when the name came from there rather than from the state |
 | error | state id | state `{id}` names MCP servers, but `mcp` is not in `:pi-extensions` — the stage would be told to call a tool it does not have |
 | error | loop name | loop `{n}` declares no states |
@@ -148,7 +148,7 @@ loop preview [<STATE>]
 | --- | --- | --- | --- |
 | `<STATE>` | string, optional | — | "Detail one state instead of summarizing the whole machine." |
 
-Answers "what will this loop do?" using the run's own resolvers. Every value in the report comes from the same code path `loop run` uses to build a stage — the four-layer model merge, playbook and skill resolution, the effective skill/MCP unions, `$VAR` substitution — stopped short of every write that stage building does.
+Answers "what will this loop do?" using the run's own resolvers. Every value in the report comes from the same code path `loop run` uses to build a stage — the four-layer model merge, stage prompt and skill resolution, the effective skill/MCP unions, `$VAR` substitution — stopped short of every write that stage building does.
 
 ### Read-only guarantees
 
@@ -159,7 +159,7 @@ Preview performs **no** side effect. Specifically it does not:
 - create `.loop/ledger.jsonl` or `.loop/artifacts/`;
 - write anything under `.loop/run/` — the representative render is built in memory, and the rendered-prompt path it reports is where a run _would_ write.
 
-It reads `machine.fnl`, the task/plan prose, and whatever playbooks and skills resolve. Output is deterministic: the same inputs produce byte-identical output, since every collection is printed in the machine's own order (states alphabetically by id from the IR's `BTreeMap`, transitions and loops in declaration order).
+It reads `machine.fnl`, the task/plan prose, and whatever stage prompts and skills resolve. Output is deterministic: the same inputs produce byte-identical output, since every collection is printed in the machine's own order (states alphabetically by id from the IR's `BTreeMap`, transitions and loops in declaration order).
 
 ### Whole-machine form
 
@@ -170,7 +170,7 @@ Sections, in order:
 | header | ticket, state / transition / loop counts |
 | — | source path, entry, terminals, escalation state, effective budgets, Judge and Navigator models with the invocation cap |
 | `context` | task and plan line/char counts with their first line, and the QA case ids |
-| `states` | every state: description, resolved playbook name and path, resolved `provider/model:thinking`, effective skills with resolved paths, effective MCP names, reachable states, then each outgoing edge with its check command, timeout, criteria, `:on-fail` action, and backoff |
+| `states` | every state: description, resolved stage prompt name and path, resolved `provider/model:thinking`, effective skills with resolved paths, effective MCP names, reachable states, then each outgoing edge with its check command, timeout, criteria, `:on-fail` action, and backoff |
 | `loops` | each loop's head, member states, `:max-cycles`, and exhaustion behavior |
 | `validation` | the diagnostics, or `no problems found` |
 
@@ -182,18 +182,18 @@ Values are printed in one column; an absent optional value or an empty list read
 
 | Section | Contents |
 | --- | --- |
-| `playbook` | how the state names it (`name` / `path` / inline `:prompt`) and the file it resolved to |
-| `playbook frontmatter` | `name`, `description`, `model`, `thinking` as parsed |
+| `stage prompt` | how the state names it (`name` / `path` / inline `:prompt`) and the file it resolved to |
+| `stage prompt frontmatter` | `name`, `description`, `model`, `thinking` as parsed |
 | `worker invocation` | the `--model` flag, provider, each skill's `--skill` path, MCP names, reachable states, cwd, the rendered-prompt path pattern, the four exported environment variable names, and the deterministic session id |
 | `template variables` | the `$NAME`s the body writes that are loop variables, and the ones that will pass through untouched |
-| `playbook body` | the body as authored, unrendered |
+| `stage prompt body` | the body as authored, unrendered |
 | `representative render` | the substituted system prompt and the entry message, under the limitation notice below |
 
 Only environment **names** are listed, never inherited process environment or credentials.
 
 ### The representative render is not the future prompt
 
-It is built with **cycle 1, attempt 1, no previous state, no artifacts, and an empty ledger digest**, and the report says so beside it. `$PREV_STATE`, `$LEDGER_DIGEST`, `$CYCLE`, `$ATTEMPT`, `$CRASHED`, `$ENTRY_ADDENDUM`, the `$ARTIFACT_*` paths, and the Navigator's addendum all depend on where a run has already been, so none of them can be known before the run exists. What the render does establish exactly is **which** variables the playbook interpolates — the thing that is wrong often enough to be worth checking.
+It is built with **cycle 1, attempt 1, no previous state, no artifacts, and an empty ledger digest**, and the report says so beside it. `$PREV_STATE`, `$LEDGER_DIGEST`, `$CYCLE`, `$ATTEMPT`, `$CRASHED`, `$ENTRY_ADDENDUM`, the `$ARTIFACT_*` paths, and the Navigator's addendum all depend on where a run has already been, so none of them can be known before the run exists. What the render does establish exactly is **which** variables the stage prompt interpolates — the thing that is wrong often enough to be worth checking.
 
 The digest is empty rather than the header block `$LEDGER_DIGEST` renders to on a fresh ledger, so the render is not exact even for the entry state on a first run.
 
@@ -201,7 +201,7 @@ The digest is empty rather than the header block `$LEDGER_DIGEST` renders to on 
 
 Preview runs the full [`loop validate`](#loop-validate) linter — the same function, the same diagnostics, the same `{tag}  {where}: {message}` wording. There is no weaker preview-only check.
 
-The report is printed **first**, then the diagnostics, so problems are the last thing on screen. A state whose playbook or skills do not resolve still gets a block; the fields it cannot compute read `unresolved` with the searched paths.
+The report is printed **first**, then the diagnostics, so problems are the last thing on screen. A state whose stage prompt or skills do not resolve still gets a block; the fields it cannot compute read `unresolved` with the searched paths.
 
 ### Exit and edge cases
 
@@ -226,7 +226,7 @@ Writes mermaid to stdout with no code fences and no surrounding prose, so it pip
 loop diagram > machine.mmd
 ```
 
-Output is deterministic and a pure function of the machine IR — it reads nothing off disk but the machine file, so a machine with a dangling `:playbook` or an unresolvable skill still draws. It still requires the machine to load: a missing or unparseable `machine.fnl` is an error.
+Output is deterministic and a pure function of the machine IR — it reads nothing off disk but the machine file, so a machine with a dangling `:stage-prompt` or an unresolvable skill still draws. It still requires the machine to load: a missing or unparseable `machine.fnl` is an error.
 
 For the node/edge/label grammar (aliasing, edge labels, guard-fail back-edges, loop notes), see [02-how-it-works.md](02-how-it-works.md).
 
@@ -488,7 +488,7 @@ loop sessions [<STATE>]
 
 Reads the ledger, builds one candidate per `state_entered` that carries a non-empty `session_id`, and prints one line per attempt on stdout in **ledger order, oldest first**. It launches nothing. Its job is to give you the id that [`loop session`](#loop-session) wants.
 
-Requires **neither a loadable machine nor a resolvable playbook**. Only the ledger and the project path are needed. Opening the ledger repairs a torn trailing line, exactly as [`loop status`](#loop-status) does, so an attempt interrupted mid-write is still listed.
+Requires **neither a loadable machine nor a resolvable stage prompt**. Only the ledger and the project path are needed. Opening the ledger repairs a torn trailing line, exactly as [`loop status`](#loop-status) does, so an attempt interrupted mid-write is still listed.
 
 Judge and Navigator spawns run with `--no-session` and never appear here.
 
@@ -558,7 +558,7 @@ loop session --latest [<STATE>]
 | `<ID>` | string | — | The session id to reopen, from [`loop sessions`](#loop-sessions). With `--latest` this is a state filter instead. |
 | `--latest` | bool | false | Reopen the newest recorded attempt rather than naming an id. |
 
-Resolves the attempt, prints one line naming it, and executes `pi --session <id>` in the project directory. Like `loop sessions` it needs neither a loadable machine nor a resolvable playbook, and repairs a torn trailing ledger line on open.
+Resolves the attempt, prints one line naming it, and executes `pi --session <id>` in the project directory. Like `loop sessions` it needs neither a loadable machine nor a resolvable stage prompt, and repairs a torn trailing ledger line on open.
 
 ### Selection
 
@@ -658,7 +658,7 @@ Both pass → blank line, then `all good`, exit 0. Otherwise exit 1 with `error:
 ### What doctor does not check
 
 - It never parses `machine.fnl` — check 2 only asks whether the file exists. Use [`loop validate`](#loop-validate) for the graph.
-- It never resolves playbooks or skills, and there is no second directory for it to look in.
+- It never resolves stage prompts or skills, and there is no second directory for it to look in.
 
 ## Environment variables
 

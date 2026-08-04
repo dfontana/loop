@@ -3,7 +3,7 @@
 
 mod common;
 
-use r#loop::core::{OnExhausted, OnFail, PlaybookRef, Thinking};
+use r#loop::core::{OnExhausted, OnFail, StagePromptRef, Thinking};
 
 #[test]
 fn proj1487_machine_loads_completely() {
@@ -28,7 +28,7 @@ fn proj1487_machine_loads_completely() {
     );
     assert_eq!(machine.escalation_state.as_deref(), Some("blocked"));
 
-    // Defaults are left unresolved (no eager filling of state/playbook layers).
+    // Defaults are left unresolved (no eager filling of state/stage-prompt layers).
     assert_eq!(
         machine.defaults.model.provider.as_deref(),
         Some("anthropic")
@@ -58,7 +58,10 @@ fn proj1487_machine_loads_completely() {
 
     assert_eq!(machine.states.len(), 6);
     let implement = machine.state("implement").expect("implement state");
-    assert_eq!(implement.playbook, PlaybookRef::Named("implement".into()));
+    assert_eq!(
+        implement.stage_prompt,
+        StagePromptRef::Named("implement".into())
+    );
     assert_eq!(implement.skills, vec!["spark-build"]);
     assert_eq!(implement.model.thinking, Some(Thinking::High));
     assert_eq!(
@@ -68,7 +71,7 @@ fn proj1487_machine_loads_completely() {
 
     let qa_staging = machine.state("qa-staging").expect("qa-staging state");
     assert_eq!(qa_staging.skills, vec!["staging-deploy", "spark-run"]);
-    assert_eq!(qa_staging.playbook, PlaybookRef::Named("qa".into()));
+    assert_eq!(qa_staging.stage_prompt, StagePromptRef::Named("qa".into()));
 
     assert_eq!(machine.transitions.len(), 10);
 
@@ -194,6 +197,36 @@ fn leftover_transition_mode_is_rejected_with_a_migration_message() {
     assert!(matches!(err, r#loop::core::CoreError::Machine(_)));
 }
 
+/// `:playbook` is a rename, not a removal, and that is exactly why it needs a
+/// message of its own. `deny_unknown_fields` would offer an author both
+/// `stage-prompt` and `prompt` with nothing to choose between them, and the
+/// wrong guess is not a load error — it is a stage that runs the string "qa"
+/// as its prompt.
+#[test]
+fn the_renamed_playbook_key_names_its_replacement() {
+    let vm = common::vm();
+    let config = common::default_config();
+    let path = common::fixture("playbook_renamed.fnl");
+
+    let err = vm.load_machine(&path, &config).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains(":stage-prompt"),
+        "expected the error to name the replacement, got: {msg}"
+    );
+    assert!(
+        msg.contains('a'),
+        "expected the error to name the offending state, got: {msg}"
+    );
+    // The distinction the generic error cannot draw: which of the two
+    // surviving keys is the one that takes a filename.
+    assert!(
+        msg.contains(":prompt"),
+        "expected the error to distinguish the inline key, got: {msg}"
+    );
+    assert!(matches!(err, r#loop::core::CoreError::Machine(_)));
+}
+
 #[test]
 fn wrong_lua_type_for_a_string_field_is_rejected() {
     let vm = common::vm();
@@ -238,7 +271,7 @@ fn syntax_error_points_at_fennel_source() {
 ///
 /// This is the capability the serde loader added over the hand-written walker
 /// it replaced: that one read the keys it recognized and dropped the rest, so
-/// `:playbok` produced a baffling complaint that `:playbook` was missing —
+/// `:playbok` produced a baffling complaint that `:stage-prompt` was missing —
 /// about a line where something spelled almost exactly that is right there.
 #[test]
 fn a_misspelled_key_is_rejected_by_name() {
@@ -253,7 +286,7 @@ fn a_misspelled_key_is_rejected_by_name() {
         "must name the offending key: {msg}"
     );
     assert!(
-        msg.contains("playbook"),
+        msg.contains("stage-prompt"),
         "must list the fields that do exist: {msg}"
     );
 }
@@ -273,7 +306,7 @@ fn a_bad_value_reports_its_path_and_the_valid_ones() {
     std::fs::write(
         &path,
         r#"{:ticket "T" :task "t" :plan "p" :entry "a" :terminals ["done"]
-            :states {:a {:playbook "p"} :qa-staging {:playbook "q" :thinking "hihg"}}
+            :states {:a {:stage-prompt "p"} :qa-staging {:stage-prompt "q" :thinking "hihg"}}
             :transitions [{:from "a" :to "done"}]}"#,
     )
     .unwrap();
@@ -302,7 +335,7 @@ fn top_level_provider_is_the_base_for_every_role() {
             :provider "openai"
             :worker {:model "gpt-5"}
             :judge {:provider "anthropic" :model "claude-haiku-4-5"}
-            :states {:a {:playbook "p"}}
+            :states {:a {:stage-prompt "p"}}
             :transitions [{:from "a" :to "done"}]}"#,
     )
     .unwrap();
@@ -328,7 +361,7 @@ fn an_unopinionated_machine_gets_the_built_in_defaults() {
     std::fs::write(
         &path,
         r#"{:ticket "T" :task "t" :plan "p" :entry "a" :terminals ["done"]
-            :states {:a {:playbook "p"}}
+            :states {:a {:stage-prompt "p"}}
             :transitions [{:from "a" :to "done"}]}"#,
     )
     .unwrap();
@@ -364,7 +397,7 @@ fn config_only_keys_are_rejected_with_a_migration_message() {
             &path,
             format!(
                 r#"{{:ticket "T" :task "t" :plan "p" :entry "a" :terminals ["done"] {key}
-                    :states {{:a {{:playbook "p"}}}}
+                    :states {{:a {{:stage-prompt "p"}}}}
                     :transitions [{{:from "a" :to "done"}}]}}"#
             ),
         )

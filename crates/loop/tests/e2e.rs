@@ -114,7 +114,7 @@ impl Fixture {
     }
 
     /// Write a file under the project, creating parents. Relative to the
-    /// project root, so `.loop/playbooks/x.md` and `.loop/skills/y.md` both
+    /// project root, so `.loop/stage-prompts/x.md` and `.loop/skills/y.md` both
     /// go through it.
     fn write(&self, rel: &str, body: &str) -> PathBuf {
         let path = self.project.join(rel);
@@ -1196,7 +1196,7 @@ fn session_propagates_a_failed_pi_launch() {
 // ── loop preview ─────────────────────────────────────────────────────────────
 
 /// A machine built to make every resolution rule visible at once: a state
-/// whose thinking, playbook frontmatter and machine defaults each supply a
+/// whose thinking, stage prompt frontmatter and machine defaults each supply a
 /// different layer of the model; skills arriving from two levels; a check with
 /// a non-default timeout; both `on-fail` shapes; a backoff; and a loop.
 const PREVIEW_MACHINE: &str = r#"
@@ -1213,12 +1213,12 @@ const PREVIEW_MACHINE: &str = r#"
  :escalation-state "blocked"
 
  :states
- {:implement {:playbook "implement"
+ {:implement {:stage-prompt "implement"
               :thinking "max"
               :skills ["local-only"]
               :mcp ["warehouse"]
               :description "Do the work."}
-  :verify {:playbook "verify" :description "Check it."}}
+  :verify {:stage-prompt "verify" :description "Check it."}}
 
  :transitions
  [{:from "implement" :to "verify"
@@ -1232,8 +1232,8 @@ const PREVIEW_MACHINE: &str = r#"
  [{:name "fix" :states ["implement" "verify"] :max-cycles 3 :on-exhausted "escalate"}]}
 "#;
 
-/// Scaffold the fixture PREVIEW_MACHINE expects: a local playbook that shadows
-/// a toolbox one, a toolbox playbook with no frontmatter model, and a skill at
+/// Scaffold the fixture PREVIEW_MACHINE expects: a local stage prompt that shadows
+/// a toolbox one, a toolbox stage prompt with no frontmatter model, and a skill at
 /// each level.
 fn preview_fixture() -> Fixture {
     let fx = Fixture::new(r#"{"steps":[]}"#);
@@ -1241,12 +1241,12 @@ fn preview_fixture() -> Fixture {
     fx.machine(PREVIEW_MACHINE);
 
     fx.write(
-        ".loop/playbooks/implement.md",
+        ".loop/stage-prompts/implement.md",
         "---\nname: implement\ndescription: Local override.\nmodel: frontmatter-model\n---\n\
          Work on $TICKET_ID, cycle $CYCLE.\n\n$TASK\n\nDigest: $LEDGER_DIGEST\n\nHome is $HOME.\n",
     );
     fx.write(
-        ".loop/playbooks/verify.md",
+        ".loop/stage-prompts/verify.md",
         "---\nname: verify\n---\nCheck it.\n",
     );
     fx.write(".loop/skills/shared.md", "# shared\n");
@@ -1276,7 +1276,7 @@ fn preview_reports_the_stage_a_run_would_actually_build() {
         "navigator         anthropic/claude-haiku-4-5:low (max 5 invocation(s))",
         "qa cases          1",
         // Four-layer resolution, merged field by field: `thinking` off the
-        // state, `model` off the playbook frontmatter (beating the machine
+        // state, `model` off the stage prompt frontmatter (beating the machine
         // default), `provider` off the built-in floor.
         "model           anthropic/frontmatter-model:max",
         // ...and a state with no overrides of its own falls all the way to
@@ -1303,7 +1303,7 @@ fn preview_reports_the_stage_a_run_would_actually_build() {
     // Every resolved reference names the file that would actually be loaded,
     // and all of them are inside the ticket directory.
     for expected in [
-        fx.project.join(".loop/playbooks/implement.md"),
+        fx.project.join(".loop/stage-prompts/implement.md"),
         fx.project.join(".loop/skills/local-only.md"),
         fx.project.join(".loop/skills/shared.md"),
     ] {
@@ -1376,7 +1376,10 @@ fn preview_of_one_state_shows_the_worker_inputs_and_a_labelled_render() {
 fn preview_prints_diagnostics_then_fails_on_a_validation_error() {
     let fx = Fixture::new(r#"{"steps":[]}"#);
     fx.run(&["init", "PREV-2"]);
-    fx.machine(&TINY_MACHINE.replace(r#":playbook "implement""#, r#":playbook "nonexistent""#));
+    fx.machine(&TINY_MACHINE.replace(
+        r#":stage-prompt "implement""#,
+        r#":stage-prompt "nonexistent""#,
+    ));
 
     let out = fx.run(&["preview"]);
     assert!(
@@ -1389,7 +1392,7 @@ fn preview_prints_diagnostics_then_fails_on_a_validation_error() {
     assert!(text.contains("TINY-1 — 1 state(s)"), "{text}");
     // ...reusing `validate`'s own wording, not a preview-only paraphrase.
     assert!(
-        text.contains("error  implement: playbook for state `implement` does not resolve"),
+        text.contains("error  implement: stage prompt for state `implement` does not resolve"),
         "{text}"
     );
     assert!(text.contains("error: 1 error(s)"), "{text}");
@@ -1399,7 +1402,7 @@ fn preview_prints_diagnostics_then_fails_on_a_validation_error() {
     let validate = fx.run(&["validate"]);
     assert!(!validate.status.success());
     assert!(
-        combined(&validate).contains("playbook for state `implement` does not resolve"),
+        combined(&validate).contains("stage prompt for state `implement` does not resolve"),
         "{}",
         combined(&validate)
     );
@@ -1800,6 +1803,6 @@ const TINY_MACHINE: &str = r#"
  :entry "implement"
  :terminals ["done" "blocked"]
  :escalation-state "blocked"
- :states {:implement {:playbook "implement" :description "Do the work."}}
+ :states {:implement {:stage-prompt "implement" :description "Do the work."}}
  :transitions [{:from "implement" :to "done" :criteria "The work is done."}]}
 "#;

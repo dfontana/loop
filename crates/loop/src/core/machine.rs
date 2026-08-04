@@ -79,8 +79,8 @@ impl ModelSpec {
 /// this only records what the author wrote.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum PlaybookRef {
-    /// A bare name, resolved to `./.loop/playbooks/<name>.md`.
+pub enum StagePromptRef {
+    /// A bare name, resolved to `./.loop/stage-prompts/<name>.md`.
     Named(String),
     /// A value containing `/`: taken as an exact path, relative to the machine file.
     Path(PathBuf),
@@ -90,10 +90,10 @@ pub enum PlaybookRef {
 
 /// A partially-specified model choice: whatever one layer of config declared.
 ///
-/// Four layers stack, most specific first: the **state**, the **playbook's
+/// Four layers stack, most specific first: the **state**, the **stage prompt's
 /// frontmatter**, the **machine's `defaults`**, and loop's **built-in floor**.
 /// Only the last is guaranteed complete, so resolution happens in
-/// [`Machine::resolve_model`] — not at load time, since the playbook layer isn't
+/// [`Machine::resolve_model`] — not at load time, since the stage prompt layer isn't
 /// readable until `toolbox` has resolved the file.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelChoice {
@@ -140,7 +140,7 @@ pub struct Defaults {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct State {
     pub id: StateId,
-    pub playbook: PlaybookRef,
+    pub stage_prompt: StagePromptRef,
     /// The state's own overrides, as authored. Resolve with
     /// [`Machine::resolve_model`].
     pub model: ModelChoice,
@@ -298,7 +298,7 @@ pub struct Machine {
     pub loops: Vec<LoopSpec>,
 
     pub budgets: Budgets,
-    /// The Worker floor: what a state gets when neither it, its playbook, nor
+    /// The Worker floor: what a state gets when neither it, its stage prompt, nor
     /// `:defaults` names a model.
     pub worker: ModelSpec,
     pub judge: ModelSpec,
@@ -323,13 +323,13 @@ impl Machine {
         self.states.get(id)
     }
 
-    /// Stack the four config layers: state → playbook frontmatter → machine
+    /// Stack the four config layers: state → stage prompt frontmatter → machine
     /// defaults → global config.
-    pub fn resolve_model(&self, state: &State, playbook: &ModelChoice) -> ModelSpec {
+    pub fn resolve_model(&self, state: &State, stage_prompt: &ModelChoice) -> ModelSpec {
         state
             .model
             .clone()
-            .over(playbook)
+            .over(stage_prompt)
             .over(&self.defaults.model)
             .resolve(&self.worker)
     }

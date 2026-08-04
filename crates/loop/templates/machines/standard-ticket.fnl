@@ -35,22 +35,29 @@
  :escalation-state "blocked"
 
  :states
- {:implement {:playbook "implement"
+ {:implement {:stage-prompt "implement"
               :thinking "high"
               :description "Implement the plan; keep the build green."}
 
-  :review {:playbook "review"
+  :review {:stage-prompt "review"
            :thinking "high"
            :description "Adversarial review of the diff; find real defects."}
 
   ;; The gate on the way out of this stage is a `:check` the harness runs
   ;; itself, so it does not matter what this stage can reach — a stage cannot
   ;; edit its way past a command it does not run.
-  :test {:playbook "qa"
+  ;; `:skills` is the other half of what a stage is told, and it works the
+  ;; opposite way to `:stage-prompt`: the prompt above is always in the
+  ;; system prompt, a skill is offered by name and description and loaded
+  ;; only if the stage decides it is in that situation. Which is exactly
+  ;; right for "is this failure a flake or a real bug" — most runs never
+  ;; need to ask.
+  :test {:stage-prompt "qa"
          :thinking "high"
+         :skills ["debug-transient"]
          :description "Run the test suite and report a grounded pass/fail."}
 
-  :open-pr {:playbook "open-pr"
+  :open-pr {:stage-prompt "open-pr"
             :thinking "low"
             :description "Open or update the pull request for this branch."}}
 

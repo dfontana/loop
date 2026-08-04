@@ -11,33 +11,54 @@ It defines what the keys _mean_. How they are evaluated at run time — the run 
 One directory: `<project>/.loop/`. Everything loop reads or writes for a ticket is inside it, and there is nowhere else to look.
 
 ```
-machine.fnl                the ticket machine — the only required file
-task.md                    prose, referenced by :task
-plan.md                    prose, referenced by :plan
-playbooks/<name>.md        stage prompts, referenced by bare name
-skills/<name>/SKILL.md     a skill as a directory
-skills/<name>.md           a skill as a single file
-ledger.jsonl               the append-only run log
-artifacts/                 snapshots, named <state>-<cycle>-<name>
-run/                       rendered prompts and handoff files — derived
-.gitignore                 one line, `run/`
+machine.fnl                  the ticket machine — the only required file
+task.md                      prose, referenced by :task
+plan.md                      prose, referenced by :plan
+stage-prompts/<name>.md      a stage's prompt, referenced by bare name
+skills/<name>/SKILL.md       a skill as a directory
+skills/<name>.md             a skill as a single file
+ledger.jsonl                 the append-only run log
+artifacts/                   snapshots, named <state>-<cycle>-<name>
+run/                         rendered prompts and handoff files — derived
+.gitignore                   one line, `run/`
 ```
 
 Three kinds of thing, with three lifetimes:
 
-- **Authored** — `machine.fnl`, the prose, `playbooks/`, `skills/`. Yours. `loop init` writes starting copies and then never rewrites a file that exists.
+- **Authored** — `machine.fnl`, the prose, `stage-prompts/`, `skills/`. Yours. `loop init` writes starting copies and then never rewrites a file that exists.
 - **Recorded** — `ledger.jsonl` and `artifacts/`. Written by a run, and the reason `.loop/` is worth committing alongside the branch it belongs to.
 - **Derived** — `run/`, holding `<state>-<cycle>-<attempt>-system.md` (the fully-substituted prompt actually handed to pi) and `<state>-<cycle>-<attempt>-handoff.json` (the file the Worker writes back). Regenerated every stage, so `loop init` puts it in `.loop/.gitignore` and deleting it costs nothing.
 
-The rendered prompt under `run/` is the single most useful file when a stage misbehaves — it is what the agent was actually told, not what the playbook says.
+The rendered prompt under `run/` is the single most useful file when a stage misbehaves — it is what the agent was actually told, not what the stage prompt says.
 
-`loop init` creates `machine.fnl`, `task.md`, `plan.md`, five bundled playbooks, an empty `skills/`, and the `.gitignore`. `ledger.jsonl`, `artifacts/`, and `run/` appear when something needs them.
+`loop init` creates `machine.fnl`, `task.md`, `plan.md`, four bundled stage prompts, one bundled skill, and the `.gitignore`. `ledger.jsonl`, `artifacts/`, and `run/` appear when something needs them.
+
+### Stage prompts and skills are not the same thing
+
+Both are markdown with YAML frontmatter, and a file that works as one will usually parse as the other. The format is where the similarity stops. What separates them is **how each reaches the model**, and it is worth getting straight before you write either, because it decides which one a given piece of text has to be.
+
+| | Stage prompt | Skill |
+| --- | --- | --- |
+| Bound to | Exactly one state | Any state that names it, via `:skills` |
+| Reaches pi as | `--append-system-prompt <path>` | `--skill <path>` |
+| In the stage's context | **Always.** It _is_ the system prompt. | **Only if the model elects to load it**, having seen its name and description. |
+| Does loop read it? | Yes — parses frontmatter, substitutes `$VAR`s | **Never.** Checks the path exists and hands it over. |
+| Can carry `$TASK`, `$PLAN`, `$LEDGER_DIGEST` | Yes | No. loop never renders one, so the text arrives literally. |
+| Can set the stage's model | Yes, via frontmatter — layer 2 of [model resolution](#model-resolution) | No |
+| Can carry scripts | No, one file of prose | Yes — a directory, and `:check` can run the same script |
+
+Two rules fall out of that, and they settle most authoring questions:
+
+- **Anything the stage must be told is a stage prompt.** "Offered" is not "told". A description of the job, the definition of done, the instruction to write a handoff — none of these can be a skill, because a skill the model chooses not to open is a skill that did nothing.
+- **Anything that depends on where the run has been is a stage prompt.** There is no automatically prepended context header (see [template variables](#template-variables)), so a `$VAR` is the only way the task, the plan, the digest, or the Navigator's note enters a stage — and a skill is never rendered.
+
+What is left for skills is the good case for them: situational know-how that most runs will not need, and the scripts that carry it out. "How to tell a flaky test from a real one" is worth having available and not worth spending context on every stage. That is a skill.
 
 ### Names resolve in one place
 
-A playbook or skill name resolves inside `.loop/` and nowhere else. There is no precedence order, no shadowing, and no shared copy elsewhere on the machine that a local file overrides — a name either names a file under `.loop/playbooks/` or `.loop/skills/`, or it is an error that prints the path it looked at. The exact candidate lists are under [Playbooks](#playbooks) and [Skills](#skills).
+A stage prompt or skill name resolves inside `.loop/` and nowhere else. There is no precedence order, no shadowing, and no shared copy elsewhere on the machine that a local file overrides — a name either names a file under `.loop/stage-prompts/` or `.loop/skills/`, or it is an error that prints the path it looked at. The exact candidate lists are under [Stage prompts](#stage-prompts) and [Skills](#skills).
 
-The cost of that is real and worth stating: there is no shared library to edit once. Carrying a tuned playbook, skill, or machine to the next ticket is a copy — `loop init <TICKET> --from <DIR>` — so an improvement you make in one ticket does not reach the tickets already in flight. See [reuse across tickets](#reuse-across-tickets).
+The cost of that is real and worth stating: there is no shared library to edit once. Carrying a tuned stage prompt, skill, or machine to the next ticket is a copy — `loop init <TICKET> --from <DIR>` — so an improvement you make in one ticket does not reach the tickets already in flight. See [reuse across tickets](#reuse-across-tickets).
 
 The project root is the only path loop takes from outside the directory, and it comes from `-C/--dir` or the cwd; see [04-cli-reference.md](04-cli-reference.md#environment-variables).
 
@@ -64,7 +85,7 @@ The project root is the only path loop takes from outside the directory, and it 
 | `:digest-last-n` | no | int | How many recent committed transitions `$LEDGER_DIGEST` lists. Default `8`. |
 | `:pi-extensions` | no | `[string]` | A declaration of what you have installed in pi. Drives one lint; turns nothing on. Default `["mcp" "review-model-selector"]`. |
 | `:entry` | conditional | string | Must name a declared state. See below. |
-| `:terminals` | yes | `[string]` | Terminal names. These are **not** states — they have no playbook and never spawn an agent. |
+| `:terminals` | yes | `[string]` | Terminal names. These are **not** states — they have no stage prompt and never spawn an agent. |
 | `:escalation-state` | no | string | Must name a declared state or terminal. |
 | `:states` | yes | table | At least one entry. |
 | `:transitions` | no | list | Absent means no edges, which `loop validate` will reject as unreachable/terminal-less. |
@@ -72,7 +93,7 @@ The project root is the only path loop takes from outside the directory, and it 
 
 **What a machine does not name comes from loop's built-in floor**, which is code rather than a file — `Config::defaults` in `crates/loop/src/core/config.rs`. There is nothing to edit there and nothing to scaffold; a machine that wants a different model, budget, or digest length says so in `machine.fnl`, in the file under review. The one setting no machine can reach is the pi binary itself, which comes from `LOOP_PI_BIN` (default `pi`).
 
-**Every struct is `deny_unknown_fields`.** A misspelled key is an error naming the field and listing the ones that exist, at any depth — `:playbok "implement"` no longer loads and then complains about a missing playbook, and `:max-cycels 4` no longer leaves the bound at its default while the run keeps going. Errors carry the path to the offending value:
+**Every struct is `deny_unknown_fields`.** A misspelled key is an error naming the field and listing the ones that exist, at any depth — `:playbok "implement"` no longer loads and then complains about a missing stage prompt, and `:max-cycels 4` no longer leaves the bound at its default while the run keeps going. Errors carry the path to the offending value:
 
 ```
 error: machine: at `states.qa-staging.thinking`: deserialize error: unknown variant `hihg`,
@@ -92,7 +113,7 @@ Sharp edges worth knowing before you edit:
 
 - **`:task` / `:plan` ending in `.md` that does not resolve is a hard error, not a fallback.** The value is first tried as a path relative to `machine.fnl`. If that file exists, its contents become `$TASK`/`$PLAN`. If it does not exist _and_ the value ends in `.md`, loop fails with ``could not resolve task `task.md` `` followed by the path it tried, on the assumption you meant a file and mistyped it. Any other non-resolving string is taken as inline prose, which is what makes `:task "Bump the timeout to 30s."` work for a throwaway ticket.
 - **`:entry` is only inferable when there is exactly one state.** Omit it with one state and that state is the entry. Omit it with more and you get ``missing `:entry` and `:states` has N entries; ambiguous which one starts the machine``. Naming a state that does not exist gives `` `:entry` `x` is not a declared state ``.
-- **Terminals are not states.** `:terminals ["done" "blocked"]` declares two names a transition may point `:to`; neither has a playbook. Entering one ends the run.
+- **Terminals are not states.** `:terminals ["done" "blocked"]` declares two names a transition may point `:to`; neither has a stage prompt. Entering one ends the run.
 - **`:escalation-state` is committed to directly**, bypassing edge selection and every guard tier. If it is also a terminal, the run reports `Failed` rather than `Done`. With no escalation state configured, an escalation ends the run `Aborted`. See [escalation](02-how-it-works.md#escalation).
 - **`:budgets` can only tighten.** Writing `:usd 100` against the built-in floor of `15.0` leaves you with `15.0`. Machines are for narrowing, not for raising the roof.
 - **`:navigator {:max-invocations N}`** is a cap that applies **both** run-wide and per source state; hitting either escalates instead of spawning. See [the Navigator](02-how-it-works.md#navigator).
@@ -103,19 +124,22 @@ loop never turns this list into a command-line flag, because pi has none to turn
 
 What the key does is let the linter catch a mismatch. If a state names `:mcp` servers and `"mcp"` is not in `:pi-extensions`, `loop validate` errors with _state `{id}` names MCP servers, but `mcp` is not in `:pi-extensions` — the stage would be told to call a tool it does not have_. Declare what you have installed and the lint is worth something; leave it stale and it isn't.
 
-### Keys that were removed
+### Keys that were removed or renamed
 
 These fail the load by name rather than as a generic unknown field, because each one used to do something and an author deserves to be told what replaced it.
 
 | Key | Error says |
 | --- | --- |
-| `:context` | Removed. It took `"digest"` or `"full"`, and `"full"` was never wired to anything. The rolling digest is the only continuity channel between stages: interpolate `$LEDGER_DIGEST` in a playbook and tune `:digest-last-n`. |
+| `:playbook` (on a state) | **Renamed** to `:stage-prompt`, and `.loop/playbooks/` is now `.loop/stage-prompts/`. It still means the same thing: a bare name, or a path if it contains `/`. The inline-text key is still `:prompt`. |
+| `:context` | Removed. It took `"digest"` or `"full"`, and `"full"` was never wired to anything. The rolling digest is the only continuity channel between stages: interpolate `$LEDGER_DIGEST` in a stage prompt and tune `:digest-last-n`. |
 | `:default-skills` | Write `:defaults {:skills [..]}`. |
 | `:default-mcp` | Write `:defaults {:mcp [..]}`. |
 | `:transition-mode` | Removed. A Worker ends its stage by writing `$LOOP_HANDOFF`, and the harness checks the target against the graph either way; an off-graph target routes to the Navigator, which is what `open` meant and is now the only behavior. |
 | `:when` (on a transition) | Removed. Express the condition as a `:check` the harness runs, or as `:criteria` for the Judge. |
 
-The first three are the shape of a change worth knowing about: there used to be a second authored file, `config.fnl`, in a second directory, holding `:provider`, `:worker`, `:judge`, `:navigator`, `:default-skills`, `:default-mcp`, `:pi-extensions`, `:budgets`, and `:digest-last-n`. Every one of those was a value a machine could already override, so they are machine keys now — with the two `default-*` lists folded into the `:defaults` a machine already had — and the file is gone.
+`:playbook` is the only rename in that table, and it gets an error of its own precisely because it is one. A removed key can be reported generically and the author loses nothing; a renamed key reported as "unknown field `playbook`, expected one of `stage-prompt`, `prompt`, …" offers two plausible replacements, and picking `:prompt` is not a load error — it is a stage that runs the string `"qa"` as its entire prompt. The name changed because "playbook" said nothing about the one property that matters: this file is in the stage's context whether the model wants it or not. See [stage prompts and skills](#stage-prompts-and-skills-are-not-the-same-thing).
+
+The three `config.fnl` keys are the shape of a change worth knowing about: there used to be a second authored file, `config.fnl`, in a second directory, holding `:provider`, `:worker`, `:judge`, `:navigator`, `:default-skills`, `:default-mcp`, `:pi-extensions`, `:budgets`, and `:digest-last-n`. Every one of those was a value a machine could already override, so they are machine keys now — with the two `default-*` lists folded into the `:defaults` a machine already had — and the file is gone.
 
 ### States
 
@@ -123,7 +147,7 @@ The first three are the shape of a change worth knowing about: there used to be 
 
 | Key | Required | Type | Effect |
 | --- | --- | --- | --- |
-| `:playbook` | one of the two | string | A bare name resolved in `.loop/playbooks/`, or a path if it contains `/`. |
+| `:stage-prompt` | one of the two | string | A bare name resolved in `.loop/stage-prompts/`, or a path if it contains `/`. |
 | `:prompt` | one of the two | string | Inline prompt text. No filesystem access at all. |
 | `:model` | no | string | Model override for this stage (layer 1). |
 | `:thinking` | no | string | Thinking override for this stage (layer 1). |
@@ -132,7 +156,7 @@ The first three are the shape of a change worth knowing about: there used to be 
 | `:mcp` | no | `[string]` | MCP server names, unioned the same way. |
 | `:description` | no | string | One line on what the stage is for. |
 
-A state needs `:playbook` **or** `:prompt`; with neither you get ``state `{id}`: needs either `:playbook` or `:prompt` ``.
+A state needs `:stage-prompt` **or** `:prompt`; with neither you get ``state `{id}`: needs either `:stage-prompt` or `:prompt` ``.
 
 `:description` is not decorative. It is what the Navigator reads in the graph summary when it has to pick a state on the Worker's behalf, and it is the label `loop diagram` draws. A state with no description shows up to the Navigator as `(no description)`, which is exactly as useful as it sounds.
 
@@ -155,7 +179,7 @@ What these mean at run time — the tier order, the short-circuit, what the Judg
 - **`:criteria`** is prose, handed to the Judge as its system prompt. Use it for what no exit code decides: "every item in the plan is addressed", "this is a real fix, not a widened assertion".
 - **`:on-fail`** applies to the edge, regardless of which tier failed. `"retry"` re-enters the source state at `attempt + 1` and does not consume a transition from the budget. `"abort"` ends the run `Failed`. `{:route "x"}` commits straight to `x` with no guard tiers and no backoff — the usual way to send a failed review back to `implement` with the findings on the ledger.
 - **`:backoff-s`** sleeps after the commit event is written, so it survives a crash in the sense that the commit is already durable. It is a blocking sleep in the `loop run` process.
-- **`:when` is removed.** The key used to hold a Fennel closure. Using it now is a hard error: ``transitions[N]: `:when` guards were removed — express the condition as a `:check` command the harness runs, or as `:criteria` for the Judge to evaluate``. See [keys that were removed](#keys-that-were-removed).
+- **`:when` is removed.** The key used to hold a Fennel closure. Using it now is a hard error: ``transitions[N]: `:when` guards were removed — express the condition as a `:check` command the harness runs, or as `:criteria` for the Judge to evaluate``. See [keys that were removed or renamed](#keys-that-were-removed-or-renamed).
 
 An edge with neither `:check` nor `:criteria` is legal and draws a `loop validate` warning: _the worker's proposal is committed unexamined_. Warnings alone still exit 0.
 
@@ -216,32 +240,32 @@ The cap is enforced prospectively at commit time, and only when the target is a 
  :escalation-state "blocked"
 
  :states
- {:implement {:playbook "implement"          ; .loop/playbooks/implement.md
+ {:implement {:stage-prompt "implement"          ; .loop/stage-prompts/implement.md
               :thinking "high"
               :skills ["spark-build"]
               :description "Implement the plan; keep the build green."}
 
-  :review {:playbook "review"
+  :review {:stage-prompt "review"
            :thinking "high"
            :description "Adversarial review of the diff; find real defects."}
 
-  :qa-staging {:playbook "qa"
+  :qa-staging {:stage-prompt "qa"
                :thinking "high"
                :skills ["staging-deploy" "spark-run"]
                :mcp ["warehouse"]
                :description "Deploy to staging, run the pipeline, grade it."}
 
-  :debug {:playbook "debug-spark"
+  :debug {:stage-prompt "debug-spark"
           :thinking "high"
           :skills ["spark-build" "debug-transient"]
           :description "Diagnose a real pipeline failure and fix it."}
 
-  :validate-contract {:playbook "validate-contract"
+  :validate-contract {:stage-prompt "validate-contract"
                       :thinking "medium"
                       :skills ["staging-deploy" "contract-check"]
                       :description "Confirm the API contract matches the OpenAPI schema."}
 
-  :open-pr {:playbook "open-pr"
+  :open-pr {:stage-prompt "open-pr"
             :thinking "low"
             :skills ["open-pr"]
             :description "Open or update the pull request for this branch."}}
@@ -291,7 +315,7 @@ The cap is enforced prospectively at commit time, and only when the target is a 
   {:name "qa-transient" :states ["qa-staging"] :max-cycles 3 :on-exhausted "escalate"}]}
 ```
 
-Run `loop validate` after every edit. It resolves every playbook and skill name, walks reachability from `:entry`, checks that each state has a path to a terminal, and catches duplicate edges — the full diagnostic list is in [04-cli-reference.md](04-cli-reference.md#loop-validate). `loop diagram` renders the same machine as a mermaid state diagram if you would rather look at it.
+Run `loop validate` after every edit. It resolves every stage prompt and skill name, walks reachability from `:entry`, checks that each state has a path to a terminal, and catches duplicate edges — the full diagnostic list is in [04-cli-reference.md](04-cli-reference.md#loop-validate). `loop diagram` renders the same machine as a mermaid state diagram if you would rather look at it.
 
 ---
 
@@ -300,13 +324,13 @@ Run `loop validate` after every edit. It resolves every playbook and skill name,
 The Worker's model is assembled from four layers, most specific first:
 
 1. The state's own `:model` / `:thinking` / `:provider`
-2. The playbook's frontmatter `model` / `thinking`
+2. The stage prompt's frontmatter `model` / `thinking`
 3. The machine's `:defaults`
 4. The machine's `:worker`, over loop's built-in floor (`claude-sonnet-5` at `medium`)
 
-Layers are merged **field by field**, not chosen wholesale. A state that sets only `:thinking "high"` still takes its model from whichever lower layer supplies one. A playbook whose frontmatter names a `model` but no `thinking` contributes exactly the model.
+Layers are merged **field by field**, not chosen wholesale. A state that sets only `:thinking "high"` still takes its model from whichever lower layer supplies one. A stage prompt whose frontmatter names a `model` but no `thinking` contributes exactly the model.
 
-**Playbook frontmatter never supplies a provider.** That layer contributes `model` and `thinking` only; the provider comes from the state, the machine's `:defaults`, the role's own table, or the machine's top-level `:provider` under all of them.
+**Stage prompt frontmatter never supplies a provider.** That layer contributes `model` and `thinking` only; the provider comes from the state, the machine's `:defaults`, the role's own table, or the machine's top-level `:provider` under all of them.
 
 The resolved pair becomes one pi flag:
 
@@ -326,32 +350,32 @@ Do not merge the four layers in your head. [`loop preview`](04-cli-reference.md#
 
 ---
 
-## Playbooks
+## Stage prompts
 
-A playbook is a stage's prompt: a markdown file whose body, after `$VAR` substitution, is written to `.loop/run/` and handed to pi as `--append-system-prompt <path>`. One playbook per state.
+A stage prompt is what a stage is told: a markdown file whose body, after `$VAR` substitution, is written to `.loop/run/` and handed to pi as `--append-system-prompt <path>`. One per state, always in that stage's context. The contrast with a skill is [above](#stage-prompts-and-skills-are-not-the-same-thing).
 
 Three ways to name one:
 
 | Form | Behavior |
 | --- | --- |
-| `:playbook "qa"` | A bare **name**, resolved in `.loop/playbooks/`. |
-| `:playbook "playbooks/one-off.md"` | Contains `/`, so it is a **path** — absolute as-is, otherwise relative to `machine.fnl`'s directory. **No extension is appended**; write the `.md` yourself. |
+| `:stage-prompt "qa"` | A bare **name**, resolved in `.loop/stage-prompts/`. |
+| `:stage-prompt "stage-prompts/one-off.md"` | Contains `/`, so it is a **path** — absolute as-is, otherwise relative to `machine.fnl`'s directory. **No extension is appended**; write the `.md` yourself. |
 | `:prompt "…"` | **Inline** text. No filesystem access, no frontmatter, no name resolution. |
 
 A bare name has exactly one candidate, `.md` only:
 
 ```
-<project>/.loop/playbooks/<name>.md
+<project>/.loop/stage-prompts/<name>.md
 ```
 
 A miss names it:
 
 ```
-could not resolve playbook `qa`
-  searched: /proj/.loop/playbooks/qa.md
+could not resolve stage prompt `qa`
+  searched: /proj/.loop/stage-prompts/qa.md
 ```
 
-`loop validate` reports the same miss as _playbook for state `{id}` does not resolve in .loop/playbooks/_, so you find it before a run burns tokens getting there.
+`loop validate` reports the same miss as _stage prompt for state `{id}` does not resolve in .loop/stage-prompts/_, so you find it before a run burns tokens getting there.
 
 A hit is worth reading back too: [`loop preview`](04-cli-reference.md#loop-preview) names the file each state resolved to, and `loop preview <state>` prints the body it resolved to as well.
 
@@ -371,11 +395,11 @@ Parsing rules that surprise people:
 - Frontmatter is recognized **only if line 1 is exactly `---`**. A blank line, a BOM, or a leading comment above it and the whole file is body.
 - **Unclosed frontmatter is silently treated as body.** There is no error; you get a prompt that starts with `---` and your YAML as prose.
 - Unknown keys are ignored, not rejected.
-- Malformed YAML _inside_ a properly closed block does error: ``playbook `{name}` has malformed frontmatter: {err}``.
+- Malformed YAML _inside_ a properly closed block does error: ``stage prompt `{name}` has malformed frontmatter: {err}``.
 
 ### Template variables
 
-The playbook body is rendered with `$UPPER_SNAKE` substitution. This is the complete set of variables — there are no others.
+The stage prompt body is rendered with `$UPPER_SNAKE` substitution. This is the complete set of variables — there are no others.
 
 | Variable | Value |
 | --- | --- |
@@ -394,7 +418,7 @@ The playbook body is rendered with `$UPPER_SNAKE` substitution. This is the comp
 
 The same map is used for `:check` command strings — see [Check commands](#check-commands).
 
-> **The variables only reach the agent where you interpolated them.** There is no automatically prepended context header. A playbook that never writes `$TASK` gives the agent no task. A playbook that never writes `$LEDGER_DIGEST` gives it no memory of the previous six stages. The positional message pi is spawned with contains no ticket id, task, plan, or digest — only "you are entering **X**, cycle N" and, when the stage names servers, the MCP connect instructions. Everything else is in the file you wrote.
+> **The variables only reach the agent where you interpolated them.** There is no automatically prepended context header. A stage prompt that never writes `$TASK` gives the agent no task. A stage prompt that never writes `$LEDGER_DIGEST` gives it no memory of the previous six stages. The positional message pi is spawned with contains no ticket id, task, plan, or digest — only "you are entering **X**, cycle N" and, when the stage names servers, the MCP connect instructions. Everything else is in the file you wrote.
 
 `loop preview <state>` answers that directly: it lists the variables the body **actually writes**, split from the `$NAME`s that will pass through untouched, and then renders the body so you can read the result. The render is representative, not exact — it uses cycle 1, attempt 1, no previous state, no artifacts, and an empty digest, because everything else depends on where the run has already been. Which variables are wired in is exact; what they will contain is not.
 
@@ -421,7 +445,9 @@ Note the absence of a `$` and of everything else in the table above. `$TASK` and
 
 ## Skills
 
-A skill is instructions plus whatever scripts sit beside them. loop resolves a name to a path and passes `--skill <path>` to pi; **loop does not parse skills at all**. The format is entirely pi's business — loop never reads a `SKILL.md`'s contents, only checks that the file exists.
+A skill is know-how a stage is _offered_, plus whatever scripts sit beside it. loop resolves a name to a path and passes `--skill <path>` to pi; **loop does not parse skills at all**. The format is entirely pi's business — loop never reads a `SKILL.md`'s contents, only checks that the file exists.
+
+That last sentence has two consequences worth stating before the mechanics. A skill's body is **not** rendered, so a `$TASK` written in one arrives as the literal five characters. And a skill's frontmatter cannot set a model or thinking level — those keys are read off a stage prompt, which belongs to a state and therefore has a model to influence; on a skill they are silently inert. See [above](#stage-prompts-and-skills-are-not-the-same-thing).
 
 A name containing `/` is an exact path: absolute as-is, otherwise relative to `machine.fnl`'s directory. A bare name has two candidates, in order:
 
@@ -438,7 +464,7 @@ machine :defaults :skills  +  state :skills
 
 There is no exclude list and no subtraction. Withholding a skill hides know-how; it does not revoke a capability, because the Worker keeps pi's built-in tools regardless. See [what a stage can do](02-how-it-works.md#worker).
 
-A playbook `.md` can double as a skill — nothing about the format distinguishes them. A `review` playbook being the same file another state names as a skill is a normal thing to do when the review procedure is worth loading into a second stage.
+A stage prompt `.md` can double as a skill, but **only through the path form** — `:skills ["stage-prompts/review.md"]`, not `:skills ["review"]`, because a bare name is looked for under `.loop/skills/` and nowhere else. Naming the same `review.md` that a state uses as its stage prompt is a reasonable thing to do when the review procedure is worth _offering_ to a second stage; note the asymmetry that makes it work in that direction only. The file is rendered where it is the stage prompt and handed over raw where it is the skill, so a `$VAR` in it will interpolate in one stage and appear literally in the other.
 
 > `loop validate` checks the whole union, not just the names the state writes, because the union is what a spawn actually loads. A name that came from `:defaults` says so in the diagnostic.
 
@@ -527,15 +553,15 @@ Empty is an error, not a no-op: ``transitions[N]: `:check` command is empty — 
 
 ## Reuse across tickets
 
-`loop init <TICKET>` with no flags writes the bundled `standard-ticket` machine and its five playbooks. `loop init <TICKET> --from <DIR>` **copies** a `.loop/`-shaped directory instead:
+`loop init <TICKET>` with no flags writes the bundled `standard-ticket` machine, its four stage prompts, and the one skill it names. `loop init <TICKET> --from <DIR>` **copies** a `.loop/`-shaped directory instead:
 
 ```
 loop init PROJ-1502 --from ~/loop-kits/data-pipeline
 ```
 
-`<DIR>` must hold a `machine.fnl`; a leading `~/` is expanded. Everything under it — playbooks, skills, prose, whatever you keep there — is copied into the new `.loop/`, and files that already exist are never overwritten.
+`<DIR>` must hold a `machine.fnl`; a leading `~/` is expanded. Everything under it — stage prompts, skills, prose, whatever you keep there — is copied into the new `.loop/`, and files that already exist are never overwritten.
 
-**A copy, not a lookup.** What you started from is recorded in the ticket rather than resolved at run time, so editing the source afterwards cannot change a run already in flight. The flip side is the one stated under [names resolve in one place](#names-resolve-in-one-place): fixing a playbook in your kit does not fix it in the twelve tickets already copied from it. You re-copy, or you edit the ticket in front of you.
+**A copy, not a lookup.** What you started from is recorded in the ticket rather than resolved at run time, so editing the source afterwards cannot change a run already in flight. The flip side is the one stated under [names resolve in one place](#names-resolve-in-one-place): fixing a stage prompt in your kit does not fix it in the twelve tickets already copied from it. You re-copy, or you edit the ticket in front of you.
 
 **`$TICKET` is scaffold-time text.** `loop init` does a plain string replacement of `$TICKET` with the ticket argument in the copied `machine.fnl`, and in `task.md` / `plan.md` when it writes them itself. This is _not_ the `$VAR` render engine and _not_ the runtime `$TICKET_ID` — it happens once, at scaffold, and the resulting file contains the literal ticket. Only `$TICKET` is replaced; every other `$NAME` survives to be a real template variable later.
 
@@ -557,4 +583,4 @@ The bar is not "this ticket had one more step". A sequential stage is a two-line
 
 **The bar is a state you would have to _re-enter_** — a genuine ambiguity the graph has to resolve by looping rather than by proceeding. The canonical case is transient-vs-real failure: when a stage can fail in two ways that demand different responses, and no single guard can tell them apart in one pass, you need a head, a back-edge, a cap, and a classification check. That is a shape, not a step, and shapes are what a kit is for.
 
-Everything else — a different build command, an extra QA case, a one-off playbook — belongs in the ticket's own `.loop/`, where it costs nothing when the ticket is deleted.
+Everything else — a different build command, an extra QA case, a one-off stage prompt — belongs in the ticket's own `.loop/`, where it costs nothing when the ticket is deleted.

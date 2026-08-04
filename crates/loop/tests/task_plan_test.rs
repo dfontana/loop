@@ -15,7 +15,7 @@ fn machine_with_task(dir: &std::path::Path, task_value: &str) -> std::path::Path
  :plan "inline plan text, nothing fancy"
  :entry "a"
  :terminals ["done"]
- :states {{:a {{:playbook "a"}}}}
+ :states {{:a {{:stage-prompt "a"}}}}
  :transitions []}}
 "#
     );
