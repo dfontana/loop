@@ -52,7 +52,7 @@ impl Diagnostic {
 /// - Every state's `playbook` resolves (checked by the caller supplying
 ///   `resolve`, since resolution is filesystem work).
 /// - The skills and MCP servers each state *actually loads*, which is the
-///   union with `config.fnl`'s `:default-skills` / `:default-mcp` — not just
+///   union with the machine's `:defaults {:skills ..}` / `{:mcp ..}` — not just
 ///   the names the machine writes. Linting the machine's layer alone left a
 ///   typo in the global toolbox config to surface as a failed stage mid-run.
 /// - Every loop's states exist and its head is a state some edge re-enters.

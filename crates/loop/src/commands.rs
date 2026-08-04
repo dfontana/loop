@@ -228,8 +228,8 @@ pub fn diagram(paths: Paths) -> Result<()> {
 ///
 /// Read-only and deterministic by construction: it resolves through
 /// `Resolver`, the same code `build_stage` runs, but stops short of every
-/// write that stage building does. No `ext/*.ts` is materialized, no ledger or
-/// artifact directory is created, and nothing lands under `LOOP_STATE_DIR` —
+/// write that stage building does. No ledger or artifact directory is
+/// created, and nothing lands in `.loop/run/` —
 /// the render a state preview shows is built in memory and printed.
 pub fn preview(paths: Paths, state: Option<String>) -> Result<()> {
     let (_vm, config, machine) = load(paths)?;

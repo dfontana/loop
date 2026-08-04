@@ -96,7 +96,7 @@ enum Command {
         #[arg(long)]
         latest: bool,
     },
-    /// Check the environment: pi on PATH, toolbox staged, machine present.
+    /// Check the environment: pi on PATH, machine present.
     Doctor,
 }
 

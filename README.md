@@ -4,15 +4,16 @@ A local, **ticket-level agent orchestrator**. You write a small state machine fo
 
 The harness is deterministic and cheap. The agents are non-deterministic and expensive. **The harness owns control flow and the ledger; the agent owns the work inside a stage.** An agent ends its stage by _proposing_ where to go next. The harness _disposes_: it runs the edge's check command, asks an independent Judge whether the criteria are met, and only then commits the move. Every step is appended to a JSONL ledger, so a run is auditable, resumable, and greppable.
 
-The per-ticket machine is meant to be hacked together fast and thrown away. The reusable parts — playbooks, skills, machine templates — live in a portable toolbox outside the project, so a new ticket is an assembly job.
+The per-ticket machine is meant to be hacked together fast and thrown away. Everything a ticket needs lives in one directory, `.loop/` — the machine, its prose, its playbooks, its skills, its ledger — so a ticket is self-contained, and starting a new one is `loop init --from` a directory you keep.
 
 ## Quickstart
 
 ```sh
 cargo build --release -p loop         # binary lands at target/release/loop
-loop doctor                           # pi on PATH? toolbox staged?
+loop doctor                           # pi on PATH? machine present?
 
-loop init PROJ-1487                   # scaffolds ./.loop/ and ~/.config/loop/
+loop init PROJ-1487                   # scaffolds ./.loop/
+                                      #   ...or --from a .loop/ you already like
 $EDITOR .loop/task.md .loop/plan.md   # what to do, and how
 $EDITOR .loop/machine.fnl             # the stages and the edges between them
 
@@ -53,11 +54,11 @@ Full walkthrough: [Getting started](docs/01-getting-started.md).
 | Doc | What's in it |
 | --- | --- |
 | [01 — Getting started](docs/01-getting-started.md) | Install, scaffold a ticket, run your first loop, read the result |
-| [02 — How a run works](docs/02-how-it-works.md) | The run loop, the three roles and their injected tools, guards, budgets, the ledger, and how to inspect a run in flight |
-| [03 — Customizing a loop](docs/03-customizing.md) | Where configuration lives and every key in it: `config.fnl`, `machine.fnl`, playbooks, skills, MCP, template variables, check commands |
+| [02 — How a run works](docs/02-how-it-works.md) | The run loop, the three roles and how each one answers, guards, budgets, the ledger, and how to inspect a run in flight |
+| [03 — Customizing a loop](docs/03-customizing.md) | Every key in `machine.fnl`, plus playbooks, skills, MCP, template variables, and check commands |
 | [04 — CLI reference](docs/04-cli-reference.md) | Every command, flag, environment variable, and exit code |
 | [05 — Design notes](docs/05-design-notes.md) | Why it works this way, the tradeoffs, and the known gaps |
-| [examples/](examples/) | A complete worked ticket — the machine, its toolbox, and the ledger the run produced |
+| [examples/](examples/) | A complete worked ticket — a real `.loop/`, and the ledger the run produced |
 
 If you are evaluating the design rather than using it, read **05** first, then **02**.
 
@@ -75,11 +76,10 @@ Which means the only pi-specific code left is one function that builds an argv. 
 
 - **Machine** — the per-ticket definition: states, transitions, loops, budgets, and QA cases. One Fennel file (`machine.fnl`) that _references_ the task and plan prose and each stage's playbook by name.
 - **State / stage** — a node in the machine, bound to a playbook that supplies its prompt.
-- **Playbook** — a stage's prompt: a markdown file with optional frontmatter, resolved local-first (`./.loop/playbooks/`) then toolbox (`~/.config/loop/playbooks/`).
+- **Playbook** — a stage's prompt: a markdown file with optional frontmatter, in `./.loop/playbooks/`.
 - **Skill** — situational know-how bound into a stage: a `SKILL.md` plus the scripts beside it, or a bare `.md`. Loaded through `pi --skill`.
 - **Check** — a command the _harness_ runs itself after a stage exits; exit 0 passes the edge. The one signal a worker cannot author, because it never touches the worker's session.
 - **Criteria** — a prose standard an independent Judge evaluates against the stage's output and artifacts.
-- **Toolbox** — the portable library of playbooks, skills, and machine templates at `~/.config/loop/`, reused across tickets.
 - **Ledger** — append-only JSONL at `.loop/ledger.jsonl`. The source of truth for where a run is; all state is folded from it, never stored.
 - **Cycle** — one traversal of a declared loop, counted on re-entry into the loop's head state.
 - **Worker** — the pi agent spawned to execute a stage.
@@ -88,6 +88,6 @@ Which means the only pi-specific code left is one function that builds an argv. 
 
 ## Status
 
-Working, and under active development. The `loop` crate in `crates/` drives `pi` (`crates/mock-pi` is its offline stand-in, for the tests); machines are authored in Fennel and evaluated in an embedded Lua VM. The toolbox lives in `~/.config/loop/`; generated renders go to `~/.local/state/loop/`.
+Working, and under active development. The `loop` crate in `crates/` drives `pi` (`crates/mock-pi` is its offline stand-in, for the tests); machines are authored in Fennel and evaluated in an embedded Lua VM. Everything a run reads or writes is under `<project>/.loop/`, including the rendered prompts, which go in `.loop/run/` and are gitignored.
 
 The limits that come with the design — stage-level recovery, budgets sampled between stages, skills that scope instructions rather than capability — are written down in [design notes](docs/05-design-notes.md#limits-we-accept) rather than left for you to discover.

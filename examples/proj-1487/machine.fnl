@@ -1,13 +1,13 @@
-;; examples/local/machine.fnl  →  ./.loop/machine.fnl
+;; examples/proj-1487/machine.fnl  →  ./.loop/machine.fnl
 ;;
 ;; The per-ticket machine for PROJ-1487, in the v1 plain-table Fennel schema
 ;; (docs/05-design-notes.md; the schema reference is crates/loop/src/fennel/convert.rs).
 ;;
-;; The ticket's unique files are just this machine + its prose (task.md,
-;; plan.md) + any bespoke local playbook (playbooks/validate-contract.md) + the
-;; ledger it produces. Everything else it references — generic playbooks,
-;; skills — lives in the portable toolbox at ~/.config/loop/ and is reused
-;; untouched.
+;; Everything this machine references lives beside it: the prose it reads
+;; (task.md, plan.md), the playbooks its states name, the skills those stages
+;; load, and the ledger the run appended. A ticket directory is self-contained,
+;; so `loop validate` here resolves every reference without looking anywhere
+;; else — copy the directory and you have copied the whole setup.
 ;;
 ;;   loop validate   → lints the graph + resolves every reference
 ;;   loop run        → drives it to a terminal
@@ -28,7 +28,7 @@
             {:id "contract"
              :desc "GET /accounts/:id returns churn_score as a number matching the OpenAPI schema."}]
 
- ;; Sits under every state and over ~/.config/loop/config.fnl. A state's own
+ ;; Sits under every state and over loop's built-in floor. A state's own
  ;; :model/:thinking wins; so does its playbook's frontmatter.
  :defaults {:provider "anthropic" :model "claude-sonnet-5" :thinking "medium"
             :skills [] :mcp []}
@@ -46,11 +46,11 @@
 
  ;; ── States ────────────────────────────────────────────────────────────────
  ;; Every stage's prompt IS its :playbook — a markdown file resolved
- ;; local-first (./.loop/playbooks/) then toolbox (~/.config/loop/playbooks/).
- ;; A generic stage names a toolbox playbook; a ticket-specific stage drops a
+ ;; resolved in ./.loop/playbooks/, beside this file.
+ ;; A reusable stage names a playbook copied in with the rest; a one-off drops a
  ;; local .md of its own.
  :states
- {:implement {:playbook "implement"        ; toolbox
+ {:implement {:playbook "implement"
               :thinking "high"
               :skills ["spark-build"]
               :description "Implement the plan; keep the build green."}
@@ -107,7 +107,7 @@
  ;; :on-fail is "retry" | "abort" | {:route "state"}.
  :transitions
  [{:from "implement" :to "review"
-   :check "bash ~/.config/loop/skills/spark-build/build.sh"
+   :check "bash .loop/skills/spark-build/build.sh"
    :criteria "The plan's four items are all addressed in the diff, and no TODO/FIXME markers remain in changed files."
    :on-fail "retry"}
 
@@ -122,24 +122,24 @@
   ;; taxonomy, so "transient" is decided by a versioned regex set and an exit
   ;; code rather than by a tired agent that would rather retry than debug.
   {:from "qa-staging" :to "qa-staging"
-   :check "bash ~/.config/loop/skills/spark-run/classify.sh --expect transient"
+   :check "bash .loop/skills/spark-run/classify.sh --expect transient"
    :backoff-s 30
    :on-fail "abort"}
   {:from "qa-staging" :to "debug"
-   :check "bash ~/.config/loop/skills/spark-run/classify.sh --expect real"}
+   :check "bash .loop/skills/spark-run/classify.sh --expect real"}
   {:from "qa-staging" :to "validate-contract"
-   :check "bash ~/.config/loop/skills/spark-run/classify.sh --expect pass"
+   :check "bash .loop/skills/spark-run/classify.sh --expect pass"
    :criteria "The output sample satisfies every QA case, not just the job's exit status."}
 
   {:from "debug" :to "qa-staging"
-   :check "bash ~/.config/loop/skills/spark-build/build.sh"
+   :check "bash .loop/skills/spark-build/build.sh"
    :criteria "A concrete fix to the diagnosed failure was applied — not a retry, a widened assertion, or a disabled check."
    :on-fail "retry"}
 
   {:from "validate-contract" :to "implement"
    :criteria "The staging response does not match the committed OpenAPI schema."}
   {:from "validate-contract" :to "open-pr"
-   :check "bash ~/.config/loop/skills/contract-check/check.sh /accounts/42"}
+   :check "bash .loop/skills/contract-check/check.sh /accounts/42"}
 
   {:from "open-pr" :to "done"
    :criteria "A pull request exists for this branch with a populated description."}]

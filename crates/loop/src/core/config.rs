@@ -126,12 +126,12 @@ pub struct Config {
     pub navigator: ModelSpec,
     pub navigator_max_invocations: u32,
 
-    /// Skills loaded into every stage, before the machine's and the state's.
-    pub default_skills: Vec<String>,
-    /// MCP servers connected in every stage, before the machine's and the
-    /// state's. Names out of the user's own `mcp.json` — loop never reads or
-    /// writes that file.
-    pub default_mcp: Vec<String>,
+    // No `default_skills` / `default_mcp` here. They were the config file's
+    // spelling of a baseline tier the machine already had as `:defaults`, and
+    // with one authored file there is one baseline: `Machine::resolve_skills`
+    // unions the machine defaults with the state's, and that is the whole
+    // chain. Keeping empty fields around invited a third tier that nothing
+    // merged.
     /// Installed pi-extension package names activated per spawn
     /// (`mcp`, `review-model-selector`).
     pub pi_extensions: Vec<String>,
@@ -168,8 +168,6 @@ impl Config {
                 thinking: crate::core::machine::Thinking::Low,
             },
             navigator_max_invocations: 5,
-            default_skills: Vec::new(),
-            default_mcp: Vec::new(),
             pi_extensions: vec!["mcp".into(), "review-model-selector".into()],
             budgets: Budgets {
                 usd: Some(15.0),

@@ -2,7 +2,7 @@
 
 This document explains what actually happens when you type `loop run`, and how to take a run apart afterwards to find out why it did what it did.
 
-For the config and machine keys mentioned here, see [customizing](03-customizing.md). For flags, env vars, and exit codes, see the [CLI reference](04-cli-reference.md). For why the system is shaped this way, see the [design notes](05-design-notes.md).
+For the machine keys mentioned here, see [customizing](03-customizing.md). For flags, env vars, and exit codes, see the [CLI reference](04-cli-reference.md). For why the system is shaped this way, see the [design notes](05-design-notes.md).
 
 ## The shape of a run
 
@@ -16,7 +16,7 @@ Every decision, spawn, verdict, and commit is appended to a JSONL ledger. There 
 
 ```mermaid
 flowchart TD
-    A["enter state<br/>(render prompt, spawn Worker)"] --> B["Worker calls transition"]
+    A["enter state<br/>(render prompt, spawn Worker)"] --> B["Worker writes its handoff file"]
     B --> C{"valid proposal?<br/>not blocked, to is a declared neighbor"}
     C -->|yes| D{"target is the<br/>escalation state?"}
     C -->|"blocked / to is null /<br/>unknown target"| N["Navigator picks a target"]
@@ -83,7 +83,7 @@ They differ in what they are allowed to do.
 
 The Worker is the stage. It does the actual work: reads files, edits code, runs tests, whatever the playbook tells it to. It is the only role with real capability, and the only one that can see your repository.
 
-Its model comes from the resolution chain documented in [customizing](03-customizing.md#machinefnl--the-ticket-machine); the last resort is `config.fnl`'s `:worker`, defaulting to `claude-sonnet-5` at `medium` thinking.
+Its model comes from the resolution chain documented in [customizing](03-customizing.md#model-resolution); the last resort is the machine's `:worker`, over a built-in floor of `claude-sonnet-5` at `medium` thinking.
 
 ```
 --print --mode json
@@ -180,7 +180,7 @@ The harness appends an **Ending this stage** section to every rendered Worker pr
 
 \* A handoff with neither `to` nor `blocked: true` parses, and is routed exactly as a proposal naming an unknown target is: to the Navigator.
 
-The file lives at `<state_dir>/render/<ticket>/<state>-<cycle>-<attempt>-handoff.json` — one per attempt, and **deleted before the spawn starts**. Both together are what stop a previous attempt's decision from being read as this one's. Writing it more than once is harmless; the last write is what the harness reads.
+The file lives at `<project>/.loop/run/<state>-<cycle>-<attempt>-handoff.json` — one per attempt, and **deleted before the spawn starts**. Both together are what stop a previous attempt's decision from being read as this one's. Writing it more than once is harmless; the last write is what the harness reads.
 
 A readable handoff causes: the artifacts to be captured, `worker_output` and `transition_proposed` to be appended, and the routing pass to begin. `to` is checked against the current state's declared neighbors — naming something else does not create an edge, it routes to the Navigator.
 
@@ -302,7 +302,7 @@ The Navigator's cap (`:max-invocations`, default 5) applies **both run-wide and 
 
 ## Budgets
 
-Three limits, from `config.fnl`'s `:budgets` and optionally tightened by the machine's `:budgets` (per-field minimum — a machine can never raise a limit) and further by `--max-transitions` on the command line (also tightening only).
+Three limits, from loop's built-in floor, optionally tightened by the machine's `:budgets` (per-field minimum — a machine can never raise a limit) and further by `--max-transitions` on the command line (also tightening only).
 
 | Limit | Default | Comparison |
 | --- | --- | --- |
@@ -319,9 +319,7 @@ Budgets are sampled at exactly two points: the top of stage entry — before any
 
 ## The ledger
 
-`<project>/.loop/ledger.jsonl`. Newline-delimited JSON, one event per line, append-only. This is the entire durable state of a run.
-
-Note that `LOOP_STATE_DIR` does **not** move it. The ledger always lives beside the machine in the project's `.loop/`.
+`<project>/.loop/ledger.jsonl`. Newline-delimited JSON, one event per line, append-only. This is the entire durable state of a run, and it lives beside the machine that produced it — there is no global state directory it could be anywhere else.
 
 **The envelope is minimal:** every line is `ts` — RFC-3339 UTC with millisecond precision and a `Z` suffix — plus `type`, with all payload fields **flattened onto the same object**. There is no `seq`, no run id, no schema version. Ordering is file order.
 
@@ -494,7 +492,7 @@ loop session --latest                  # newest Worker attempt
 
 `sessions` finds the transcript; `session` opens it. `status` and the ledger tell you what was decided; this pair is how you read what was actually said.
 
-They read nothing but the ledger. Every candidate is a `state_entered` with a non-empty `session_id`; `session` then runs `pi --session <id>` in the project directory and hands over stdin, stdout, and stderr untouched. No machine, no toolbox, and no staged prompts are required — a mid-edit `machine.fnl` is often exactly when you want this.
+They read nothing but the ledger. Every candidate is a `state_entered` with a non-empty `session_id`; `session` then runs `pi --session <id>` in the project directory and hands over stdin, stdout, and stderr untouched. Neither a loadable machine nor a resolvable playbook is required — a mid-edit `machine.fnl` is often exactly when you want this.
 
 **The listing is a pipeline, not a menu.** One line per attempt, in ledger order, padded into columns:
 
@@ -540,9 +538,9 @@ Nothing here is written: loop neither parses nor mutates pi's session files, and
 loop diagram
 ```
 
-Renders the machine as a mermaid state diagram on stdout, with no fences and no prose, so `loop diagram > machine.mmd` gives you a bare `.mmd` file. It is a pure function of the machine — no filesystem, no toolbox — so a machine with a dangling playbook reference still draws. Output is deterministic.
+Renders the machine as a mermaid state diagram on stdout, with no fences and no prose, so `loop diagram > machine.mmd` gives you a bare `.mmd` file. It is a pure function of the machine — nothing on disk is consulted beyond the machine file itself — so a machine with a dangling playbook reference still draws. Output is deterministic.
 
-This is the fastest way to check that the machine you _wrote_ is the machine you _meant_. From the shipped `standard-ticket` template:
+This is the fastest way to check that the machine you _wrote_ is the machine you _meant_. From the bundled `standard-ticket` machine:
 
 ```
 ---
@@ -645,13 +643,13 @@ Two sharp edges:
 
 ### The rendered prompt
 
-The `--append-system-prompt` file the Worker actually received is kept on disk:
+The `--append-system-prompt` file the Worker actually received is kept on disk, beside the handoff file for the same attempt:
 
 ```
-~/.local/state/loop/render/<sanitized-ticket>/<state>-<cycle>-<attempt>-system.md
+<project>/.loop/run/<state>-<cycle>-<attempt>-system.md
 ```
 
-(`sanitize` maps any character outside `[A-Za-z0-9_-]` to `-`. The root moves with `LOOP_STATE_DIR`.)
+(`sanitize` maps any character outside `[A-Za-z0-9_-]` to `-`. `run/` is derived and gitignored, so deleting it costs nothing but the ability to read back an old attempt's prompt.)
 
 **This is the way to see what the agent was actually told.** Not the playbook source — the rendered result, with every `$VAR` already substituted. When a stage behaves as though it doesn't know the plan, open the render for that attempt and check whether `$PLAN` is in there at all.
 

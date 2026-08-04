@@ -30,25 +30,23 @@ Then check the environment:
 loop doctor
 ```
 
-`doctor` runs exactly three checks and says nothing about your machine's contents:
+`doctor` runs exactly two checks and says nothing about your machine's contents:
 
 ```
   ok    `pi` on PATH
-  ok    ~/.config/loop/config.fnl
-  ok    .loop/machine.fnl
+  ok    /home/you/src/yourrepo/.loop/machine.fnl
 
 all good
 ```
 
-On a fresh install you will see failures for everything after the first check, because you have not scaffolded anything yet:
+On a fresh install the second one fails, because you have not scaffolded anything yet:
 
 ```
   ok    `pi` on PATH
-  FAIL  ~/.config/loop/config.fnl — run `loop init <TICKET>` to scaffold the toolbox
-  FAIL  .loop/machine.fnl — run `loop init <TICKET>` in this project
+  FAIL  /home/you/src/yourrepo/.loop/machine.fnl — run `loop init <TICKET>` in this project
 ```
 
-and `doctor` exits non-zero with `error: 2 problem(s)`. That is expected. Fix the first line if it failed — install `pi`, or set `LOOP_PI_BIN` — and let `loop init` fix the rest.
+and `doctor` exits non-zero with `error: 1 problem(s)`. That is expected. Fix the first line if it failed — install `pi`, or set `LOOP_PI_BIN` — and let `loop init` fix the second.
 
 ## Scaffold a ticket
 
@@ -58,23 +56,23 @@ Change into the repository you want the ticket worked on, and name the ticket:
 loop init PROJ-1487
 ```
 
-`init` writes two trees.
-
-The first is your **toolbox** at `~/.config/loop/`. It is global, written once, and shared by every ticket on the machine. `init` only creates files that are absent, so it is safe to re-run and it will never clobber your edits:
+`init` writes one tree, `./.loop/`, and everything `loop` reads or writes for this ticket lives inside it. There is no second directory in your home and no global state anywhere:
 
 ```
-  created /home/you/.config/loop/config.fnl
-  created /home/you/.config/loop/machines/standard-ticket.fnl
-  created /home/you/.config/loop/playbooks/implement.md
-  created /home/you/.config/loop/playbooks/review.md
-  created /home/you/.config/loop/playbooks/qa.md
-  created /home/you/.config/loop/playbooks/open-pr.md
-  created /home/you/.config/loop/playbooks/debug-transient.md
+  created /home/you/src/yourrepo/.loop/machine.fnl
+  created /home/you/src/yourrepo/.loop/playbooks/implement.md
+  created /home/you/src/yourrepo/.loop/playbooks/review.md
+  created /home/you/src/yourrepo/.loop/playbooks/qa.md
+  created /home/you/src/yourrepo/.loop/playbooks/open-pr.md
+  created /home/you/src/yourrepo/.loop/playbooks/debug-transient.md
+  created /home/you/src/yourrepo/.loop/task.md
+  created /home/you/src/yourrepo/.loop/plan.md
+  created /home/you/src/yourrepo/.loop/.gitignore
 ```
 
-It also creates an empty `~/.config/loop/skills/`. Everything in this tree is yours to edit — `loop` writes a file only when it is absent, and never rewrites one you have changed.
+`machine.fnl` is the bundled `standard-ticket` machine with `$TICKET` replaced by `PROJ-1487`; `task.md` and `plan.md` are stubs. It also creates an empty `skills/`. Everything here is yours to edit — `loop` writes a file only when it is absent, and never rewrites one you have changed.
 
-The second tree is **this ticket**, at `./.loop/`: `machine.fnl` copied from the `standard-ticket` template with `$TICKET` replaced by `PROJ-1487`, a `task.md` and `plan.md` stub, and an empty `playbooks/` directory for prompts that are specific to this ticket.
+The `.gitignore` holds one line, `run/`. That directory is where rendered prompts and handoff files land during a run; it is regenerated every stage, so it is the one part of `.loop/` not worth committing. The rest — the machine, the prose, the playbooks, and later the ledger and the artifacts — is the record of how this ticket was driven, and belongs in the branch with the code.
 
 The closing output is your checklist for the rest of this page:
 
@@ -86,7 +84,7 @@ initialized /home/you/src/yourrepo/.loop for PROJ-1487
   4. loop run
 ```
 
-Pick a different starting shape with `--template <name>`, which names a file in `~/.config/loop/machines/`. Out of the box there is only `standard-ticket`.
+Start from something other than the bundled machine with `--from <DIR>`, which copies any `.loop/`-shaped directory you keep around — see [reuse across tickets](03-customizing.md#reuse-across-tickets).
 
 ## Write the task and plan
 
@@ -146,15 +144,15 @@ stateDiagram-v2
     end note
 ```
 
-Every edge label tells you how that edge is gated: `check`, `judge`, both, or `unguarded`. Redraw after each edit — `diagram` never touches the toolbox, so a machine with a playbook that does not resolve yet still draws.
+Every edge label tells you how that edge is gated: `check`, `judge`, both, or `unguarded`. Redraw after each edit — `diagram` reads nothing off disk but the machine file, so a machine with a playbook that does not resolve yet still draws.
 
-The diagram shows the shape. To see what the stages inside it actually resolve to — which playbook file wins, which model each one ends up on after the four config layers are merged, what the edge guards really are — preview it:
+The diagram shows the shape. To see what the stages inside it actually resolve to — which playbook file each one gets, which model it ends up on after the four layers are merged, what the edge guards really are — preview it:
 
 ```
 loop preview
 ```
 
-Every number in that report is computed by the code the run itself uses, so it is what you will get rather than what the file appears to say. It is where a `:thinking "high"` you forgot to delete, a playbook resolving to the toolbox copy instead of your local one, or a `:check` still commented out becomes visible.
+Every number in that report is computed by the code the run itself uses, so it is what you will get rather than what the file appears to say. It is where a `:thinking "high"` you forgot to delete, a playbook name that resolves to nothing, or a `:check` still commented out becomes visible.
 
 Then look at one stage in full:
 
@@ -168,7 +166,7 @@ Read that render for shape, not for text. It is built with cycle 1, attempt 1, n
 
 Both forms are read-only. Preview spawns nothing, runs no `:check`, connects to no MCP server, and writes no ledger, artifact, or rendered prompt file — you can run it as often as you edit.
 
-The whole vocabulary — every key, how playbooks and skills resolve, how models are chosen per stage — is in [the machine reference](03-customizing.md#machinefnl--the-ticket-machine). Do not try to learn it before your first run. Change the ticket's task, plan, and test command; leave the rest.
+The whole vocabulary — every key, how playbooks and skills resolve, how models are chosen per stage — is in [the machine reference](03-customizing.md#machinefnl--the-ticket-machine). Every setting a run uses lives in that one file; there is no second config file anywhere. Do not try to learn it before your first run. Change the ticket's task, plan, and test command; leave the rest.
 
 ## Validate before you run
 
@@ -319,6 +317,6 @@ Underneath all of them is `.loop/ledger.jsonl` — one JSON object per line, app
 ## Where to go next
 
 - [How a run works](02-how-it-works.md) — the three agent roles, the guard tiers, the ledger event schema, and how to read a run after the fact. Read this next if anything above felt like a black box.
-- [Customizing](03-customizing.md) — every machine and config key, writing your own playbooks and skills, wiring MCP servers, and the full template-variable list. Read this when the default spine stops fitting the ticket.
-- [CLI reference](04-cli-reference.md) — every command, flag, environment variable, and exit code, including `LOOP_PI_BIN` and the directory overrides.
+- [Customizing](03-customizing.md) — every machine key, writing your own playbooks and skills, wiring MCP servers, and the full template-variable list. Read this when the default spine stops fitting the ticket.
+- [CLI reference](04-cli-reference.md) — every command, flag, environment variable, and exit code, including `LOOP_PI_BIN`.
 - [Design notes](05-design-notes.md) — why the harness owns control flow instead of the agent, and the known gaps you should be aware of before trusting a run unattended.

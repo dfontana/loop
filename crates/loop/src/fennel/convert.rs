@@ -116,16 +116,18 @@ use crate::fennel::wire;
 /// `states.qa-staging.thinking: unknown variant …, expected one of …` — which
 /// is strictly more than the hand-written walker's `ctx` strings managed, and
 /// it is generated rather than maintained.
-fn from_table<T: serde::de::DeserializeOwned>(table: &mlua::Table, what: &str) -> Result<T> {
+fn from_table<T: serde::de::DeserializeOwned>(table: &mlua::Table) -> Result<T> {
     let de = mlua::serde::Deserializer::new(mlua::Value::Table(table.clone()));
     serde_path_to_error::deserialize(de).map_err(|e| {
         let path = e.path().to_string();
         // A failure at the document root has the path ".", which reads as
         // noise next to the message; anywhere else the path is the useful half.
+        // No "machine:" prefix here — `CoreError::machine` adds one, and this
+        // used to add a second, so every load error read `machine: machine:`.
         if path == "." {
-            CoreError::machine(format!("{what}: {}", e.inner()))
+            CoreError::machine(e.inner().to_string())
         } else {
-            CoreError::machine(format!("{what}: at `{path}`: {}", e.inner()))
+            CoreError::machine(format!("at `{path}`: {}", e.inner()))
         }
     })
 }
@@ -306,7 +308,7 @@ pub fn machine_from_table(
     reject_transition_mode(table, "machine")?;
     reject_removed_config_key(table)?;
     reject_when(table)?;
-    let m: wire::Machine = from_table(table, "machine")?;
+    let m: wire::Machine = from_table(table)?;
 
     let task = resolve_prose(m.task, "task", machine_dir)?;
     let plan = resolve_prose(m.plan, "plan", machine_dir)?;

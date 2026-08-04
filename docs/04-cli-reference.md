@@ -4,7 +4,7 @@
 
 Twelve subcommands: [`init`](#loop-init), [`validate`](#loop-validate), [`preview`](#loop-preview), [`diagram`](#loop-diagram), [`run`](#loop-run), [`resume`](#loop-resume), [`status`](#loop-status), [`recap`](#loop-recap), [`logs`](#loop-logs), [`sessions`](#loop-sessions), [`session`](#loop-session), [`doctor`](#loop-doctor).
 
-For what the runtime actually does with the machine, see [02-how-it-works.md](02-how-it-works.md). For the keys inside `config.fnl` and `machine.fnl`, see [03-customizing.md](03-customizing.md).
+For what the runtime actually does with the machine, see [02-how-it-works.md](02-how-it-works.md). For the keys inside `machine.fnl`, see [03-customizing.md](03-customizing.md).
 
 ## Global flags
 
@@ -19,51 +19,55 @@ For what the runtime actually does with the machine, see [02-how-it-works.md](02
 ## `loop init`
 
 ```
-loop init <TICKET> [--template <TEMPLATE>]
+loop init <TICKET> [--from <DIR>]
 ```
 
-> Scaffold ./.loop/ from a machine template, and ~/.config/loop/ on first use.
+> Scaffold ./.loop/ — the machine, its prose, and its playbooks.
 
 | Flag / arg | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `<TICKET>` | string, required | — | "Ticket id, e.g. PROJ-1487." |
-| `--template <TEMPLATE>` | string | `standard-ticket` | "Machine template from ~/.config/loop/machines/." |
+| `--from <DIR>` | path | — | "Copy an existing `.loop/`-shaped directory instead of the built-in template." |
 
-Runs two scaffold phases: the global toolbox (idempotent, safe to re-run), then the project's `.loop/`. Every file is written with a _write-if-absent_ rule — **nothing existing is ever overwritten**, with one exception noted below.
-
-**Phase 1 — toolbox** (`<config_dir>/`), skipped file by file if already present:
-
-| Path                           | Note                 |
-| ------------------------------ | -------------------- |
-| `config.fnl`                   | global defaults      |
-| `machines/standard-ticket.fnl` | the default template |
-| `playbooks/implement.md`       |                      |
-| `playbooks/review.md`          |                      |
-| `playbooks/qa.md`              |                      |
-| `playbooks/open-pr.md`         |                      |
-| `playbooks/debug-transient.md` |                      |
-| `skills/`                      | created empty        |
-
-Each file actually created prints `  created <path>`. There is no exception: every one of these is write-if-absent, and nothing in the toolbox is ever rewritten under you.
-
-**Phase 2 — project** (`<project>/.loop/`). Bails first if the machine already exists:
+One scaffold phase, into `<project>/.loop/`. Every file is written with a _write-if-absent_ rule — **nothing existing is ever overwritten**. Bails first if the machine already exists:
 
 ```
 <project>/.loop/machine.fnl already exists — delete .loop/ to start a new ticket
 ```
 
-Otherwise reads `<config_dir>/machines/<template>.fnl` (missing → `no machine template at <path>`) and writes:
+**Without `--from`**, the bundled templates are written out of the binary — no fetch, no network, nothing read from outside the project:
 
-| Path          | From                      |
-| ------------- | ------------------------- |
-| `machine.fnl` | the template              |
-| `task.md`     | the bundled task template |
-| `plan.md`     | the bundled plan template |
-| `playbooks/`  | created empty             |
+| Path                                    | From                              |
+| --------------------------------------- | --------------------------------- |
+| `machine.fnl`                            | the bundled `standard-ticket`     |
+| `playbooks/implement.md`                 | bundled                           |
+| `playbooks/review.md`                    | bundled                           |
+| `playbooks/qa.md`                        | bundled                           |
+| `playbooks/open-pr.md`                   | bundled                           |
+| `playbooks/debug-transient.md`           | bundled                           |
 
-All three files get a plain `str::replace("$TICKET", <ticket>)` — a literal text substitution, **not** the `$VAR` render engine used at runtime. No other placeholder is expanded at init time.
+**With `--from <DIR>`**, the whole tree under `<DIR>` is copied in instead, recursively, never overwriting. A leading `~/` is expanded. Two failures are specific to this path:
 
-`init` does **not** create `skills/`, `artifacts/`, or `ledger.jsonl`.
+```
+--from <DIR> is not a directory
+<DIR> has no machine.fnl — --from wants a directory shaped like .loop/
+```
+
+Either way, `init` then writes:
+
+| Path          | Note                                     |
+| ------------- | ---------------------------------------- |
+| `task.md`     | the bundled task template, if absent     |
+| `plan.md`     | the bundled plan template, if absent     |
+| `playbooks/`  | created empty if `--from` supplied none  |
+| `skills/`     | created empty                            |
+| `.gitignore`  | one line, `run/`, if absent              |
+
+Each file actually created prints `  created <path>`.
+
+`machine.fnl`, `task.md`, and `plan.md` get a plain `str::replace("$TICKET", <ticket>)` — a literal text substitution, **not** the `$VAR` render engine used at runtime. No other placeholder is expanded at init time. Under `--from`, only `machine.fnl` is rewritten this way, since a `task.md` copied from the source is left exactly as it was.
+
+`init` does **not** create `artifacts/`, `ledger.jsonl`, or `run/` — those appear when something needs them.
 
 Closing output:
 
@@ -86,7 +90,7 @@ loop validate
 
 No flags.
 
-Loads `config.fnl` and `machine.fnl`, resolves every playbook and skill against the toolbox, and prints one line per diagnostic in the form:
+Loads `machine.fnl`, resolves every playbook and skill inside `.loop/`, and prints one line per diagnostic in the form:
 
 ```
 {tag}  {where}: {message}
@@ -103,8 +107,8 @@ Loads `config.fnl` and `machine.fnl`, resolves every playbook and skill against 
 | error | `{from} -> {to}` | transition `to` `{t}` names no state or terminal |
 | error | state id | state `{id}` is unreachable from entry `{e}` |
 | error | state id | state `{id}` has no path to any terminal |
-| error | state id | playbook for state `{id}` does not resolve in the toolbox |
-| error | state id | skill `{n}` on state `{id}` does not resolve in the toolbox |
+| error | state id | playbook for state `{id}` does not resolve in .loop/playbooks/ |
+| error | state id | skill `{n}` on state `{id}` does not resolve in .loop/skills/ — with ``(from `:defaults {:skills ..}`)`` after the state id when the name came from there rather than from the state |
 | error | state id | state `{id}` names MCP servers, but `mcp` is not in `:pi-extensions` — the stage would be told to call a tool it does not have |
 | error | loop name | loop `{n}` declares no states |
 | error | loop name | loop `{n}` references unknown state `{s}` |
@@ -130,7 +134,7 @@ Clean run (zero diagnostics of any severity):
 
 - **Terminal-reachability ignores `on_fail: route` edges.** The reverse BFS covers declared `:transitions` only, so a state whose only way forward is a guard-failure route is reported as having no path to a terminal.
 
-Skills and MCP servers are checked as the **effective union** — `config.fnl`'s `:default-skills` / `:default-mcp`, the machine's `:defaults`, and the state's own — because that union is what a spawn loads. A diagnostic for a name that came from the global config says so.
+Skills and MCP servers are checked as the **effective union** — the machine's `:defaults` plus the state's own — because that union is what a spawn loads. A diagnostic for a name that came from `:defaults` says so.
 
 ## `loop preview`
 
@@ -144,7 +148,7 @@ loop preview [<STATE>]
 | --- | --- | --- | --- |
 | `<STATE>` | string, optional | — | "Detail one state instead of summarizing the whole machine." |
 
-Answers "what will this loop do?" using the run's own resolvers. Every value in the report comes from the same code path `loop run` uses to build a stage — the four-layer model merge, local-first playbook and skill resolution, the effective skill/MCP unions, `$VAR` substitution — stopped short of every write that stage building does.
+Answers "what will this loop do?" using the run's own resolvers. Every value in the report comes from the same code path `loop run` uses to build a stage — the four-layer model merge, playbook and skill resolution, the effective skill/MCP unions, `$VAR` substitution — stopped short of every write that stage building does.
 
 ### Read-only guarantees
 
@@ -153,9 +157,9 @@ Preview performs **no** side effect. Specifically it does not:
 - spawn `pi`, or any Worker, Judge, or Navigator;
 - run a `:check` command, connect to an MCP server, or test a credential;
 - create `.loop/ledger.jsonl` or `.loop/artifacts/`;
-- write anything under `LOOP_STATE_DIR` — the representative render is built in memory, and the rendered-prompt path it reports is where a run _would_ write.
+- write anything under `.loop/run/` — the representative render is built in memory, and the rendered-prompt path it reports is where a run _would_ write.
 
-It reads `config.fnl`, `machine.fnl`, the task/plan prose, and whatever playbooks and skills resolve. Output is deterministic: the same inputs produce byte-identical output, since every collection is printed in the machine's own order (states alphabetically by id from the IR's `BTreeMap`, transitions and loops in declaration order).
+It reads `machine.fnl`, the task/plan prose, and whatever playbooks and skills resolve. Output is deterministic: the same inputs produce byte-identical output, since every collection is printed in the machine's own order (states alphabetically by id from the IR's `BTreeMap`, transitions and loops in declaration order).
 
 ### Whole-machine form
 
@@ -222,7 +226,7 @@ Writes mermaid to stdout with no code fences and no surrounding prose, so it pip
 loop diagram > machine.mmd
 ```
 
-Output is deterministic and a pure function of the machine IR — it touches no toolbox files, so a machine with a dangling `:playbook` or an unresolvable skill still draws. It still requires the machine to load: a missing or unparseable `machine.fnl` is an error.
+Output is deterministic and a pure function of the machine IR — it reads nothing off disk but the machine file, so a machine with a dangling `:playbook` or an unresolvable skill still draws. It still requires the machine to load: a missing or unparseable `machine.fnl` is an error.
 
 For the node/edge/label grammar (aliasing, edge labels, guard-fail back-edges, loop notes), see [02-how-it-works.md](02-how-it-works.md).
 
@@ -462,7 +466,7 @@ loop logs --raw
 | `-n <N>` | usize | `20`    | Number of events in the human-readable tail. |
 | `--raw`  | bool  | false   | Emit the complete repaired ledger as JSONL.  |
 
-`logs` opens the ledger through the normal `Ledger` reader, so a torn trailing write is repaired before anything is printed. It does not load `machine.fnl` or `config.fnl`; the ledger is its only source, so it works while the machine is missing or invalid.
+`logs` opens the ledger through the normal `Ledger` reader, so a torn trailing write is repaired before anything is printed. It does not load `machine.fnl`; the ledger is its only source, so it works while the machine is missing or invalid.
 
 Human mode prints one event per line, oldest first within the selected tail, as `<timestamp>  <status summary>`. It has no `recent:` wrapper and defaults to the last 20 events. If fewer than `N` events exist, it prints all of them. An empty ledger prints:
 
@@ -484,7 +488,7 @@ loop sessions [<STATE>]
 
 Reads the ledger, builds one candidate per `state_entered` that carries a non-empty `session_id`, and prints one line per attempt on stdout in **ledger order, oldest first**. It launches nothing. Its job is to give you the id that [`loop session`](#loop-session) wants.
 
-Requires **neither the machine nor the toolbox**. Only the ledger and the project path are needed. Opening the ledger repairs a torn trailing line, exactly as [`loop status`](#loop-status) does, so an attempt interrupted mid-write is still listed.
+Requires **neither a loadable machine nor a resolvable playbook**. Only the ledger and the project path are needed. Opening the ledger repairs a torn trailing line, exactly as [`loop status`](#loop-status) does, so an attempt interrupted mid-write is still listed.
 
 Judge and Navigator spawns run with `--no-session` and never appear here.
 
@@ -554,7 +558,7 @@ loop session --latest [<STATE>]
 | `<ID>` | string | — | The session id to reopen, from [`loop sessions`](#loop-sessions). With `--latest` this is a state filter instead. |
 | `--latest` | bool | false | Reopen the newest recorded attempt rather than naming an id. |
 
-Resolves the attempt, prints one line naming it, and executes `pi --session <id>` in the project directory. Like `loop sessions` it needs neither the machine nor the toolbox, and repairs a torn trailing ledger line on open.
+Resolves the attempt, prints one line naming it, and executes `pi --session <id>` in the project directory. Like `loop sessions` it needs neither a loadable machine nor a resolvable playbook, and repairs a torn trailing ledger line on open.
 
 ### Selection
 
@@ -607,7 +611,7 @@ Then, with stdin/stdout/stderr inherited unchanged and the cwd set to the projec
 <pi_bin> --session <id>
 ```
 
-`--session`, not `--session-id`. This command exists to read history, so a session pi no longer has must fail loudly; `--session-id` would create an empty replacement under the same id, which is indistinguishable from a Worker that did nothing. `pi_bin` comes from `Config::defaults`, so `LOOP_PI_BIN` applies and `config.fnl` is not consulted.
+`--session`, not `--session-id`. This command exists to read history, so a session pi no longer has must fail loudly; `--session-id` would create an empty replacement under the same id, which is indistinguishable from a Worker that did nothing. `pi_bin` comes from `Config::defaults`, so `LOOP_PI_BIN` is the only thing that can change it.
 
 loop never reads, parses, writes, or deletes a pi session file, and never copies a transcript into `.loop/`. For the session format and pi's own navigation controls, see pi's upstream session documentation.
 
@@ -629,11 +633,11 @@ pi's exit status is the command's exit status: a non-zero pi is a non-zero `loop
 loop doctor
 ```
 
-> Check the environment: pi on PATH, toolbox staged, machine present.
+> Check the environment: pi on PATH, machine present.
 
 No flags.
 
-Three existence checks, no parsing. Output per check:
+Two existence checks, no parsing. Output per check:
 
 ```
   ok    {label}
@@ -643,46 +647,30 @@ Three existence checks, no parsing. Output per check:
 | # | Label | Hint on failure |
 | --- | --- | --- |
 | 1 | `` `{pi_bin}` on PATH `` | `install pi, or set LOOP_PI_BIN` |
-| 2 | `{config_dir}/config.fnl` | ``run `loop init <TICKET>` to scaffold the toolbox`` |
-| 3 | `{project}/.loop/machine.fnl` | ``run `loop init <TICKET>` in this project`` |
+| 2 | `{project}/.loop/machine.fnl` | ``run `loop init <TICKET>` in this project`` |
 
-Every label is the path actually tested, so under `LOOP_CONFIG_DIR` or `-C` you can read off where loop is looking.
+Every label is the path actually tested, so under `-C` you can read off where loop is looking.
 
 `{pi_bin}` is `LOOP_PI_BIN` or `pi`. A `pi_bin` containing `/` is tested as a path; otherwise each `PATH` entry is probed for a file of that name.
 
-All three pass → blank line, then `all good`, exit 0. Otherwise exit 1 with `error: {n} problem(s)` on stderr.
+Both pass → blank line, then `all good`, exit 0. Otherwise exit 1 with `error: {n} problem(s)` on stderr.
 
 ### What doctor does not check
 
-- It never loads or evaluates `config.fnl` — check 2 is a bare file-existence test. A file that exists but does not parse passes doctor and fails everything else; `loop validate` is what reads it.
-- It never parses `machine.fnl` — check 3 only asks whether the file exists. Use [`loop validate`](#loop-validate) for the graph.
-- It never resolves playbooks or skills.
+- It never parses `machine.fnl` — check 2 only asks whether the file exists. Use [`loop validate`](#loop-validate) for the graph.
+- It never resolves playbooks or skills, and there is no second directory for it to look in.
 
 ## Environment variables
 
-| Variable | Used for | Default / fallback chain |
+| Variable | Used for | Default / fallback |
 | --- | --- | --- |
-| `LOOP_CONFIG_DIR` | toolbox root (`config.fnl`, `playbooks/`, `skills/`, `machines/`) | `$XDG_CONFIG_HOME/loop` → `$HOME/.config/loop` → relative `.config/loop` |
-| `LOOP_STATE_DIR` | generated state root (`render/`) | `$XDG_STATE_HOME/loop` → `$HOME/.local/state/loop` → relative `.local/state/loop` |
 | `LOOP_PI_BIN` | the pi executable to spawn, for stages and for [`loop session`](#loop-session) | `pi` |
-| `HOME` | fallback base for both roots | must be non-empty to count |
-| `XDG_CONFIG_HOME` | config-root fallback | **ignored unless absolute** |
-| `XDG_STATE_HOME` | state-root fallback | **ignored unless absolute** |
+| `HOME` | expanding a leading `~/` in [`loop init --from`](#loop-init) | must be non-empty to count; otherwise the `~/` is left literal |
 | `PATH` | resolving `pi_bin` in `loop doctor` and at spawn time | — |
 
-Precedence for each root, first match wins:
+That is the whole list. There is no `LOOP_CONFIG_DIR`, no `LOOP_STATE_DIR`, and no XDG lookup, because there is no root to point them at: everything loop reads or writes is under `<project>/.loop/`, and the project root comes from `--dir`/`-C`, else the cwd.
 
-1. `LOOP_CONFIG_DIR` / `LOOP_STATE_DIR`, taken verbatim (no expansion, no absoluteness requirement).
-2. `$XDG_CONFIG_HOME/loop` / `$XDG_STATE_HOME/loop`, **only if the XDG value is an absolute path**; a relative value is ignored entirely.
-3. `$HOME/.config/loop` / `$HOME/.local/state/loop`, only if `$HOME` is set and non-empty.
-4. The relative paths `.config/loop` / `.local/state/loop`, resolved against the process cwd.
-
-The project root is not environment-driven: it is `--dir`/`-C`, else the cwd.
-
-Two things to know:
-
-- **`LOOP_PI_BIN` cannot be set from `config.fnl`.** Config loading passes the binary through untouched, so the environment variable is the only lever.
-- **`LOOP_STATE_DIR` does not move the ledger.** The ledger is always `<project>/.loop/ledger.jsonl`. `LOOP_STATE_DIR` only relocates the rendered system prompts under `render/`.
+**`LOOP_PI_BIN` is the only lever on the binary.** No machine key sets it — a machine describes a ticket, not the harness running it.
 
 ## Exit codes
 
@@ -698,7 +686,7 @@ Per command:
 
 | Command | Exit 0 | Exit 1 |
 | --- | --- | --- |
-| `init` | scaffold written | `.loop/machine.fnl` already exists; template missing; any write fails |
+| `init` | scaffold written | `.loop/machine.fnl` already exists; `--from` names a non-directory or one with no `machine.fnl`; any write fails |
 | `validate` | no diagnostics, **or warnings only** | one or more errors (`{n} error(s)`); machine missing or fails to load |
 | `preview` | report printed with no errors, **or warnings only** | one or more validation errors; unknown `<STATE>`; machine missing or fails to load |
 | `diagram` | mermaid printed | machine missing or fails to load |
@@ -709,6 +697,6 @@ Per command:
 | `logs` | human tail, or complete JSONL with `--raw` | ledger unreadable or has a corrupt interior line |
 | `sessions` | one line per listed attempt | no usable candidate |
 | `session` | pi exited 0 | no id and no `--latest`; unknown id; `--latest` with no usable candidate; pi could not be spawned; pi exited non-zero |
-| `doctor` | all three checks pass | `{n} problem(s)` |
+| `doctor` | both checks pass | `{n} problem(s)` |
 
 `loop run` and `loop resume` exit 1 on `Failed` and `Aborted` deliberately, so `loop run && gh pr merge` and CI wrappers gate correctly. To distinguish the two, read `status` from [`loop status --json`](#loop-status).
