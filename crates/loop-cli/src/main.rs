@@ -11,8 +11,7 @@ mod commands;
 mod episode;
 mod output;
 mod report;
-mod session_picker;
-mod session_ui;
+mod sessions;
 mod stage;
 
 #[derive(Parser)]
@@ -84,11 +83,18 @@ enum Command {
         #[arg(long, short = 'v')]
         verbose: bool,
     },
-    /// Reopen a Worker's pi session: pick an attempt, then hand the terminal to pi.
-    Session {
-        /// Only offer attempts at exactly this state, e.g. `implement`.
+    /// List every recorded Worker attempt: time, state, cycle, attempt, outcome, session id, evidence.
+    Sessions {
+        /// Only list attempts at exactly this state, e.g. `implement`.
         state: Option<String>,
-        /// Skip the picker and take the newest usable attempt.
+    },
+    /// Reopen a Worker's pi session by id — `loop sessions` prints the ids.
+    Session {
+        /// The session id to reopen, from `loop sessions`. With `--latest` this
+        /// is a state filter instead, e.g. `implement`.
+        #[arg(value_name = "ID")]
+        id: Option<String>,
+        /// Reopen the newest recorded attempt rather than naming an id.
         #[arg(long)]
         latest: bool,
     },
@@ -127,7 +133,8 @@ fn try_main() -> anyhow::Result<()> {
         Command::Status { json } => commands::status(paths, json),
         Command::Logs { n, raw } => commands::logs(paths, n, raw),
         Command::Recap => commands::recap(paths),
-        Command::Session { state, latest } => commands::session(paths, state, latest),
+        Command::Sessions { state } => commands::sessions(paths, state),
+        Command::Session { id, latest } => commands::session(paths, id, latest),
         Command::Doctor => commands::doctor(paths),
     }
 }

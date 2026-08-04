@@ -28,7 +28,8 @@ While it runs, or after it stops:
 loop status          # where it is and how it got there
 loop recap           # every attempt, its evidence, and why the run ended
 loop logs            # recent ledger events
-loop session         # pick a stage and reopen what that worker actually did
+loop sessions        # list every worker attempt and the session id that reopens it
+loop session <ID>    # reopen one and read what that worker actually did
 loop resume          # continue an interrupted run
 ```
 
@@ -37,10 +38,13 @@ loop resume          # continue an interrupted run
 `status` folds the ledger into a summary; `session` is how you read the full transcript behind any line of it. loop keeps no transcript of its own — it records the session id pi filed each stage under, and hands it back:
 
 ```sh
-loop session                    # pick from every worker attempt
-loop session implement          # only attempts at that stage
-loop session implement --latest # newest one, no picker (scripts, CI)
+loop sessions                     # every worker attempt, oldest first, one line each
+loop sessions implement           # only attempts at that stage
+loop session PROJ-1-implement-1-2 # reopen that attempt's transcript
+loop session --latest implement   # newest one, no id needed (scripts, CI)
 ```
+
+The listing is columns, not a menu — field 6 is the session id in every row — so choosing is the shell's job: `loop sessions | fzf | awk '{print $6}' | xargs loop session`.
 
 Full walkthrough: [Getting started](docs/01-getting-started.md).
 

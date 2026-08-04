@@ -358,7 +358,7 @@ The **transcript** is pi's. Every Worker spawn gets `--session-id <ticket>-<stat
 
 Judge and Navigator spawns are sessionless on purpose (`--no-session`) — an independent verdict that leaves a resumable session behind is one more thing to accidentally continue — so they have no `session_id` and cannot be reopened.
 
-`loop session` is how you cross from one to the other.
+`loop sessions` and `loop session` are how you cross from one to the other.
 
 Every line also carries `elapsed_s`: the run's accumulated wallclock at the moment it was written, summed across every process that has driven this ledger. That is what lets `loop resume` keep counting instead of handing the run a fresh time budget — `ts` alone cannot, since the gap between an interrupted run and its resume is time during which nothing was running.
 
@@ -482,41 +482,43 @@ loop logs --raw | jq '…'
 
 Raw mode emits the entire repaired ledger as JSONL, byte-for-byte, with no heading or status text. It is the path-independent replacement for reading `.loop/ledger.jsonl` directly; an empty ledger emits zero bytes. `--raw` and an explicit `-n` cannot be combined.
 
-### `loop session`
+### `loop sessions` and `loop session`
 
 ```
-loop session                          # picker over every Worker attempt
-loop session implement                # picker, filtered to that exact state
-loop session implement --latest       # newest implement attempt, no picker
-loop session --latest                 # newest Worker attempt, no picker
+loop sessions                          # every Worker attempt, oldest first
+loop sessions implement                # only attempts at that exact state
+loop session PROJ-1-implement-1-2      # reopen that attempt
+loop session --latest implement        # newest implement attempt, no id needed
+loop session --latest                  # newest Worker attempt
 ```
 
-Reopens a Worker's pi session. `status` and the ledger tell you what was decided; this is how you read what was actually said.
+`sessions` finds the transcript; `session` opens it. `status` and the ledger tell you what was decided; this pair is how you read what was actually said.
 
-It reads nothing but the ledger. Every candidate is a `state_entered` with a non-empty `session_id`; the command then runs `pi --session <id>` in the project directory and hands over stdin, stdout, and stderr untouched. No machine, no toolbox, and no staged prompts are required — a mid-edit `machine.fnl` is often exactly when you want this.
+They read nothing but the ledger. Every candidate is a `state_entered` with a non-empty `session_id`; `session` then runs `pi --session <id>` in the project directory and hands over stdin, stdout, and stderr untouched. No machine, no toolbox, and no staged prompts are required — a mid-edit `machine.fnl` is often exactly when you want this.
 
-**The picker is the normal path.** The ids are `<ticket>-<state>-<cycle>-<attempt>`: findable by a program, not memorable by a person. So you pick a row instead, newest-first:
+**The listing is a pipeline, not a menu.** One line per attempt, in ledger order, padded into columns:
 
 ```
-implement — cycle 2, attempt 1 — 2026-07-26 12:04 — finished
-  Added the retry guard and updated the tests. · claude-sonnet-5:high · $0.11 · 1 artifact
+2026-07-26T12:01  implement        1  1  crashed     PROJ-9-implement-1-1        error: executor lost
+2026-07-26T12:03  implement        1  2  finished    PROJ-9-implement-1-2        Added the retry guard and updated the tests.
+2026-07-26T12:05  review-the-diff  1  1  incomplete  PROJ-9-review-the-diff-1-1
 ```
 
-The first line is the identity — state, cycle, attempt, timestamp, outcome. When a machine happens to load, its state description is appended; the state id stays regardless, so rows never collapse into each other. The second line is the evidence: the Worker's own summary, or the recorded error, or a note that neither exists, then what ran the attempt and what it cost.
+Timestamp, state, cycle, attempt, outcome, session id, evidence. Every field but the last is a single whitespace-free token, so field 6 is the session id in every row no matter how wide the state names got, and the evidence — the Worker's own summary, else the recorded error — trails at the end because it is the only field that can contain spaces. There is no header line and nothing is written to stdout but rows.
 
-Controls: type to fuzzy-filter, `↑`/`↓` to move, `Ctrl+O` to change mode, `Enter` to open, `Esc`/`Ctrl+C` to cancel without launching anything. `Ctrl+O` cycles three candidate sets, named in the header:
+That is what makes the shell the picker, and it is also why there is no longer one built in:
 
-| Mode               | Shows                                     |
-| ------------------ | ----------------------------------------- |
-| `All attempts`     | every `state_entered` with a session id   |
-| `Latest per state` | the newest attempt for each exact state   |
-| `Incomplete`       | attempts with no matching `worker_output` |
+```sh
+loop sessions | fzf | awk '{print $6}' | xargs loop session
+loop sessions | awk '$5=="incomplete"'
+loop sessions implement | grep crashed
+```
 
-An optional positional state is an **exact prefilter** — `implement` never matches `implement-hotfix` — and it stays in force in all three modes. Search covers the visible row text and deliberately _not_ the session id: an opaque key should never be something a query has to name.
+An optional positional state is an **exact filter** — `implement` never matches `implement-hotfix`.
 
-Three things it will not do quietly:
+Three things `session` will not do quietly:
 
-- **Choose without a terminal.** Without `--latest`, both stdin and stdout must be TTYs. A piped invocation fails with a hint rather than picking for you.
+- **Guess which attempt you meant.** Without `--latest` it needs an id, and an id it does not hold is an error naming `loop sessions`. `loop session implement` — the invocation the old picker took — says that `implement` is a state and gives you the two commands that work.
 - **Hide a missing session.** It passes `--session`, not `--session-id`, so a session pi no longer holds is an error. `--session-id` would create an empty replacement under the same id, which looks identical to a Worker that did nothing.
 - **Pretend an attempt finished.** An attempt with no `worker_output` still opens — that is precisely the transcript you want after a crash — but it warns on stderr first, because the session may also still be running.
 
@@ -530,7 +532,7 @@ The three outcome labels are evidence, read off the attempt's ledger episode (it
 
 Nothing here is written: loop neither parses nor mutates pi's session files, and never copies a transcript into `.loop/`. For what the sessions themselves contain and how to navigate one once it is open, see pi's own session documentation.
 
-`--latest` selects the last usable candidate in reverse ledger order after the prefilter. There is no `--cycle` or `--attempt`: reaching further back is what the picker is for.
+`--latest` selects the last candidate in ledger order after the filter — one deterministic answer, for scripts and CI. There is no `--cycle` or `--attempt`: reaching a particular older attempt is what the listing's ids are for.
 
 ### `loop diagram`
 

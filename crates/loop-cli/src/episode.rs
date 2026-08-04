@@ -10,9 +10,9 @@
 //! episode is what keeps attempt 2's summary from being credited to attempt 1 —
 //! and it needs no change to the ledger's wire format to do it.
 //!
-//! Nothing is dropped here and nothing is reordered. Consumers project: the
-//! session picker discards episodes with no session id and reverses; the recap
-//! keeps every one, in ledger order, because a failed attempt that produced
+//! Nothing is dropped here and nothing is reordered. Consumers project:
+//! `sessions` discards episodes with no session id, since there is nothing to
+//! reopen; the recap keeps every one, because a failed attempt that produced
 //! nothing is exactly what it exists to report.
 
 use loop_core::{Event, EventPayload, StateId};
@@ -21,9 +21,9 @@ use loop_core::{Event, EventPayload, StateId};
 pub struct Episode<'e> {
     /// The index of this episode's `state_entered` in the ledger it came from.
     ///
-    /// The stable identity of an attempt. Never persisted and never shown — the
-    /// session picker uses it to map a highlighted row back to the right
-    /// session, which is what keeps two identical-looking rows distinct.
+    /// The stable identity of an attempt, never persisted and never shown. It
+    /// is also the only way back to the events *before* the first attempt,
+    /// which is where the recap finds `run_started`.
     pub ordinal: usize,
     pub entered: &'e Event,
     pub state: &'e StateId,

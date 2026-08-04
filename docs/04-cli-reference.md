@@ -2,7 +2,7 @@
 
 `loop` — "A local, ticket-level agent orchestrator".
 
-Eleven subcommands: [`init`](#loop-init), [`validate`](#loop-validate), [`preview`](#loop-preview), [`diagram`](#loop-diagram), [`run`](#loop-run), [`resume`](#loop-resume), [`status`](#loop-status), [`recap`](#loop-recap), [`logs`](#loop-logs), [`session`](#loop-session), [`doctor`](#loop-doctor).
+Twelve subcommands: [`init`](#loop-init), [`validate`](#loop-validate), [`preview`](#loop-preview), [`diagram`](#loop-diagram), [`run`](#loop-run), [`resume`](#loop-resume), [`status`](#loop-status), [`recap`](#loop-recap), [`logs`](#loop-logs), [`sessions`](#loop-sessions), [`session`](#loop-session), [`doctor`](#loop-doctor).
 
 For what the runtime actually does with the machine, see [02-how-it-works.md](02-how-it-works.md). For the keys inside `config.fnl` and `machine.fnl`, see [03-customizing.md](03-customizing.md).
 
@@ -409,7 +409,7 @@ Always these four, always in this order:
 | `## Run summary` | Start timestamp, the budgets recorded on `run_started`, the machine hash and whether the machine on disk still matches it, outcome, totals, cycle counts, Navigator invocation count, attempt count. Any events recorded before the first `state_entered` are appended here. |
 | `## Attempt timeline` | One `###` section per `state_entered`, in ledger order. Header bullets: entered timestamp and elapsed, `model:thinking`, skills, MCP, session id. Then the episode's events in ledger order — Worker summary, usage and artifacts; the proposal and its rationale; each guard tier's outcome with the full check output and the full Judge rationale; the Navigator's choice; the committed move; any errors and notes before the next attempt. |
 | `## Why it ended` | For a finished run: status, terminal state, the timestamp, and `run_finished`'s totals — plus the last fatal `error` when the status is not `Done`. For an unfinished one: the folded resume point and the last durable event. |
-| `## Inspecting further` | A `loop session <state>` line per state with a reopenable attempt, and the `loop logs --raw \| jq` recipes for the complete stream. |
+| `## Inspecting further` | A `loop sessions <state>` line per state with a reopenable attempt, and the `loop logs --raw \| jq` recipes for the complete stream. |
 
 ### Evidence labels
 
@@ -474,30 +474,25 @@ no run yet — `loop run` starts one
 
 Valid ledger content goes only to stdout. A ledger read or parse failure is reported to stderr and exits 1; successful commands exit 0.
 
-## `loop session`
+## `loop sessions`
 
 ```
-loop session [<STATE>] [--latest]
+loop sessions [<STATE>]
 ```
 
-> Reopen a Worker's pi session: pick an attempt, then hand the terminal to pi.
+> List every recorded Worker attempt: time, state, cycle, attempt, outcome, session id, evidence.
 
-| Flag / arg | Type | Default | Meaning |
-| --- | --- | --- | --- |
-| `<STATE>` | string, optional | — | "Only offer attempts at exactly this state, e.g. `implement`." |
-| `--latest` | bool | false | "Skip the picker and take the newest usable attempt." |
+Reads the ledger, builds one candidate per `state_entered` that carries a non-empty `session_id`, and prints one line per attempt on stdout in **ledger order, oldest first**. It launches nothing. Its job is to give you the id that [`loop session`](#loop-session) wants.
 
-Reads the ledger, builds one candidate per `state_entered` that carries a non-empty `session_id`, selects one, and executes `pi --session <id>` in the project directory.
-
-Requires **neither the machine nor the toolbox**. Only the ledger and the project path are needed; the machine is loaded opportunistically for state descriptions and a load failure costs nothing but those. Opening the ledger repairs a torn trailing line, exactly as [`loop status`](#loop-status) does, so an attempt interrupted mid-write is still selectable.
+Requires **neither the machine nor the toolbox**. Only the ledger and the project path are needed. Opening the ledger repairs a torn trailing line, exactly as [`loop status`](#loop-status) does, so an attempt interrupted mid-write is still listed.
 
 Judge and Navigator spawns run with `--no-session` and never appear here.
 
 ### Candidates
 
-One per `state_entered` with a session id, ordered **newest-first in reverse ledger order**. Ledger position is the ordering key; `ts` is display metadata only, so a skewed clock cannot reorder history.
+One per `state_entered` with a session id. Ledger position is the order; `ts` is display metadata only, so a skewed clock cannot reorder history.
 
-Each candidate's evidence comes from its **ledger episode** — from its own `state_entered` up to the next one. Within that window a `worker_output` with the same `state` and `cycle` supplies the summary, usage, and artifacts, and any `error` supplies the failure detail. `worker_output` has no `attempt` field, so the episode boundary is what keeps a retry's summary off the crashed attempt's row.
+Each candidate's evidence comes from its **ledger episode** — from its own `state_entered` up to the next one. Within that window a `worker_output` with the same `state` and `cycle` supplies the summary, and any `error` supplies the failure detail. `worker_output` has no `attempt` field, so the episode boundary is what keeps a retry's summary off the crashed attempt's row.
 
 | Outcome label | Condition                                         |
 | ------------- | ------------------------------------------------- |
@@ -505,61 +500,89 @@ Each candidate's evidence comes from its **ledger episode** — from its own `st
 | `crashed`     | no `worker_output`, but an `error` in the episode |
 | `incomplete`  | neither                                           |
 
+`<STATE>` is an **exact** filter, not a prefix or fuzzy one: `implement` never lists `implement-hotfix`.
+
+### Columns
+
+```
+2026-07-26T12:01  implement        1  1  crashed     PROJ-9-implement-1-1        error: executor lost
+2026-07-26T12:03  implement        1  2  finished    PROJ-9-implement-1-2        Added the retry guard and updated the tests.
+2026-07-26T12:05  review-the-diff  1  1  incomplete  PROJ-9-review-the-diff-1-1
+```
+
+| # | Column | Notes |
+| --- | --- | --- |
+| 1 | timestamp | `state_entered`, local zone, to the minute. Date and time are joined with `T` so the field never splits in two. |
+| 2 | state | exactly as the ledger recorded it |
+| 3 | cycle | right-aligned |
+| 4 | attempt | right-aligned |
+| 5 | outcome | `finished`, `crashed`, or `incomplete` |
+| 6 | session id | what `loop session <ID>` takes |
+| 7 | evidence | the Worker's summary, else `error: <detail>`, else nothing at all |
+
+Columns are padded to the widest row actually printed, and there is no header line — the output is a pipeline's input before it is a screen's. Fields 1–6 are single whitespace-free tokens in every row, so `awk '{print $6}'` is the session id whatever the state names in this ledger look like. The evidence column is last precisely because it is the only one that can contain spaces; it is collapsed to a single line and truncated to 72 characters, so one attempt is always one row.
+
+That is what makes the shell the picker:
+
+```sh
+loop sessions | fzf | awk '{print $6}' | xargs loop session
+loop sessions implement | grep crashed
+loop sessions | awk '$5=="incomplete"'
+```
+
+### Exit and edge cases
+
+No usable candidate is an error on stderr with exit 1, not an empty success — a pipeline that prints nothing has to say why:
+
+```
+error: no Worker session in /proj/.loop/ledger.jsonl matching any state — sessions come from `state_entered.session_id`; `loop status` shows what the ledger holds
+```
+
+The message names the requested filter (`any state`, or ``state `deploy` ``), so it distinguishes "that state never ran" from "nothing in this ledger has a session id at all" — which is what a ledger written before session ids looks like. Valid listing content goes only to stdout.
+
+## `loop session`
+
+```
+loop session <ID>
+loop session --latest [<STATE>]
+```
+
+> Reopen a Worker's pi session by id — `loop sessions` prints the ids.
+
+| Flag / arg | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `<ID>` | string | — | The session id to reopen, from [`loop sessions`](#loop-sessions). With `--latest` this is a state filter instead. |
+| `--latest` | bool | false | Reopen the newest recorded attempt rather than naming an id. |
+
+Resolves the attempt, prints one line naming it, and executes `pi --session <id>` in the project directory. Like `loop sessions` it needs neither the machine nor the toolbox, and repairs a torn trailing ledger line on open.
+
 ### Selection
 
 | Invocation | Behavior |
 | --- | --- |
-| `loop session` | picker, all Worker attempts |
-| `loop session <STATE>` | picker, filtered to that exact state |
-| `loop session --latest` | newest usable attempt, no picker |
-| `loop session <STATE> --latest` | newest usable attempt at that state, no picker |
+| `loop session <ID>` | the attempt with exactly that session id |
+| `loop session --latest` | the last candidate in ledger order |
+| `loop session --latest <STATE>` | the last candidate at that exact state |
+| `loop session` | error — see below |
 
-`<STATE>` is an **exact** match, not a prefix or fuzzy one: `implement` never offers `implement-hotfix`. It is a prefilter, not an instruction to open immediately — without `--latest` it still shows the picker.
+An id is matched exactly and searched from the newest end, so a ledger that records the same id twice (a resume re-enters the same state, cycle and attempt, and the id is derived from exactly those four) opens the later episode — the one that describes the session as it now stands.
 
-`--latest` takes the first candidate in the (newest-first) filtered list. There is no `--cycle` or `--attempt`; older attempts are what the picker is for.
+`--latest` is the deterministic path for scripts and CI: one input, one answer, no terminal required. There is no `--cycle` or `--attempt`; reaching a particular older attempt is what the listing's ids are for.
 
-### The picker
+### The picker is gone
 
-Requires **both stdin and stdout to be terminals**. Otherwise:
-
-```
-error: `loop session` needs a terminal to show the picker (stdin and stdout must both be TTYs) — use `loop session --latest` to select without one
-```
-
-The state filter, when given, is echoed into the suggested command (`loop session implement --latest`). This check is deliberate: output being piped means something is consuming it, and choosing a session anyway would be worse than failing.
-
-Drawn as a small **inline viewport** on stderr — no alternate screen — so stdout carries only the selection line. Raw mode and the viewport are released on every exit path, including errors and cancellation, before pi is launched.
-
-| Key                         | Action                          |
-| --------------------------- | ------------------------------- |
-| printable characters        | append to the fuzzy query       |
-| `Backspace`                 | delete the last query character |
-| `↑` / `Ctrl+P`              | move up                         |
-| `↓` / `Ctrl+N`              | move down                       |
-| `Ctrl+O`                    | next candidate mode             |
-| `Enter`                     | open the highlighted attempt    |
-| `Esc` / `Ctrl+C` / `Ctrl+D` | cancel                          |
-
-`Ctrl+O` cycles `All attempts` → `Latest per state` → `Incomplete` → `All attempts`. The current mode is in the header; the `<STATE>` prefilter holds in every mode.
-
-| Mode               | Candidates                               |
-| ------------------ | ---------------------------------------- |
-| `All attempts`     | every `state_entered` with a session id  |
-| `Latest per state` | the newest attempt for each exact state  |
-| `Incomplete`       | attempts whose outcome is not `finished` |
-
-Two lines per row:
+`loop session` with no argument used to open a full-screen fuzzy picker. It does not:
 
 ```
-implement — cycle 2, attempt 1 — 2026-07-26 12:04 — finished
-  Added the retry guard and updated the tests. · claude-sonnet-5:high · $0.11 · 1 artifact
+error: `loop session` no longer opens a picker — run `loop sessions` to list every recorded attempt, then `loop session <ID>` with an id from that listing. `loop session --latest [STATE]` still opens the newest attempt without naming one.
 ```
 
-The timestamp renders in the local timezone to the minute. When the machine loaded and the state has a `:description`, it is appended to the first line — the state id stays either way, so no two rows become indistinguishable. The second line is the summary, else the error detail, else `no worker_output — still running, or killed without a trace`; then the model, thinking level, cost, and artifact count.
+The old positional was a *state*, so `loop session implement` is the likeliest stale invocation. It fails with the two commands that do work:
 
-Fuzzy search matches the visible row text — state id, cycle/attempt, timestamp, outcome label, description, and summary. It does **not** match the session id, and it does not match the model or cost (a query for `sonnet` should not return the whole run). An empty query applies no filter at all, leaving the newest-first order intact. Equal scores keep that order rather than reshuffling between keystrokes.
-
-Cancelling prints `cancelled` and exits 0, having launched nothing.
+```
+error: no attempt in /proj/.loop/ledger.jsonl has session id `implement` — `loop sessions` lists every recorded id
+`implement` is a state, not a session id: `loop sessions implement` lists its attempts, and `loop session --latest implement` opens the newest
+```
 
 ### Launch
 
@@ -567,7 +590,7 @@ Cancelling prints `cancelled` and exits 0, having launched nothing.
 opening <TICKET>  <state> — cycle N, attempt M — <ts> — <outcome> — <summary, 72 chars>
 ```
 
-One line on stdout, before the process is replaced. The opaque session id is **not** printed as the selection: it is a key for pi, not a name for a person.
+One line on stdout, before the terminal is handed over. You typed an opaque id; this is loop telling you which attempt it was.
 
 If the chosen attempt is not `finished`, stderr gets:
 
@@ -576,7 +599,7 @@ warning: no worker_output for this attempt — the session may still be active, 
 warning: the ledger recorded: <error detail, 120 chars>
 ```
 
-The second line only when the episode recorded an error. Both on stderr, so a piped stdout stays clean, and the attempt still opens.
+The second line only when the episode recorded an error. Both on stderr, so a piped stdout stays clean, and the attempt still opens — a crashed attempt's transcript is exactly what you came for.
 
 Then, with stdin/stdout/stderr inherited unchanged and the cwd set to the project directory:
 
@@ -592,12 +615,11 @@ loop never reads, parses, writes, or deletes a pi session file, and never copies
 
 | Condition | Message |
 | --- | --- |
-| no usable candidate | ``no Worker session in <ledger> matching <state `X`\|any state> (selection mode: <--latest\|All attempts>) — sessions come from `state_entered.session_id`; `loop status` shows what the ledger holds`` |
-| no terminal, no `--latest` | `` `loop session` needs a terminal to show the picker … `` |
+| no id and no `--latest` | `` `loop session` no longer opens a picker — run `loop sessions` … `` |
+| unknown id | ``no attempt in <ledger> has session id `X` — `loop sessions` lists every recorded id`` (plus the state hint when `X` names a state) |
+| `--latest` with no candidate | ``no Worker session in <ledger> matching <state `X`\|any state> — sessions come from `state_entered.session_id`; `loop status` shows what the ledger holds`` |
 | pi could not be spawned | ``launching `<pi_bin> --session <id>` — install pi, or set LOOP_PI_BIN`` |
 | pi exited non-zero | `` `<pi_bin> --session <id>` exited <code\|on a signal> `` |
-
-The no-candidate message names both the requested filter and the selection mode, so it distinguishes "that state never ran" from "nothing in this ledger has a session id at all" — which is what a ledger written before session ids looks like.
 
 pi's exit status is the command's exit status: a non-zero pi is a non-zero `loop session`.
 
@@ -685,7 +707,8 @@ Per command:
 | `status` | always, including the empty-ledger message | ledger unreadable or has a corrupt interior line |
 | `recap` | a report was printed, **whatever the run's outcome was** | empty ledger; ledger unreadable or has a corrupt interior line |
 | `logs` | human tail, or complete JSONL with `--raw` | ledger unreadable or has a corrupt interior line |
-| `session` | pi exited 0, **or** the picker was cancelled | no usable candidate; no terminal and no `--latest`; pi could not be spawned; pi exited non-zero |
+| `sessions` | one line per listed attempt | no usable candidate |
+| `session` | pi exited 0 | no id and no `--latest`; unknown id; `--latest` with no usable candidate; pi could not be spawned; pi exited non-zero |
 | `doctor` | all three checks pass | `{n} problem(s)` |
 
 `loop run` and `loop resume` exit 1 on `Failed` and `Aborted` deliberately, so `loop run && gh pr merge` and CI wrappers gate correctly. To distinguish the two, read `status` from [`loop status --json`](#loop-status).

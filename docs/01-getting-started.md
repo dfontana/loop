@@ -245,7 +245,7 @@ Four sections, always in this order:
 1. **Run summary** — the ticket, the budgets the run started under, its outcome, totals, cycle counts, and how often the Navigator had to step in.
 2. **Attempt timeline** — every `state_entered`, in order, with the model and skills it ran under, the Worker's summary and cost, its proposal, each guard tier's outcome, the check's captured output, the Judge's rationale, and the committed move. **Failed attempts are in here too**, including the ones that produced no commit at all.
 3. **Why it ended** — the terminal transition, or the guardrail that stopped it. For a run still going or interrupted, the resume point and the last durable event instead.
-4. **Inspecting further** — the `loop session` and `loop logs --raw` commands for this particular run.
+4. **Inspecting further** — the `loop sessions` and `loop logs --raw` commands for this particular run.
 
 Two things make it worth trusting. It is **deterministic** — no LLM writes any of it, so the same ledger always renders the same report. And it **labels evidence by author**: a `**Worker**` block is the Worker's own account of what it did and proves nothing on its own, while `**Check**` is output from a command the harness ran itself and `**Judge**` is an independent verdict. When those three disagree, the recap shows you the disagreement rather than a smoothed-over summary.
 
@@ -272,19 +272,39 @@ loop logs --raw      # the complete ledger as JSONL, for jq
 `recap` tells you _that_ the review failed twice, and what the Judge said about it. When you want the reasoning behind it, reach for the transcript:
 
 ```
-loop session
+loop sessions
 ```
 
-That opens a picker over every worker attempt in the run, newest first — stage, cycle, attempt, time, outcome, and the worker's own summary on each row. Type to narrow it, `Ctrl+O` to switch between all attempts / the latest per stage / the ones that never reported, `Enter` to open. loop then hands the terminal to pi, in the same session that stage ran in, with its full history: every message, tool call, and result. Nothing is copied or re-rendered — the transcript was always pi's, and `loop` only kept the id.
+That lists every worker attempt in the run, oldest first — one line each, in columns: time, stage, cycle, attempt, outcome, the session id, and the worker's own summary.
+
+```
+2026-07-26T12:01  implement  1  1  crashed   PROJ-1-implement-1-1  error: executor lost
+2026-07-26T12:03  implement  1  2  finished  PROJ-1-implement-1-2  Added the retry guard and updated the tests.
+2026-07-26T12:05  review     1  1  finished  PROJ-1-review-1-1     Found a defect in the backfill window.
+```
+
+Hand one of those ids back to open it:
+
+```
+loop session PROJ-1-implement-1-2
+```
+
+loop then hands the terminal to pi, in the same session that stage ran in, with its full history: every message, tool call, and result. Nothing is copied or re-rendered — the transcript was always pi's, and `loop` only kept the id.
+
+There is no picker to learn, because the listing is columns and your shell already has one — field 6 is always the session id:
+
+```sh
+loop sessions | fzf | awk '{print $6}' | xargs loop session
+```
 
 Two shortcuts, for when you already know what you want:
 
 ```
-loop session implement            # only attempts at that stage
-loop session implement --latest   # the newest one, no picker
+loop sessions implement           # only attempts at that stage
+loop session --latest implement   # the newest one, no id needed
 ```
 
-`--latest` is also the escape hatch when there is no terminal to draw a picker on. Without it, a piped or scripted invocation **fails** rather than silently choosing for you.
+`--latest` is the scripted path: one input, one answer, and nothing to choose.
 
 If the run was interrupted — you hit Ctrl-C, the machine slept, a spawn crashed — use:
 

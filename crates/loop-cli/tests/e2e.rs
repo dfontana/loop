@@ -738,16 +738,15 @@ fn a_resumed_run_keeps_the_wallclock_it_had_already_spent() {
     );
 }
 
-// ── `loop session` ────────────────────────────────────────────────────────────
+// ── `loop sessions` / `loop session` ─────────────────────────────────────────
 //
-// The interactive picker itself is unit-tested in `session_picker`, which owns
-// every decision it makes — candidate construction, the exact state prefilter,
-// all three `Ctrl+O` modes, fuzzy ranking, and the row→session mapping that
-// keeps two identical-looking rows from opening each other's session. Those
-// tests need no PTY because the reducer is pure. What can only be checked
-// through the real binary is what these cover: that the ledger's recorded id
-// reaches pi as `--session` in the project directory, and that every way this
-// can go wrong is a loud failure rather than a wrong session.
+// The pure half is unit-tested in `sessions`: candidate construction, the exact
+// state filter, id resolution, and the column layout the listing promises a
+// pipeline. What can only be checked through the real binary is what these
+// cover — that the listing's own ids round-trip back into `loop session`, that
+// the ledger's recorded id reaches pi as `--session` in the project directory,
+// and that every way this can go wrong is a loud failure rather than a wrong
+// session.
 
 /// The deterministic id `stage.rs` assigns, mirrored here so a change to that
 /// scheme breaks these tests loudly instead of silently reopening nothing.
@@ -940,11 +939,95 @@ fn session_state_filter_is_exact_and_works_without_a_machine() {
     );
 }
 
-/// A piped invocation must never quietly pick a session because there is no
-/// human to ask. `Output` gives the child a pipe for stdout, so this is the
-/// non-interactive path by construction.
+/// The listing is the picker's replacement, so it has to carry everything a
+/// choice needs — every attempt, oldest first, with the id that reopens it — and
+/// the ids it prints must round-trip back into `loop session` unedited. Field 6
+/// is the session id in every row; that is the promise `loop sessions | fzf`
+/// and every `awk` after it rests on.
 #[test]
-fn session_without_latest_refuses_to_choose_non_interactively() {
+fn sessions_lists_every_attempt_oldest_first_and_its_ids_reopen_them() {
+    let fx = Fixture::new(r#"{"steps":[]}"#);
+    let ids: Vec<String> = [
+        ("implement", 1, 1),
+        ("implement", 1, 2),
+        ("review", 1, 1),
+        ("implement", 2, 1),
+    ]
+    .iter()
+    .map(|(state, cycle, attempt)| {
+        let id = session_id("PROJ-9", state, *cycle, *attempt);
+        fx.plant_session(&id);
+        id
+    })
+    .collect();
+    fx.write_ledger(&[
+        run_started_line("PROJ-9"),
+        entered_line("2026-07-26T12:01:00.000Z", "implement", 1, 1, Some(&ids[0])),
+        r#"{"ts":"2026-07-26T12:02:00.000Z","elapsed_s":0,"type":"error","state":"implement","kind":"transient","detail":"executor lost"}"#.into(),
+        entered_line("2026-07-26T12:03:00.000Z", "implement", 1, 2, Some(&ids[1])),
+        output_line("2026-07-26T12:04:00.000Z", "implement", 1, "second pass"),
+        entered_line("2026-07-26T12:05:00.000Z", "review", 1, 1, Some(&ids[2])),
+        output_line("2026-07-26T12:06:00.000Z", "review", 1, "found a defect"),
+        entered_line("2026-07-26T12:07:00.000Z", "implement", 2, 1, Some(&ids[3])),
+    ]);
+
+    let out = fx.run(&["sessions"]);
+    assert!(out.status.success(), "{}", combined(&out));
+    let text = stdout(&out);
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), 4, "one row per attempt:\n{text}");
+
+    let field = |line: &str, n: usize| line.split_whitespace().nth(n).unwrap().to_string();
+    assert_eq!(
+        lines.iter().map(|l| field(l, 5)).collect::<Vec<_>>(),
+        ids,
+        "ledger order, oldest first:\n{text}"
+    );
+    // State, cycle, attempt and outcome are readable off the same fields in
+    // every row, and the evidence for the outcome trails the id.
+    assert_eq!(field(lines[0], 1), "implement");
+    assert_eq!(
+        (field(lines[0], 2), field(lines[0], 3)),
+        ("1".into(), "1".into())
+    );
+    assert_eq!(field(lines[0], 4), "crashed");
+    assert!(lines[0].ends_with("error: executor lost"), "{}", lines[0]);
+    assert!(lines[1].ends_with("second pass"), "{}", lines[1]);
+    assert_eq!(field(lines[3], 4), "incomplete");
+
+    // Nothing is spawned by listing.
+    assert!(fx.pi_launches().is_empty(), "{:?}", fx.pi_launches());
+
+    // The state filter is exact, and narrows to the same rows.
+    let filtered = fx.run(&["sessions", "implement"]);
+    assert!(filtered.status.success(), "{}", combined(&filtered));
+    assert_eq!(stdout(&filtered).lines().count(), 3);
+    assert!(
+        !stdout(&filtered).contains("review"),
+        "{}",
+        stdout(&filtered)
+    );
+
+    // …and an id read out of the listing opens exactly that attempt.
+    let chosen = field(lines[2], 5);
+    let opened = fx.run(&["session", &chosen]);
+    assert!(opened.status.success(), "{}", combined(&opened));
+    assert!(
+        stdout(&opened).contains("review — cycle 1, attempt 1"),
+        "the opening line names the attempt, not just the id: {}",
+        stdout(&opened)
+    );
+    assert_eq!(
+        fx.pi_launches()[0]["argv"],
+        serde_json::json!(["--session", chosen])
+    );
+}
+
+/// A removed way of invoking a command must name what replaced it. `loop
+/// session` with no argument used to open a picker; it must not now mean
+/// anything else, and it must not fail with a bare usage error either.
+#[test]
+fn session_without_an_id_names_the_command_that_replaced_the_picker() {
     let fx = Fixture::new(r#"{"steps":[]}"#);
     let id = session_id("PROJ-9", "implement", 1, 1);
     fx.plant_session(&id);
@@ -957,38 +1040,57 @@ fn session_without_latest_refuses_to_choose_non_interactively() {
     let out = fx.run(&["session"]);
     assert!(!out.status.success(), "{}", combined(&out));
     let text = combined(&out);
-    assert!(text.contains("needs a terminal"), "{text}");
-    assert!(text.contains("--latest"), "hint the escape hatch: {text}");
+    assert!(text.contains("no longer opens a picker"), "{text}");
+    assert!(
+        text.contains("loop sessions"),
+        "name the replacement: {text}"
+    );
+    assert!(text.contains("--latest"), "and the scripted path: {text}");
     assert!(
         fx.pi_launches().is_empty(),
         "nothing may be launched: {:?}",
         fx.pi_launches()
     );
 
-    // The same refusal, with the state filter echoed into the suggested command.
-    let filtered = fx.run(&["session", "implement"]);
-    assert!(!filtered.status.success());
+    // A state name is what the old positional took, so it is the likeliest
+    // thing to arrive here — and it gets told the two commands that work.
+    let stale = fx.run(&["session", "implement"]);
+    assert!(!stale.status.success(), "{}", combined(&stale));
+    let text = combined(&stale);
     assert!(
-        combined(&filtered).contains("loop session implement --latest"),
-        "{}",
-        combined(&filtered)
+        text.contains("`implement` is a state, not a session id"),
+        "{text}"
+    );
+    assert!(text.contains("loop sessions implement"), "{text}");
+    assert!(text.contains("loop session --latest implement"), "{text}");
+    assert!(fx.pi_launches().is_empty());
+
+    // An id that is neither a state nor recorded still says where to look.
+    let bogus = fx.run(&["session", "no-such-id"]);
+    assert!(!bogus.status.success());
+    let text = combined(&bogus);
+    assert!(text.contains("has session id `no-such-id`"), "{text}");
+    assert!(
+        text.contains("ledger.jsonl"),
+        "name the ledger read: {text}"
     );
 }
 
-/// No usable candidate is a specific error naming the filter and the selection
-/// mode — including when the ledger *has* entries but none recorded an id, which
-/// is what a pre-session ledger looks like.
+/// No usable candidate is a specific error naming the ledger and the filter —
+/// including when the ledger *has* entries but none recorded an id, which is
+/// what a pre-session ledger looks like. An empty listing is never silence: a
+/// `loop sessions | fzf` that prints nothing has to say why.
 #[test]
-fn session_with_no_usable_candidate_names_the_filter_and_the_mode() {
+fn session_with_no_usable_candidate_names_the_filter() {
     let fx = Fixture::new(r#"{"steps":[]}"#);
 
-    // An empty ledger, picker mode.
-    let empty = fx.run(&["session"]);
+    // An empty ledger.
+    let empty = fx.run(&["sessions"]);
     assert!(!empty.status.success());
+    assert!(stdout(&empty).is_empty(), "{}", stdout(&empty));
     let text = combined(&empty);
     assert!(text.contains("no Worker session"), "{text}");
     assert!(text.contains("any state"), "{text}");
-    assert!(text.contains("All attempts"), "{text}");
 
     // Entries, but every one sessionless — nothing to reopen.
     fx.write_ledger(&[
@@ -1000,7 +1102,11 @@ fn session_with_no_usable_candidate_names_the_filter_and_the_mode() {
     assert!(!no_ids.status.success());
     let text = combined(&no_ids);
     assert!(text.contains("no Worker session"), "{text}");
-    assert!(text.contains("--latest"), "the mode must be named: {text}");
+    assert!(
+        text.contains("state_entered.session_id"),
+        "say where ids come from, so `nothing here` is distinguishable from a \
+         ledger written before they existed: {text}"
+    );
 
     // A state that never ran.
     let planted = session_id("PROJ-9", "implement", 1, 1);
@@ -1019,6 +1125,7 @@ fn session_with_no_usable_candidate_names_the_filter_and_the_mode() {
     assert!(!wrong_state.status.success());
     let text = combined(&wrong_state);
     assert!(text.contains("state `deploy`"), "{text}");
+    assert!(combined(&fx.run(&["sessions", "deploy"])).contains("state `deploy`"));
     assert!(fx.pi_launches().is_empty());
 }
 
@@ -1462,7 +1569,7 @@ fn recap_of_a_finished_run_names_every_attempt_and_labels_its_evidence() {
         "- status: Done",
         "- terminal state: done",
         "## Inspecting further",
-        "`loop session implement`",
+        "`loop sessions implement`",
         "loop logs --raw | jq",
     ] {
         assert!(text.contains(expected), "missing {expected:?} in:\n{text}");

@@ -1,10 +1,9 @@
-//! The eleven subcommands.
+//! The twelve subcommands.
 
-use std::collections::BTreeMap;
 use std::io::Write as _;
 use std::path::Path;
 
-use anyhow::{Context as _, Result, bail};
+use anyhow::{Context as _, Result, anyhow, bail};
 use loop_core::{Config, LedgerSink, Machine, Paths};
 use loop_engine::{Diagnostic, Engine, Severity};
 use loop_fennel::FennelVm;
@@ -14,8 +13,7 @@ use loop_toolbox::Toolbox;
 
 use crate::output::{summarize, truncate};
 use crate::report::{self, fmt_duration};
-use crate::session_picker::{self, Candidate, Picker, Scope};
-use crate::session_ui;
+use crate::sessions::{self, Candidate};
 use crate::stage::{CliStage, Resolver};
 
 // Templates shipped in the binary, so a fresh install needs no fetch.
@@ -519,86 +517,110 @@ pub fn recap(paths: Paths) -> Result<()> {
     Ok(())
 }
 
+/// The failure both `loop sessions` and `loop session --latest` end at when the
+/// ledger holds nothing to reopen.
+///
+/// It names the ledger it read and the filter it applied, because "no sessions
+/// here" and "that state never ran" are the same silence otherwise — and the
+/// second one is a typo the operator can fix.
+fn no_candidate(ledger_path: &Path, state: Option<&str>) -> anyhow::Error {
+    anyhow!(
+        "no Worker session in {} matching {} — sessions come from \
+         `state_entered.session_id`; `loop status` shows what the ledger holds",
+        ledger_path.display(),
+        match state {
+            Some(s) => format!("state `{s}`"),
+            None => "any state".to_string(),
+        },
+    )
+}
+
+/// `loop sessions` — every Worker attempt this ledger recorded a session for.
+///
+/// Prints and stops. Choosing is the shell's job now: `loop sessions | fzf` is
+/// the picker this replaced, and `loop sessions implement | awk '{print $6}'` is
+/// every pipeline the picker could never be part of.
+///
+/// Needs neither a valid machine nor a staged toolbox: the ledger and the
+/// project directory are the whole input, and a mid-edit `machine.fnl` is
+/// exactly when you want to read what the last Worker did.
+pub fn sessions(paths: Paths, state: Option<String>) -> Result<()> {
+    let ledger_path = paths.ledger_file();
+    // Opening repairs a torn trailing line, so an attempt interrupted mid-write
+    // is still listed rather than making the whole ledger unreadable.
+    let events = Ledger::open(&ledger_path)?.read_all()?;
+    let candidates = sessions::candidates(&events);
+    let listed = sessions::filter_state(&candidates, state.as_deref());
+    if listed.is_empty() {
+        return Err(no_candidate(&ledger_path, state.as_deref()));
+    }
+    print!("{}", sessions::listing(&listed));
+    Ok(())
+}
+
+/// `loop session <ID>` with an id this ledger does not hold.
+///
+/// A state name is the likeliest thing to land here — it is what the positional
+/// meant back when this command opened a picker — so when the argument names a
+/// state, the message is the working command rather than a correction.
+fn unknown_id(ledger_path: &Path, id: &str, candidates: &[Candidate]) -> anyhow::Error {
+    let mut msg = format!(
+        "no attempt in {} has session id `{id}` — `loop sessions` lists every recorded id",
+        ledger_path.display(),
+    );
+    if sessions::states(candidates).contains(&id) {
+        msg.push_str(&format!(
+            "\n`{id}` is a state, not a session id: `loop sessions {id}` lists its attempts, and \
+             `loop session --latest {id}` opens the newest"
+        ));
+    }
+    anyhow!(msg)
+}
+
 /// Reopen a Worker's pi session.
 ///
 /// loop keeps no transcript of its own: a stage's full history — assistant
 /// messages, tool calls, results, usage — already lives in the session pi
 /// persisted under the deterministic id on that stage's `state_entered` line.
-/// This command's whole job is to help a human *find* the right one of those
-/// ids and then get out of the way.
-///
-/// Which is why the picker is the normal path rather than a convenience. The
-/// ids are `<ticket>-<state>-<cycle>-<attempt>` — machine-recognizable, not
-/// human-recognizable — so asking someone to name one would mean asking them to
-/// remember which cycle the review failed on. The rows carry that instead.
+/// This command's whole job is to hand that id back to pi and get out of the
+/// way; finding it is [`sessions`]'s job.
 ///
 /// Needs neither a valid machine nor a staged toolbox: a ledger line and the
 /// project directory are the whole input, and a mid-edit `machine.fnl` is
 /// exactly when you want to read what the last Worker did.
-pub fn session(paths: Paths, state: Option<String>, latest: bool) -> Result<()> {
-    use loop_core::LedgerSink;
-
+pub fn session(paths: Paths, id: Option<String>, latest: bool) -> Result<()> {
     let config = Config::defaults(paths.clone());
     let ledger_path = paths.ledger_file();
-    // Opening repairs a torn trailing line, so an attempt interrupted mid-write
-    // is still selectable rather than making the whole ledger unreadable.
     let events = Ledger::open(&ledger_path)?.read_all()?;
-    let candidates = session_picker::candidates(&events);
-    let ticket = session_picker::ticket(&events);
-    let state_filter = state.as_deref();
-    let descriptions = state_descriptions(&paths);
-    let describe = |s: &str| descriptions.get(s).cloned();
+    let candidates = sessions::candidates(&events);
+    let ticket = sessions::ticket(&events);
 
-    if session_picker::filter_state(&candidates, state_filter).is_empty() {
-        bail!(
-            "no Worker session in {} matching {} (selection mode: {}) — \
-             sessions come from `state_entered.session_id`; `loop status` shows what the ledger holds",
-            ledger_path.display(),
-            match state_filter {
-                Some(s) => format!("state `{s}`"),
-                None => "any state".to_string(),
-            },
-            if latest {
-                "--latest"
-            } else {
-                Scope::All.label()
-            },
-        );
-    }
-
-    let chosen: &Candidate = if latest {
-        // The deterministic escape hatch: last usable candidate in reverse
-        // ledger order, after the prefilter. Nothing to choose, so no terminal
-        // is required.
-        session_picker::latest(&candidates, state_filter).expect("filter_state was non-empty above")
-    } else {
-        if !session_ui::is_interactive() {
-            bail!(
-                "`loop session` needs a terminal to show the picker (stdin and stdout must both be \
-                 TTYs) — use `loop session {}--latest` to select without one",
-                state_filter.map(|s| format!("{s} ")).unwrap_or_default(),
-            );
+    let chosen: &Candidate = match (id.as_deref(), latest) {
+        // The deterministic path scripts and CI use: last candidate in ledger
+        // order, after the state filter. The positional means a state here,
+        // because there is nothing left for an id to disambiguate.
+        (state, true) => {
+            sessions::latest(&candidates, state).ok_or_else(|| no_candidate(&ledger_path, state))?
         }
-        let mut picker = Picker::new(&candidates, state_filter, describe);
-        let Some(ordinal) = session_ui::pick(&mut picker, ticket.as_deref())? else {
-            // A cancelled picker is a completed command that launched nothing.
-            println!("cancelled");
-            return Ok(());
-        };
-        candidates
-            .iter()
-            .find(|c| c.ordinal == ordinal)
-            .expect("the picker only ever returns an ordinal it was given")
+        (Some(id), false) => sessions::find(&candidates, id)
+            .ok_or_else(|| unknown_id(&ledger_path, id, &candidates))?,
+        // The interactive picker this command used to open is gone. Saying so,
+        // with the command that replaced it, is the whole difference between a
+        // removed feature and a broken one.
+        (None, false) => bail!(
+            "`loop session` no longer opens a picker — run `loop sessions` to list every recorded \
+             attempt, then `loop session <ID>` with an id from that listing. \
+             `loop session --latest [STATE]` still opens the newest attempt without naming one."
+        ),
     };
 
-    // The human-readable identification of what is about to open. The opaque
-    // session id is deliberately not here: it is a key for pi, not a name for a
-    // person, and printing it as the normal selection UI teaches the wrong habit.
+    // What is about to open, in the terms the listing used, because an opaque id
+    // is not an answer to "which attempt was that?".
     let mut line = String::from("opening ");
     if let Some(t) = &ticket {
         line.push_str(&format!("{t}  "));
     }
-    line.push_str(&chosen.headline(describe(&chosen.state).as_deref()));
+    line.push_str(&chosen.headline());
     if let Some(detail) = chosen.detail() {
         line.push_str(&format!(" — {}", truncate(&detail, 72)));
     }
@@ -647,23 +669,6 @@ fn launch_pi_session(config: &Config, session_id: &str) -> Result<()> {
         );
     }
     Ok(())
-}
-
-/// State descriptions from the machine, if one happens to load.
-///
-/// Best-effort by construction: the descriptions only enrich a row's text, so a
-/// missing, unparseable, or half-edited `machine.fnl` costs that enrichment and
-/// nothing else. Failing here instead would make history unreadable at exactly
-/// the moment the machine is being rewritten.
-fn state_descriptions(paths: &Paths) -> BTreeMap<String, String> {
-    let Ok((_vm, _config, machine)) = load(paths.clone()) else {
-        return BTreeMap::new();
-    };
-    machine
-        .states
-        .iter()
-        .filter_map(|(id, st)| st.description.clone().map(|d| (id.clone(), d)))
-        .collect()
 }
 
 pub fn doctor(paths: Paths) -> Result<()> {

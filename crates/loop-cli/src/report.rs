@@ -884,7 +884,7 @@ fn inspection_pointers(rep: &mut Report, t: &Timeline<'_>) {
     );
 
     // One line per state that has a reopenable attempt, because that is the
-    // granularity `loop session` filters at.
+    // granularity `loop sessions` filters at.
     let mut by_state: BTreeMap<&str, usize> = BTreeMap::new();
     for (ep, _) in t.attempts.iter().filter(|(e, _)| e.session_id.is_some()) {
         *by_state.entry(ep.state.as_str()).or_insert(0) += 1;
@@ -895,8 +895,10 @@ fn inspection_pointers(rep: &mut Report, t: &Timeline<'_>) {
         rep.para("Reopen a Worker's session:");
         for (state, n) in by_state {
             rep.bullet(
-                format!("`loop session {state}`"),
-                format!("{n} reopenable attempt(s); add `--latest` to skip the picker"),
+                format!("`loop sessions {state}`"),
+                format!(
+                    "{n} reopenable attempt(s); `loop session --latest {state}` opens the newest"
+                ),
             );
         }
     }
