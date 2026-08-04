@@ -5,7 +5,6 @@ use crate::core::{AgentRunner, CheckRunner, GuardOutcome, JudgeSpec, Result, Sta
 /// The verdict on one proposed edge, plus what to write to the ledger.
 #[derive(Clone, Debug)]
 pub struct GuardReport {
-    pub structural: GuardOutcome,
     pub check: GuardOutcome,
     pub criteria: GuardOutcome,
     pub check_output: Option<String>,
@@ -15,9 +14,7 @@ pub struct GuardReport {
 
 impl GuardReport {
     pub fn passed(&self) -> bool {
-        self.structural != GuardOutcome::Fail
-            && self.check != GuardOutcome::Fail
-            && self.criteria != GuardOutcome::Fail
+        self.check != GuardOutcome::Fail && self.criteria != GuardOutcome::Fail
     }
 }
 
@@ -32,6 +29,10 @@ impl GuardReport {
 /// - The Judge sees the worker's output digest, artifact paths, and the
 ///   check's output — never the worker's own claim that it succeeded
 ///   (docs/05-design-notes.md).
+///
+/// The edge is already known to exist: it was resolved out of the machine's
+/// declared transitions by `Machine::edge`, or the Navigator picked it from the
+/// states it was offered. There is no structural tier to evaluate here.
 pub fn check(
     runner: &dyn AgentRunner,
     checks: &dyn CheckRunner,
@@ -41,22 +42,11 @@ pub fn check(
     attempt: u32,
     judge: impl FnOnce(&str, Option<&str>) -> Result<JudgeSpec>,
 ) -> Result<GuardReport> {
-    // Structural: by the time an edge reaches `check`, it was already resolved
-    // out of the machine's declared transitions (by `Machine::edge`, or by
-    // the Navigator picking from the states it was offered), so it always
-    // passes here.
-    let structural = GuardOutcome::Pass;
-
     let (check_tier, check_output) = match &edge.check {
         None => (GuardOutcome::Skip, None),
         Some(c) => {
             let outcome = checks.run_check(c, from, cycle, attempt)?;
-            let tier = if outcome.passed {
-                GuardOutcome::Pass
-            } else {
-                GuardOutcome::Fail
-            };
-            (tier, Some(outcome.output))
+            (outcome.passed.into(), Some(outcome.output))
         }
     };
 
@@ -64,7 +54,6 @@ pub fn check(
     // a non-zero exit status buys nothing and can only weaken the gate.
     if check_tier == GuardOutcome::Fail {
         return Ok(GuardReport {
-            structural,
             check: check_tier,
             criteria: GuardOutcome::Skip,
             check_output,
@@ -80,17 +69,11 @@ pub fn check(
         Some(criteria_text) => {
             let spec = judge(criteria_text, check_output.as_deref())?;
             let verdict = runner.run_judge(&spec)?;
-            let outcome = if verdict.pass {
-                GuardOutcome::Pass
-            } else {
-                GuardOutcome::Fail
-            };
-            (outcome, Some(verdict.rationale), verdict.usage)
+            (verdict.pass.into(), Some(verdict.rationale), verdict.usage)
         }
     };
 
     Ok(GuardReport {
-        structural,
         check: check_tier,
         criteria,
         check_output,

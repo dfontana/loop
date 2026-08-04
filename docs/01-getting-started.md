@@ -72,7 +72,7 @@ loop init PROJ-1487
 
 `machine.fnl` is the bundled `standard-ticket` machine with `$TICKET` replaced by `PROJ-1487`; `task.md` and `plan.md` are stubs. Everything here is yours to edit — `loop` writes a file only when it is absent, and never rewrites one you have changed.
 
-Note the two different directories, because the difference matters more than it looks. The four files under `stage-prompts/` are the prompts for the four states, one each, and each one is in its stage's context every time that stage runs. The one file under `skills/` is not: the `test` state names it, which makes it *available* — pi shows the model its name and description, and the model opens it only if it hits the situation the description names. "Is this failing test a flake or a real bug" is worth having on hand and not worth spending context on every run. Which of the two a given piece of writing should be is the first real authoring decision, and [customizing](03-customizing.md#stage-prompts-and-skills-are-not-the-same-thing) works through it.
+Note the two different directories, because the difference matters more than it looks. The four files under `stage-prompts/` are the prompts for the four states, one each, and each one is in its stage's context every time that stage runs. The one file under `skills/` is not: the `test` state names it, which makes it _available_ — pi shows the model its name and description, and the model opens it only if it hits the situation the description names. "Is this failing test a flake or a real bug" is worth having on hand and not worth spending context on every run. Which of the two a given piece of writing should be is the first real authoring decision, and [customizing](03-customizing.md#stage-prompts-and-skills-are-not-the-same-thing) works through it.
 
 The `.gitignore` holds one line, `run/`. That directory is where rendered prompts and handoff files land during a run; it is regenerated every stage, so it is the one part of `.loop/` not worth committing. The rest — the machine, the prose, the stage prompts, and later the ledger and the artifacts — is the record of how this ticket was driven, and belongs in the branch with the code.
 
@@ -208,10 +208,10 @@ Every one of those steps is appended to a ledger on disk before the next one sta
 The run ends with a summary line:
 
 ```
-Done — done after 6 transitions, $3.41, 18m4s
+Done — done after 6 transition(s), $3.41, 41352 token(s), 18m4s
 ```
 
-That is status, terminal state, committed transitions, dollars, wall clock.
+That is status, terminal state, committed transitions, dollars, tokens, wall clock.
 
 Runs are also bounded independently of the machine's logic: cost, wall-clock, and a maximum transition count, checked before each stage spawns. `--max-transitions N` tightens the transition budget for one invocation, and only ever tightens it — it cannot raise the machine's own ceiling.
 
@@ -254,8 +254,8 @@ It also works on a run that is still going, or one that crashed — "recap to da
 Then there are progressively deeper views. `loop status` is the quick one-screen answer while a run is in flight:
 
 ```
-running — at `review`
-  5 transitions, $1.23, 12m3s
+unfinished — last at `review`
+  5 transition(s), $1.23, 38104 token(s), 12m3s
   cycles: implement#2, qa#1
 ```
 

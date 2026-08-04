@@ -8,8 +8,23 @@
 use std::collections::BTreeMap;
 
 use crate::core::event::{Event, EventPayload, RunStatus, Totals};
-use crate::core::machine::StateId;
+use crate::core::machine::{Machine, StateId};
 use crate::core::runner::Proposal;
+
+impl Machine {
+    /// Fold a ledger against *this* machine's loop heads.
+    ///
+    /// Lives here rather than in `machine.rs` so the IR stays free of the
+    /// event schema, and exists at all because every caller that has a machine
+    /// wants this: the engine, `CliStage`, and `status`/`recap` each used to
+    /// write out the same `fold_with_loop_heads(events, &|s|
+    /// machine.loop_with_head(s).is_some())` closure. Callers without a
+    /// machine — a mid-edit `machine.fnl`, the digest — take the bare [`fold`],
+    /// which reads every state as a loop head.
+    pub fn fold(&self, events: &[Event]) -> RunState {
+        fold_with_loop_heads(events, &|s| self.loop_with_head(s).is_some())
+    }
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum FoldStatus {
@@ -36,11 +51,38 @@ pub enum ResumePoint {
     GuardCheck { from: StateId, proposal: Proposal },
 }
 
+/// One committed hop, with the rationale the proposal behind it carried.
+///
+/// The pair the digest reports, kept by the fold rather than searched for
+/// afterwards. `digest::render` used to fold, then walk the events again for
+/// the commit indices, then walk *backwards from each one* looking for the
+/// matching `transition_proposed` — three passes for two facts, and the
+/// backwards walk was a nearest-match heuristic where the fold simply knows,
+/// because it has the proposal in hand when the commit arrives.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Hop {
+    pub from: StateId,
+    pub to: StateId,
+    pub cycle: u32,
+    /// `None` when the commit had no proposal in front of it — an escalation
+    /// or an `on_fail: route`, both of which the harness commits directly.
+    pub rationale: Option<String>,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct RunState {
     pub status: Option<RunStatus>,
     /// `None` before `run_started`; otherwise the state the run sits in.
     pub current: Option<StateId>,
+    /// The state the last committed transition came *from* — what a stage
+    /// prompt interpolates as `$PREV_STATE`.
+    ///
+    /// Derived here rather than by a second reverse scan beside the fold:
+    /// `CliStage::context` folded the ledger and then walked it again looking
+    /// for the very `transition_committed` the fold had just handled.
+    pub prev_state: Option<StateId>,
+    /// Every committed hop, in ledger order.
+    pub hops: Vec<Hop>,
     /// Loop-head state → completed cycles.
     pub cycles: BTreeMap<StateId, u32>,
     /// (state, cycle) → attempts made.
@@ -77,6 +119,12 @@ impl RunState {
     pub fn navigator_from(&self, state: &str) -> u32 {
         self.navigator_by_state.get(state).copied().unwrap_or(0)
     }
+
+    /// Charge one spawn's usage to the run. The three roles all bill through
+    /// here, so a fourth cannot be added without accounting for it.
+    fn spend(&mut self, usage: crate::core::event::Usage) {
+        self.totals.usage += usage;
+    }
 }
 
 /// Fold the event log into the current run state.
@@ -104,8 +152,11 @@ pub fn fold(events: &[Event]) -> RunState {
 pub fn fold_with_loop_heads(events: &[Event], is_loop_head: &dyn Fn(&str) -> bool) -> RunState {
     /// Where the tail of the ledger leaves us, used to derive [`ResumePoint`].
     enum Tail {
-        /// No `state_entered` has landed since the last commit (or ever).
-        Initial,
+        /// No `state_entered` has landed since the last commit (or ever) —
+        /// either nothing has run yet, or the last thing that happened was a
+        /// clean commit. Both resume the same way: enter `rs.current`, or start
+        /// fresh when there isn't one.
+        AtRest,
         /// `state_entered` with no `worker_output` yet — died mid-flight.
         EnteredWithoutOutput { state: StateId },
         /// `worker_output` landed but the worker never got as far as
@@ -113,12 +164,10 @@ pub fn fold_with_loop_heads(events: &[Event], is_loop_head: &dyn Fn(&str) -> boo
         OutputWithoutProposal { state: StateId },
         /// A proposal exists; no `transition_committed` yet.
         ProposedWithoutCommit { from: StateId, proposal: Proposal },
-        /// The last thing that happened was a clean commit.
-        Committed,
     }
 
     let mut rs = RunState::default();
-    let mut tail = Tail::Initial;
+    let mut tail = Tail::AtRest;
 
     for e in events {
         // Wallclock is carried on the envelope rather than derived from `ts`,
@@ -128,8 +177,9 @@ pub fn fold_with_loop_heads(events: &[Event], is_loop_head: &dyn Fn(&str) -> boo
         rs.totals.wallclock_s = e.elapsed_s;
         match &e.payload {
             EventPayload::RunStarted { .. } => {}
-            EventPayload::StateEntered { state, cycle, .. } => {
-                *rs.attempts.entry((state.clone(), *cycle)).or_insert(0) += 1;
+            EventPayload::StateEntered(h) => {
+                let (state, cycle) = (&h.state, h.cycle);
+                *rs.attempts.entry((state.clone(), cycle)).or_insert(0) += 1;
                 rs.current = Some(state.clone());
                 // A loop head reached by an edge got its cycle bumped by the
                 // `transition_committed` below. A loop head that is also the
@@ -152,7 +202,7 @@ pub fn fold_with_loop_heads(events: &[Event], is_loop_head: &dyn Fn(&str) -> boo
                 usage,
                 ..
             } => {
-                rs.totals.cost_usd += usage.cost_usd;
+                rs.spend(*usage);
                 for a in artifacts {
                     rs.artifacts.insert(a.name.clone(), a.path.clone());
                 }
@@ -165,7 +215,6 @@ pub fn fold_with_loop_heads(events: &[Event], is_loop_head: &dyn Fn(&str) -> boo
                 to,
                 blocked,
                 rationale,
-                by: _,
             } => {
                 let proposal = Proposal {
                     to: to.clone(),
@@ -178,21 +227,49 @@ pub fn fold_with_loop_heads(events: &[Event], is_loop_head: &dyn Fn(&str) -> boo
                     proposal,
                 };
             }
-            EventPayload::GuardChecked { usage, .. } => {
-                rs.totals.cost_usd += usage.cost_usd;
-            }
+            EventPayload::GuardChecked { usage, .. } => rs.spend(*usage),
             EventPayload::NavigatorInvoked { from, usage, .. } => {
                 rs.navigator_invocations += 1;
                 *rs.navigator_by_state.entry(from.clone()).or_insert(0) += 1;
-                rs.totals.cost_usd += usage.cost_usd;
+                rs.spend(*usage);
             }
-            EventPayload::TransitionCommitted { to, .. } => {
+            EventPayload::TransitionCommitted { from, to, cycle } => {
+                // The proposal this commit ratifies is whatever the tail is
+                // holding — the control loop is propose → guard → commit, so
+                // it is in hand right here.
+                //
+                // Matched on the edge, not merely on the tail being occupied:
+                // `guard_checked` and `navigator_invoked` do not clear the
+                // tail (a crash between either and the commit has to resume at
+                // the guard, which needs the proposal), so a hop the *harness*
+                // chose — an `on_fail: route`, a Navigator reroute, an
+                // escalation — arrives here with the rejected proposal still
+                // in hand. Attributing that proposal's rationale to a hop it
+                // did not cause states the reason the run went to `debug` as
+                // the reason a worker gave for wanting `done`, in the digest
+                // every later stage reads.
+                let rationale = match &tail {
+                    Tail::ProposedWithoutCommit {
+                        from: proposed_from,
+                        proposal,
+                    } if proposed_from == from && proposal.to.as_ref() == Some(to) => {
+                        Some(proposal.rationale.clone())
+                    }
+                    _ => None,
+                };
+                rs.hops.push(Hop {
+                    from: from.clone(),
+                    to: to.clone(),
+                    cycle: *cycle,
+                    rationale,
+                });
+                rs.prev_state = Some(from.clone());
                 rs.current = Some(to.clone());
                 if is_loop_head(to) {
                     *rs.cycles.entry(to.clone()).or_insert(0) += 1;
                 }
                 rs.totals.transitions += 1;
-                tail = Tail::Committed;
+                tail = Tail::AtRest;
             }
             EventPayload::Error { .. } => {}
             EventPayload::Note { .. } => {}
@@ -216,7 +293,7 @@ pub fn fold_with_loop_heads(events: &[Event], is_loop_head: &dyn Fn(&str) -> boo
         ResumePoint::Done
     } else {
         match tail {
-            Tail::Initial => match &rs.current {
+            Tail::AtRest => match &rs.current {
                 Some(state) => ResumePoint::EnterState {
                     state: state.clone(),
                     crashed: false,
@@ -232,13 +309,6 @@ pub fn fold_with_loop_heads(events: &[Event], is_loop_head: &dyn Fn(&str) -> boo
             Tail::ProposedWithoutCommit { from, proposal } => {
                 ResumePoint::GuardCheck { from, proposal }
             }
-            Tail::Committed => match &rs.current {
-                Some(state) => ResumePoint::EnterState {
-                    state: state.clone(),
-                    crashed: false,
-                },
-                None => ResumePoint::Fresh,
-            },
         }
     };
 
@@ -248,90 +318,34 @@ pub fn fold_with_loop_heads(events: &[Event], is_loop_head: &dyn Fn(&str) -> boo
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::event::{ArtifactRef, GuardOutcome, Usage};
-    use crate::core::machine::Budgets;
-
-    fn ev(payload: EventPayload) -> Event {
-        Event::now(payload)
-    }
+    use crate::core::GuardOutcome;
+    use crate::core::fixtures::{
+        EventExt, committed, entered, guard_checked, proposed, started as started_for,
+    };
 
     fn started() -> Event {
-        ev(EventPayload::RunStarted {
-            ticket: "T-1".into(),
-            machine_hash: "sha256:deadbeef".into(),
-            budgets: Budgets::default(),
-        })
+        started_for("T-1")
     }
 
-    fn entered(state: &str, cycle: u32, attempt: u32) -> Event {
-        ev(EventPayload::StateEntered {
-            state: state.into(),
-            cycle,
-            attempt,
-            session_id: None,
-            model: "m".into(),
-            thinking: "low".into(),
-            skills: vec![],
-            mcp: vec![],
-        })
-    }
-
+    /// The fold's cost accounting reads `worker_output`, so this fixture's
+    /// usage and artifact are load-bearing where the shared defaults are not.
     fn output(state: &str, cycle: u32) -> Event {
-        ev(EventPayload::WorkerOutput {
-            state: state.into(),
-            cycle,
-            summary: "did stuff".into(),
-            artifacts: vec![ArtifactRef {
-                name: "diff".into(),
-                path: format!(".loop/artifacts/{state}-{cycle}-diff.patch"),
-            }],
-            usage: Usage {
-                tokens: 100,
-                cost_usd: 0.5,
-            },
-        })
-    }
-
-    fn proposed(from: &str, to: &str) -> Event {
-        ev(EventPayload::TransitionProposed {
-            from: from.into(),
-            to: Some(to.into()),
-            blocked: false,
-            rationale: "looks good".into(),
-            by: crate::core::event::Actor::Worker,
-        })
-    }
-
-    fn guard_checked(from: &str, to: &str) -> Event {
-        ev(EventPayload::GuardChecked {
-            from: from.into(),
-            to: to.into(),
-            structural: GuardOutcome::Pass,
-            check: GuardOutcome::Skip,
-            criteria: GuardOutcome::Skip,
-            check_output: None,
-            judge_rationale: None,
-            usage: Usage::default(),
-        })
-    }
-
-    fn committed(from: &str, to: &str, cycle: u32) -> Event {
-        ev(EventPayload::TransitionCommitted {
-            from: from.into(),
-            to: to.into(),
-            cycle,
-        })
+        crate::core::fixtures::output(state, cycle)
+            .usage(100, 0.5)
+            .artifact(
+                "diff",
+                &format!(".loop/artifacts/{state}-{cycle}-diff.patch"),
+            )
     }
 
     fn finished(status: RunStatus, terminal: &str) -> Event {
-        ev(EventPayload::RunFinished {
-            status,
-            terminal_state: Some(terminal.into()),
-            totals: Totals {
+        crate::core::fixtures::finished(status, terminal).totals(Totals {
+            usage: crate::core::Usage {
                 cost_usd: 1.23,
-                wallclock_s: 60,
-                transitions: 2,
+                ..Default::default()
             },
+            wallclock_s: 60,
+            transitions: 2,
         })
     }
 
@@ -499,6 +513,123 @@ mod tests {
         assert_eq!(plain.cycle_of("debug"), 1);
     }
 
+    /// `$PREV_STATE` and the digest's transition list both come off the fold
+    /// now, rather than from a second reverse walk beside it and a third
+    /// backwards search for each commit's proposal.
+    #[test]
+    fn the_fold_carries_prev_state_and_every_hop_with_its_rationale() {
+        let events = vec![
+            started(),
+            entered("implement", 1, 1),
+            output("implement", 1),
+            proposed("implement", "review").rationale("plan is addressed"),
+            guard_checked("implement", "review"),
+            committed("implement", "review", 1),
+            entered("review", 1, 1),
+            output("review", 1),
+            proposed("review", "done").rationale("no blocking defects"),
+            committed("review", "done", 1),
+        ];
+        let rs = fold(&events);
+
+        assert_eq!(rs.prev_state.as_deref(), Some("review"));
+        assert_eq!(
+            rs.hops,
+            vec![
+                Hop {
+                    from: "implement".into(),
+                    to: "review".into(),
+                    cycle: 1,
+                    rationale: Some("plan is addressed".into()),
+                },
+                Hop {
+                    from: "review".into(),
+                    to: "done".into(),
+                    cycle: 1,
+                    rationale: Some("no blocking defects".into()),
+                },
+            ]
+        );
+    }
+
+    /// A commit the harness took itself — an escalation, an `on_fail: route` —
+    /// has no proposal in front of it, and must not inherit the rationale of
+    /// whatever was proposed earlier.
+    #[test]
+    fn a_hop_with_no_proposal_behind_it_carries_no_rationale() {
+        let events = vec![
+            started(),
+            entered("qa", 1, 1),
+            output("qa", 1),
+            proposed("qa", "done").rationale("looks shippable"),
+            guard_checked("qa", "done"),
+            committed("qa", "done", 1),
+            // The harness routing on its own account, with nothing pending.
+            committed("done", "blocked", 1),
+        ];
+        let rs = fold(&events);
+
+        assert_eq!(rs.hops.len(), 2);
+        assert_eq!(rs.hops[0].rationale.as_deref(), Some("looks shippable"));
+        assert_eq!(
+            rs.hops[1].rationale, None,
+            "nobody proposed this hop, so it must not borrow the last one's words"
+        );
+    }
+
+    /// The harder half of the same rule. `guard_checked` and
+    /// `navigator_invoked` leave the tail occupied on purpose — a crash
+    /// between either and the commit has to resume at the guard, which needs
+    /// the proposal — so a hop the harness redirects arrives with the
+    /// *rejected* proposal still in hand. Matching the edge is what keeps it
+    /// from being read as the reason for a hop it did not cause.
+    #[test]
+    fn a_rejected_proposal_does_not_lend_its_rationale_to_the_reroute() {
+        // `on_fail: route`: the worker wanted `done`, the Judge said no, and
+        // the harness sent the run to `debug` instead.
+        let routed = fold(&[
+            started(),
+            entered("implement", 1, 1),
+            output("implement", 1),
+            proposed("implement", "done").rationale("all criteria met"),
+            guard_checked("implement", "done").guards(GuardOutcome::Skip, GuardOutcome::Fail),
+            committed("implement", "debug", 1),
+        ]);
+        assert_eq!(routed.hops.len(), 1);
+        assert_eq!(
+            routed.hops[0].rationale, None,
+            "the run went to debug *because the judge failed it*, not because \
+             a worker said the criteria were met"
+        );
+
+        // A Navigator reroute: the worker blocked, and the Navigator picked
+        // somewhere other than what the block proposed.
+        let rerouted = fold(&[
+            started(),
+            entered("implement", 1, 1),
+            output("implement", 1),
+            proposed("implement", "done").rationale("I think this is finished"),
+            crate::core::fixtures::navigator("implement", "debug"),
+            committed("implement", "debug", 1),
+        ]);
+        assert_eq!(rerouted.hops[0].rationale, None);
+
+        // And the ratifying case still works through a guard, which is the
+        // whole reason the tail is not simply cleared.
+        let ratified = fold(&[
+            started(),
+            entered("implement", 1, 1),
+            output("implement", 1),
+            proposed("implement", "review").rationale("ready for review"),
+            guard_checked("implement", "review"),
+            committed("implement", "review", 1),
+        ]);
+        assert_eq!(
+            ratified.hops[0].rationale.as_deref(),
+            Some("ready for review")
+        );
+    }
+
     #[test]
     fn navigator_and_worker_usage_accumulate_totals() {
         let events = vec![
@@ -506,20 +637,11 @@ mod tests {
             entered("debug", 1, 1),
             output("debug", 1), // cost_usd 0.5
             proposed("debug", "implement"),
-            ev(EventPayload::NavigatorInvoked {
-                from: "debug".into(),
-                proposal: "blocked".into(),
-                chosen_to: "qa_staging".into(),
-                entry_prompt: Some("try again".into()),
-                usage: Usage {
-                    tokens: 10,
-                    cost_usd: 0.05,
-                },
-            }),
+            crate::core::fixtures::navigator("debug", "qa_staging").usage(10, 0.05),
             committed("debug", "qa_staging", 1),
         ];
         let rs = fold(&events);
-        assert!((rs.totals.cost_usd - 0.55).abs() < 1e-9);
+        assert!((rs.totals.usage.cost_usd - 0.55).abs() < 1e-9);
         assert_eq!(rs.totals.transitions, 1);
         assert_eq!(rs.navigator_invocations, 1);
         assert_eq!(rs.navigator_from("debug"), 1);
@@ -533,36 +655,7 @@ mod tests {
 #[cfg(test)]
 mod entry_head_tests {
     use super::*;
-    use crate::core::event::{Event, EventPayload};
-
-    fn ev(payload: EventPayload) -> Event {
-        Event {
-            ts: "2026-07-24T00:00:00.000Z".into(),
-            elapsed_s: 0,
-            payload,
-        }
-    }
-
-    fn entered(state: &str, cycle: u32, attempt: u32) -> Event {
-        ev(EventPayload::StateEntered {
-            state: state.into(),
-            cycle,
-            attempt,
-            session_id: None,
-            model: "m".into(),
-            thinking: "low".into(),
-            skills: vec![],
-            mcp: vec![],
-        })
-    }
-
-    fn committed(from: &str, to: &str, cycle: u32) -> Event {
-        ev(EventPayload::TransitionCommitted {
-            from: from.into(),
-            to: to.into(),
-            cycle,
-        })
-    }
+    use crate::core::fixtures::{committed, entered};
 
     /// A loop head that is also the entry state — the shape the shipped
     /// `standard-ticket` template has. Its first entry is never committed

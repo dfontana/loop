@@ -16,6 +16,19 @@ pub mod digest;
 
 pub use artifacts::ArtifactStore;
 
+/// Every event in the ledger at `path`, for the callers that want the events
+/// and nothing else.
+///
+/// Six of them wrote `Ledger::open(path)?.read_all()?` — the read-only
+/// commands, and `CliStage`, which holds a path precisely because the engine
+/// holds the writable handle. Opening still repairs a torn trailing line on
+/// the way, which is what makes a ledger left by an interrupted run readable
+/// at all; a caller that also needs to *write*, or wants the raw bytes, still
+/// opens a [`Ledger`] itself.
+pub fn events(path: impl AsRef<Path>) -> Result<Vec<Event>> {
+    Ledger::open(path)?.read_all()
+}
+
 /// An open ledger file. Appends are `fsync`ed per event; reads tolerate (and
 /// discard) a trailing partial line left by a crash mid-write.
 pub struct Ledger {
@@ -43,15 +56,12 @@ impl Ledger {
             fs::create_dir_all(parent)
                 .io_ctx(format!("creating ledger directory {}", parent.display()))?;
         }
-        // The repair already read and parsed every line to find out whether the
-        // last one was torn, so the clock is read off *that* parse rather than
-        // re-reading the file — opening used to cost two full reads and two
-        // full parses before the caller's own `read_all` made it three.
-        let content = repair_torn_tail(&path)?;
-        let elapsed_offset_s = parse_events(&content, &path)?
-            .last()
-            .map(|e| e.elapsed_s)
-            .unwrap_or_default();
+        // One read, one parse. The repair has to parse every line to find out
+        // whether the last one is torn, so it hands the events back and the
+        // clock is read straight off them — this used to throw that parse away
+        // and run `parse_events` over the same string a second time.
+        let (_content, events) = repair_torn_tail(&path)?;
+        let elapsed_offset_s = events.last().map(|e| e.elapsed_s).unwrap_or_default();
         let file = OpenOptions::new()
             .create(true)
             .append(true)
@@ -63,14 +73,6 @@ impl Ledger {
             elapsed_offset_s,
             opened_at: std::time::Instant::now(),
         })
-    }
-
-    /// Only this module's own tests read the path back — every caller opened
-    /// the ledger by a path it had already computed. Kept because a handle that
-    /// can't say what file it is is a bad handle, not because anything needs it.
-    #[allow(dead_code)]
-    pub fn path(&self) -> &Path {
-        &self.path
     }
 
     /// Run seconds accumulated before this handle opened. The engine starts
@@ -98,8 +100,7 @@ impl Ledger {
     /// repair returns the truncated content, and `parse_events` then either
     /// accepts all of it or reports interior corruption.
     pub fn read_raw(&self) -> Result<Vec<u8>> {
-        let content = repair_torn_tail(&self.path)?;
-        parse_events(&content, &self.path)?;
+        let (content, _events) = repair_torn_tail(&self.path)?;
         Ok(content.into_bytes())
     }
 }
@@ -133,8 +134,7 @@ impl LedgerSink for Ledger {
     /// (that is a crash mid-write, and costs at most the last event); a
     /// malformed line *in the middle* is an error, because that is corruption.
     fn read_all(&self) -> Result<Vec<Event>> {
-        let content = read_content(&self.path)?;
-        parse_events(&content, &self.path)
+        Ok(scan(&read_content(&self.path)?, &self.path)?.events)
     }
 }
 
@@ -149,8 +149,61 @@ fn read_content(path: &Path) -> Result<String> {
     }
 }
 
+/// One pass over the ledger's bytes: every whole event, and where a torn
+/// trailing line begins if there is one.
+///
+/// There used to be two scanners. `repair_torn_tail` walked
+/// `split_inclusive('\n')` tracking byte offsets to find the torn line, threw
+/// the events it had just parsed away, and `parse_events` then walked
+/// `.lines()` and parsed all of them again — so opening a ledger cost one read
+/// and *two* full parses, under two different blank-line policies.
+///
+/// Tolerating an unparseable line is positional, and the position is "the last
+/// non-empty line": that is the crash-mid-write case, and it costs at most the
+/// one event still in flight. An unparseable line with any non-empty line after
+/// it is real corruption and an error, because that is history being lost
+/// rather than a write being interrupted (docs/02-how-it-works.md,
+/// docs/05-design-notes.md).
+struct Scan {
+    events: Vec<Event>,
+    /// Byte offset at which a torn trailing line starts.
+    torn_at: Option<usize>,
+}
+
+fn scan(content: &str, path: &Path) -> Result<Scan> {
+    let mut events = Vec::new();
+    // An unparseable line, held until we know whether anything follows it.
+    let mut pending: Option<(usize, usize, String)> = None;
+    let mut offset = 0usize;
+
+    for (i, raw) in content.split_inclusive('\n').enumerate() {
+        let line = raw.strip_suffix('\n').unwrap_or(raw);
+        let start = offset;
+        offset += raw.len();
+        if line.trim().is_empty() {
+            continue;
+        }
+        // Reaching another non-empty line proves the held one was interior.
+        if let Some((_, line_no, err)) = pending.take() {
+            return Err(CoreError::other(format!(
+                "corrupt ledger line {line_no} of {}: {err}",
+                path.display()
+            )));
+        }
+        match serde_json::from_str::<Event>(line) {
+            Ok(event) => events.push(event),
+            Err(e) => pending = Some((start, i + 1, e.to_string())),
+        }
+    }
+
+    Ok(Scan {
+        events,
+        torn_at: pending.map(|(start, ..)| start),
+    })
+}
+
 /// Physically truncate a torn trailing line, so the file on disk is only ever
-/// whole events.
+/// whole events. Returns the repaired contents and the events in them.
 ///
 /// Skipping the torn line at read time is not enough. It is tolerated *because
 /// it is last* — so the moment the harness appends the next event, that torn
@@ -162,90 +215,35 @@ fn read_content(path: &Path) -> Result<String> {
 /// was still in flight, and nothing else. Idempotent, so opening a healthy
 /// ledger does no I/O beyond the read.
 ///
-/// Returns the repaired contents. It has to read and parse the whole file to
-/// decide anything, so handing that back is what lets callers avoid doing the
-/// same read a second time.
-fn repair_torn_tail(path: &Path) -> Result<String> {
-    let content = read_content(path)?;
-    if content.is_empty() {
-        return Ok(content);
-    }
+/// Interior corruption is left on disk untouched — [`scan`] returns an error
+/// before this gets a chance to truncate anything, so evidence is never
+/// silently deleted.
+fn repair_torn_tail(path: &Path) -> Result<(String, Vec<Event>)> {
+    let mut content = read_content(path)?;
+    let scanned = scan(&content, path)?;
 
-    // Only the final non-empty line may be torn. If an earlier line is also
-    // malformed, leave the file untouched so read_all reports the interior
-    // corruption instead of silently deleting evidence.
-    let mut nonempty = Vec::new();
-    let mut offset = 0usize;
-    for line in content.split_inclusive('\n') {
-        let trimmed = line.strip_suffix('\n').unwrap_or(line);
-        if !trimmed.trim().is_empty() {
-            nonempty.push((offset, serde_json::from_str::<Event>(trimmed).is_ok()));
-        }
-        offset += line.len();
-    }
-
-    let Some((torn_start, torn_valid)) = nonempty.last().copied() else {
-        return Ok(content);
+    let Some(torn_at) = scanned.torn_at else {
+        return Ok((content, scanned.events));
     };
-    if torn_valid
-        || nonempty[..nonempty.len() - 1]
-            .iter()
-            .any(|(_, valid)| !valid)
-    {
-        return Ok(content);
-    }
 
     let file = OpenOptions::new()
         .write(true)
         .open(path)
         .io_ctx(format!("opening ledger {} to repair", path.display()))?;
-    file.set_len(torn_start as u64)
+    file.set_len(torn_at as u64)
         .io_ctx(format!("truncating torn tail of {}", path.display()))?;
     file.sync_all()
         .io_ctx(format!("fsyncing repaired ledger {}", path.display()))?;
 
-    let mut content = content;
-    content.truncate(torn_start);
-    Ok(content)
-}
-
-/// Parse newline-delimited events, tolerating an unparseable *last* line (a
-/// crash artifact) but erroring on an unparseable line anywhere else (real
-/// corruption — see docs/02-how-it-works.md and docs/05-design-notes.md).
-fn parse_events(content: &str, path: &Path) -> Result<Vec<Event>> {
-    let lines: Vec<&str> = content.lines().collect();
-    let last_idx = lines.len().saturating_sub(1);
-    let mut events = Vec::with_capacity(lines.len());
-    for (i, line) in lines.iter().enumerate() {
-        if line.trim().is_empty() {
-            continue;
-        }
-        match serde_json::from_str::<Event>(line) {
-            Ok(event) => events.push(event),
-            Err(e) if i == last_idx => {
-                // Trailing unparseable line: the crash-mid-write case. Discard
-                // silently — it is at most one lost event, never lost history.
-                let _ = e;
-                break;
-            }
-            Err(e) => {
-                return Err(CoreError::other(format!(
-                    "corrupt ledger line {} of {}: {e}",
-                    i + 1,
-                    path.display()
-                )));
-            }
-        }
-    }
-    Ok(events)
+    content.truncate(torn_at);
+    Ok((content, scanned.events))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::{
-        Actor, ArtifactRef, Budgets, ErrorKind, GuardOutcome, RunStatus, Totals, Usage,
-    };
+    use crate::core::fixtures::{self, EventExt};
+    use crate::core::{Artifact, Budgets, ErrorKind, GuardOutcome, RunStatus, Totals, Usage};
 
     fn tmp_ledger() -> (tempfile::TempDir, Ledger) {
         let dir = tempfile::tempdir().unwrap();
@@ -259,7 +257,7 @@ mod tests {
         let path = dir.path().join("nested").join("dir").join("ledger.jsonl");
         let ledger = Ledger::open(&path).unwrap();
         assert!(path.exists());
-        assert_eq!(ledger.path(), path);
+        assert_eq!(ledger.path, path);
         assert!(!ledger.started());
     }
 
@@ -288,7 +286,7 @@ mod tests {
                     max_transitions: Some(40),
                 },
             },
-            EventPayload::StateEntered {
+            EventPayload::StateEntered(crate::core::StateEntered {
                 state: "implement".into(),
                 cycle: 1,
                 attempt: 1,
@@ -297,12 +295,12 @@ mod tests {
                 thinking: "high".into(),
                 skills: vec!["spark-build".into()],
                 mcp: vec![],
-            },
+            }),
             EventPayload::WorkerOutput {
                 state: "implement".into(),
                 cycle: 1,
                 summary: "Added the field.".into(),
-                artifacts: vec![ArtifactRef {
+                artifacts: vec![Artifact {
                     name: "diff".into(),
                     path: ".loop/artifacts/implement-1-diff.patch".into(),
                 }],
@@ -316,12 +314,10 @@ mod tests {
                 to: Some("review".into()),
                 blocked: false,
                 rationale: "Done.".into(),
-                by: Actor::Worker,
             },
             EventPayload::GuardChecked {
                 from: "implement".into(),
                 to: "review".into(),
-                structural: GuardOutcome::Pass,
                 check: GuardOutcome::Pass,
                 criteria: GuardOutcome::Pass,
                 check_output: Some("build: OK".into()),
@@ -358,7 +354,10 @@ mod tests {
                 status: RunStatus::Done,
                 terminal_state: Some("done".into()),
                 totals: Totals {
-                    cost_usd: 5.1,
+                    usage: Usage {
+                        tokens: 12_400,
+                        cost_usd: 5.1,
+                    },
                     wallclock_s: 3654,
                     transitions: 11,
                 },
@@ -389,7 +388,7 @@ mod tests {
         ledger
             .append(EventPayload::Note { text: "two".into() })
             .unwrap();
-        let content = fs::read_to_string(ledger.path()).unwrap();
+        let content = fs::read_to_string(&ledger.path).unwrap();
         let lines: Vec<&str> = content.lines().collect();
         assert_eq!(lines.len(), 2);
         for line in &lines {
@@ -398,51 +397,24 @@ mod tests {
         assert!(content.ends_with('\n'));
     }
 
+    /// The two shipped ledger shapes, appended through the real handle and
+    /// read back. Built from `core::fixtures` rather than from hand-written
+    /// `EventPayload` literals: the round-trip test above is the one that
+    /// genuinely needs the literals, because it is testing the wire format —
+    /// these two only want five events in the right order, and spelling out
+    /// eight `StateEntered` fields to get one was ~80 lines of ceremony.
     #[test]
     fn fixture_clean_run_reads_back_in_order() {
         let (_dir, mut ledger) = tmp_ledger();
-        ledger
-            .append(EventPayload::RunStarted {
-                ticket: "T-1".into(),
-                machine_hash: "sha256:1".into(),
-                budgets: Budgets::default(),
-            })
-            .unwrap();
-        ledger
-            .append(EventPayload::StateEntered {
-                state: "implement".into(),
-                cycle: 1,
-                attempt: 1,
-                session_id: None,
-                model: "m".into(),
-                thinking: "high".into(),
-                skills: vec![],
-                mcp: vec![],
-            })
-            .unwrap();
-        ledger
-            .append(EventPayload::WorkerOutput {
-                state: "implement".into(),
-                cycle: 1,
-                summary: "done".into(),
-                artifacts: vec![],
-                usage: Usage::default(),
-            })
-            .unwrap();
-        ledger
-            .append(EventPayload::TransitionCommitted {
-                from: "implement".into(),
-                to: "done".into(),
-                cycle: 1,
-            })
-            .unwrap();
-        ledger
-            .append(EventPayload::RunFinished {
-                status: RunStatus::Done,
-                terminal_state: Some("done".into()),
-                totals: Totals::default(),
-            })
-            .unwrap();
+        for e in [
+            fixtures::started("T-1"),
+            fixtures::entered("implement", 1, 1),
+            fixtures::output("implement", 1),
+            fixtures::committed("implement", "done", 1),
+            fixtures::finished(RunStatus::Done, "done"),
+        ] {
+            ledger.append(e.payload).unwrap();
+        }
 
         let events = ledger.read_all().unwrap();
         let kinds: Vec<_> = events.iter().map(|e| e.kind()).collect();
@@ -461,25 +433,12 @@ mod tests {
     #[test]
     fn fixture_crash_mid_stage_has_state_entered_with_no_worker_output() {
         let (_dir, mut ledger) = tmp_ledger();
-        ledger
-            .append(EventPayload::RunStarted {
-                ticket: "T-1".into(),
-                machine_hash: "sha256:1".into(),
-                budgets: Budgets::default(),
-            })
-            .unwrap();
-        ledger
-            .append(EventPayload::StateEntered {
-                state: "implement".into(),
-                cycle: 1,
-                attempt: 1,
-                session_id: Some("sess-1".into()),
-                model: "m".into(),
-                thinking: "high".into(),
-                skills: vec![],
-                mcp: vec![],
-            })
-            .unwrap();
+        for e in [
+            fixtures::started("T-1"),
+            fixtures::entered("implement", 1, 1).session(Some("sess-1")),
+        ] {
+            ledger.append(e.payload).unwrap();
+        }
         // Crash here: no worker_output follows.
 
         let events = ledger.read_all().unwrap();
@@ -517,7 +476,7 @@ mod tests {
 
         // Simulate a crash mid-write: append a truncated, unparseable JSON
         // fragment with no trailing newline.
-        let mut file = OpenOptions::new().append(true).open(ledger.path()).unwrap();
+        let mut file = OpenOptions::new().append(true).open(&ledger.path).unwrap();
         write!(
             file,
             "{{\"ts\":\"2026-01-01T00:00:00Z\",\"type\":\"note\",\"tex"
@@ -542,7 +501,7 @@ mod tests {
             .unwrap();
 
         {
-            let mut file = OpenOptions::new().append(true).open(ledger.path()).unwrap();
+            let mut file = OpenOptions::new().append(true).open(&ledger.path).unwrap();
             writeln!(file, "not even close to json").unwrap();
             file.sync_data().unwrap();
         }

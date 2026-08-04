@@ -77,66 +77,52 @@ pub struct Machine {
     pub pi_extensions: Option<Vec<String>>,
 }
 
-/// A partial model selection. Every level of the four-layer chain writes the
-/// same three keys, and all three are optional at every level — filling in
-/// defaults here would defeat the layering, since the stage prompt frontmatter
-/// layer sits between a state and the machine defaults.
-#[derive(Debug, Default, Deserialize)]
-#[serde(rename_all = "kebab-case", deny_unknown_fields)]
-pub struct ModelChoice {
-    #[serde(default)]
-    pub provider: Option<String>,
-    #[serde(default)]
-    pub model: Option<String>,
-    #[serde(default)]
-    pub thinking: Option<Thinking>,
-}
-
-/// The one place that knows how the `provider`/`model`/`thinking` triple
-/// becomes an IR [`crate::core::ModelChoice`].
+/// Declare the `provider`/`model`/`thinking` triple, plus whatever else a
+/// struct carries, and derive its conversion to an IR
+/// [`crate::core::ModelChoice`].
 ///
-/// Four wire types spell that triple — `ModelChoice`, `Navigator`, `Defaults`,
-/// and `State` — because `#[serde(flatten)]` cannot be combined with
-/// `deny_unknown_fields`, and this module's whole premise is that every struct
-/// keeps the latter. They can still share the *conversion*, which is what
-/// stops a fifth model knob from having to be remembered in four constructors
-/// the compiler cannot relate to each other.
-pub fn model_choice(
-    provider: &Option<String>,
-    model: &Option<String>,
-    thinking: Option<Thinking>,
-) -> crate::core::ModelChoice {
-    crate::core::ModelChoice {
-        provider: provider.clone(),
-        model: model.clone(),
-        thinking,
-    }
+/// Three wire types spell that triple — `ModelChoice`, `Defaults` and `State` —
+/// because `#[serde(flatten)]` cannot be combined with `deny_unknown_fields`,
+/// and this module's whole premise is that every struct keeps the latter. A
+/// macro is the way to keep one declaration when serde will not: it was three
+/// hand-written copies, two `to_ir` impls and a free function, none of which the
+/// compiler could relate to each other, so a fourth knob was four edits.
+macro_rules! model_keys {
+    (
+        $(#[$meta:meta])*
+        pub struct $name:ident { $($(#[$fmeta:meta])* pub $field:ident: $ty:ty),* $(,)? }
+    ) => {
+        $(#[$meta])*
+        #[derive(Debug, Default, Deserialize)]
+        #[serde(rename_all = "kebab-case", deny_unknown_fields)]
+        pub struct $name {
+            #[serde(default)]
+            pub provider: Option<String>,
+            #[serde(default)]
+            pub model: Option<String>,
+            #[serde(default)]
+            pub thinking: Option<Thinking>,
+            $($(#[$fmeta])* #[serde(default)] pub $field: $ty,)*
+        }
+
+        impl $name {
+            pub fn to_ir(&self) -> crate::core::ModelChoice {
+                crate::core::ModelChoice {
+                    provider: self.provider.clone(),
+                    model: self.model.clone(),
+                    thinking: self.thinking,
+                }
+            }
+        }
+    };
 }
 
-impl ModelChoice {
-    pub fn to_ir(&self) -> crate::core::ModelChoice {
-        model_choice(&self.provider, &self.model, self.thinking)
-    }
-}
-
-/// The Navigator role: a model choice plus the one knob only it has.
-#[derive(Debug, Default, Deserialize)]
-#[serde(rename_all = "kebab-case", deny_unknown_fields)]
-pub struct Navigator {
-    #[serde(default)]
-    pub provider: Option<String>,
-    #[serde(default)]
-    pub model: Option<String>,
-    #[serde(default)]
-    pub thinking: Option<Thinking>,
-    #[serde(default)]
-    pub max_invocations: Option<u32>,
-}
-
-impl Navigator {
-    pub fn to_ir(&self) -> crate::core::ModelChoice {
-        model_choice(&self.provider, &self.model, self.thinking)
-    }
+model_keys! {
+    /// A partial model selection. Every level of the four-layer chain writes
+    /// the same three keys, and all three are optional at every level —
+    /// filling in defaults here would defeat the layering, since the stage
+    /// prompt frontmatter layer sits between a state and the machine defaults.
+    pub struct ModelChoice {}
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -160,48 +146,41 @@ impl Budgets {
     }
 }
 
-/// Machine-level fallbacks: a model choice, plus skill and MCP sets that stack
-/// under every state's own.
-#[derive(Debug, Default, Deserialize)]
-#[serde(rename_all = "kebab-case", deny_unknown_fields)]
-pub struct Defaults {
-    #[serde(default)]
-    pub provider: Option<String>,
-    #[serde(default)]
-    pub model: Option<String>,
-    #[serde(default)]
-    pub thinking: Option<Thinking>,
-    #[serde(default)]
-    pub skills: Vec<String>,
-    #[serde(default)]
-    pub mcp: Vec<String>,
+model_keys! {
+    /// The Navigator role: a model choice plus the one knob only it has.
+    ///
+    /// The survey suggested moving `:max-invocations` to a top-level key so
+    /// this struct could collapse into `ModelChoice`. It does not need to: the
+    /// macro takes extra fields, so the authored grouping stays where an author
+    /// would look for it and the duplication goes anyway.
+    pub struct Navigator {
+        pub max_invocations: Option<u32>,
+    }
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "kebab-case", deny_unknown_fields)]
-pub struct State {
-    /// A bare name resolved through the toolbox, or a `/`-containing path.
-    /// Mutually exclusive with `prompt`; exactly one is required, which serde
-    /// cannot express and `convert` checks.
-    #[serde(default)]
-    pub stage_prompt: Option<String>,
-    /// An inline prompt, for a stage too one-off to deserve a file.
-    #[serde(default)]
-    pub prompt: Option<String>,
-    #[serde(default)]
-    pub provider: Option<String>,
-    #[serde(default)]
-    pub model: Option<String>,
-    #[serde(default)]
-    pub thinking: Option<Thinking>,
-    #[serde(default)]
-    pub skills: Vec<String>,
-    #[serde(default)]
-    pub mcp: Vec<String>,
-    /// What this stage is for. Worth writing: it is what the Navigator reads
-    /// when it decides where a stuck run should go.
-    #[serde(default)]
-    pub description: Option<String>,
+model_keys! {
+    /// Machine-level fallbacks: a model choice, plus skill and MCP sets that
+    /// stack under every state's own.
+    pub struct Defaults {
+        pub skills: Vec<String>,
+        pub mcp: Vec<String>,
+    }
+}
+
+model_keys! {
+    pub struct State {
+        /// A bare name resolved through the toolbox, or a `/`-containing path.
+        /// Mutually exclusive with `prompt`; exactly one is required, which
+        /// serde cannot express and `convert` checks.
+        pub stage_prompt: Option<String>,
+        /// An inline prompt, for a stage too one-off to deserve a file.
+        pub prompt: Option<String>,
+        pub skills: Vec<String>,
+        pub mcp: Vec<String>,
+        /// What this stage is for. Worth writing: it is what the Navigator
+        /// reads when it decides where a stuck run should go.
+        pub description: Option<String>,
+    }
 }
 
 #[derive(Debug, Deserialize)]

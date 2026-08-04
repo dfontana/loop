@@ -94,7 +94,6 @@ pub fn exec_check(
 
     Ok(CheckOutcome {
         passed: !timed_out && exit_code == Some(0),
-        exit_code,
         output: output.trim().to_string(),
     })
 }
@@ -123,7 +122,6 @@ mod tests {
     fn zero_exit_passes_and_captures_stdout() {
         let outcome = run("echo hello");
         assert!(outcome.passed);
-        assert_eq!(outcome.exit_code, Some(0));
         assert_eq!(outcome.output, "hello");
     }
 
@@ -134,7 +132,6 @@ mod tests {
     fn nonzero_exit_fails_without_erroring() {
         let outcome = run("echo 'boom' >&2; exit 3");
         assert!(!outcome.passed);
-        assert_eq!(outcome.exit_code, Some(3));
         assert_eq!(outcome.output, "boom");
     }
 
@@ -175,7 +172,6 @@ mod tests {
     fn a_hanging_check_times_out_and_fails() {
         let outcome = exec_check("sleep 30", Path::new("."), &[], 1).unwrap();
         assert!(!outcome.passed);
-        assert_eq!(outcome.exit_code, None);
         assert!(outcome.output.contains("timed out"), "got {outcome:?}");
     }
 

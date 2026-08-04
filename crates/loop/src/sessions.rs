@@ -11,7 +11,9 @@
 //! and the choosing is the shell's job: `loop sessions | fzf` does what the
 //! picker did, and every other pipeline the picker could not.
 
+use crate::core::text::{brief, one_line};
 use crate::core::{Event, EventPayload};
+use crate::episode::Episode;
 
 /// What the ledger says became of an attempt, as far as this ledger can tell.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -35,24 +37,43 @@ impl Outcome {
 }
 
 /// One Worker attempt a human can reopen.
+///
+/// Holds its [`Episode`] rather than copying the entry's fields out of it.
+/// `episode.rs` states the rule — "the entry's fields are reached through
+/// `Episode::header`, so `state_entered` is declared once" — and this struct
+/// used to break it one module over, re-declaring `state`, `cycle`, `attempt`
+/// and `ts` as owned copies and cloning all four per attempt.
 #[derive(Clone, Debug)]
-pub struct Candidate {
+pub struct Candidate<'e> {
+    episode: Episode<'e>,
     /// The id pi persisted the session under. Non-empty by construction, and
     /// the only thing `loop session` needs to be handed.
-    pub session_id: String,
-    pub state: String,
-    pub cycle: u32,
-    pub attempt: u32,
-    /// The `state_entered` timestamp, ISO-8601 as written.
-    pub ts: String,
+    pub session_id: &'e str,
     /// The Worker's own digest, when it got as far as reporting one.
-    pub summary: Option<String>,
+    pub summary: Option<&'e str>,
     /// Error details recorded inside this attempt's episode.
-    pub errors: Vec<String>,
+    pub errors: Vec<&'e str>,
     pub outcome: Outcome,
 }
 
-impl Candidate {
+impl<'e> Candidate<'e> {
+    pub fn state(&self) -> &'e str {
+        self.episode.state()
+    }
+
+    pub fn cycle(&self) -> u32 {
+        self.episode.cycle()
+    }
+
+    pub fn attempt(&self) -> u32 {
+        self.episode.attempt()
+    }
+
+    /// The `state_entered` timestamp, ISO-8601 as written.
+    pub fn ts(&self) -> &'e str {
+        &self.episode.entered.ts
+    }
+
     pub fn is_complete(&self) -> bool {
         self.outcome == Outcome::Finished
     }
@@ -64,7 +85,7 @@ impl Candidate {
     /// that gets split on whitespace, and a space between the date and the time
     /// would shift every field number after it.
     pub fn short_ts(&self) -> String {
-        match chrono::DateTime::parse_from_rfc3339(&self.ts) {
+        match chrono::DateTime::parse_from_rfc3339(self.ts()) {
             Ok(dt) => dt
                 .with_timezone(&chrono::Local)
                 .format("%Y-%m-%dT%H:%M")
@@ -72,7 +93,7 @@ impl Candidate {
             // A hand-edited or foreign timestamp still has to render: the column
             // is for recognition, and an unparseable stamp is better shown than
             // swallowed.
-            Err(_) => one_line(&self.ts),
+            Err(_) => one_line(self.ts()),
         }
     }
 
@@ -81,9 +102,9 @@ impl Candidate {
     pub fn headline(&self) -> String {
         format!(
             "{} — cycle {}, attempt {} — {} — {}",
-            self.state,
-            self.cycle,
-            self.attempt,
+            self.state(),
+            self.cycle(),
+            self.attempt(),
             self.short_ts(),
             self.outcome.label(),
         )
@@ -92,7 +113,6 @@ impl Candidate {
     /// The Worker's summary, collapsed to one line, when it left one.
     pub fn detail(&self) -> Option<String> {
         self.summary
-            .as_deref()
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(one_line)
@@ -109,10 +129,6 @@ impl Candidate {
     }
 }
 
-fn one_line(s: &str) -> String {
-    s.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
 /// Build one candidate per usable `state_entered`, **in ledger order**.
 ///
 /// A projection of [`crate::episode`]: that module owns which events belong to
@@ -127,11 +143,11 @@ fn one_line(s: &str) -> String {
 /// [`latest`] reads from the end of. The timestamp is display metadata and never
 /// the sort key: a hand-edited or clock-skewed `ts` must not be able to reorder
 /// history.
-pub fn candidates(events: &[Event]) -> Vec<Candidate> {
+pub fn candidates(events: &[Event]) -> Vec<Candidate<'_>> {
     crate::episode::episodes(events)
         .into_iter()
         .filter_map(|ep| {
-            let session_id = ep.session_id?;
+            let session_id = ep.session()?;
 
             let mut summary = None;
             let mut errors = Vec::new();
@@ -142,8 +158,8 @@ pub fn candidates(events: &[Event]) -> Vec<Candidate> {
                         cycle: c,
                         summary: text,
                         ..
-                    } if s == ep.state && *c == ep.cycle => summary = Some(text.clone()),
-                    EventPayload::Error { detail, .. } => errors.push(detail.clone()),
+                    } if s == ep.state() && *c == ep.cycle() => summary = Some(text.as_str()),
+                    EventPayload::Error { detail, .. } => errors.push(detail.as_str()),
                     _ => {}
                 }
             }
@@ -157,11 +173,8 @@ pub fn candidates(events: &[Event]) -> Vec<Candidate> {
             };
 
             Some(Candidate {
-                session_id: session_id.to_string(),
-                state: ep.state.clone(),
-                cycle: ep.cycle,
-                attempt: ep.attempt,
-                ts: ep.entered.ts.clone(),
+                episode: ep,
+                session_id,
                 summary,
                 errors,
                 outcome,
@@ -170,27 +183,25 @@ pub fn candidates(events: &[Event]) -> Vec<Candidate> {
         .collect()
 }
 
-/// The ticket this ledger belongs to, for the line `loop session` prints.
-pub fn ticket(events: &[Event]) -> Option<String> {
-    events.iter().find_map(|e| match &e.payload {
-        EventPayload::RunStarted { ticket, .. } => Some(ticket.clone()),
-        _ => None,
-    })
-}
-
 /// Keep only attempts at exactly this state. An *exact* filter, not a fuzzy one:
 /// `loop sessions implement` must not also list `implement-hotfix`.
-pub fn filter_state<'a>(candidates: &'a [Candidate], state: Option<&str>) -> Vec<&'a Candidate> {
+pub fn filter_state<'a, 'e>(
+    candidates: &'a [Candidate<'e>],
+    state: Option<&str>,
+) -> Vec<&'a Candidate<'e>> {
     candidates
         .iter()
-        .filter(|c| state.is_none_or(|s| c.state == s))
+        .filter(|c| state.is_none_or(|s| c.state() == s))
         .collect()
 }
 
 /// The `--latest` policy: the last candidate in ledger order, after the state
 /// filter. Automation asking for "the last implement attempt" wants one
 /// deterministic answer, so there is nothing configurable about it.
-pub fn latest<'a>(candidates: &'a [Candidate], state: Option<&str>) -> Option<&'a Candidate> {
+pub fn latest<'a, 'e>(
+    candidates: &'a [Candidate<'e>],
+    state: Option<&str>,
+) -> Option<&'a Candidate<'e>> {
     filter_state(candidates, state).last().copied()
 }
 
@@ -200,7 +211,7 @@ pub fn latest<'a>(candidates: &'a [Candidate], state: Option<&str>) -> Option<&'
 /// attempt re-enters the same state, cycle, and attempt, and `stage.rs` derives
 /// the id from exactly those four — the winner is the later episode, whose
 /// evidence is the one that describes the session as it now stands.
-pub fn find<'a>(candidates: &'a [Candidate], id: &str) -> Option<&'a Candidate> {
+pub fn find<'a, 'e>(candidates: &'a [Candidate<'e>], id: &str) -> Option<&'a Candidate<'e>> {
     candidates.iter().rev().find(|c| c.session_id == id)
 }
 
@@ -209,14 +220,8 @@ pub fn find<'a>(candidates: &'a [Candidate], id: &str) -> Option<&'a Candidate> 
 /// Only used to tell someone who typed a state where `loop session` wants an id
 /// what they actually did — which is the difference between a dead end and a
 /// working command.
-pub fn states(candidates: &[Candidate]) -> Vec<&str> {
-    let mut out: Vec<&str> = Vec::new();
-    for c in candidates {
-        if !out.contains(&c.state.as_str()) {
-            out.push(&c.state);
-        }
-    }
-    out
+pub fn states<'e>(candidates: &[Candidate<'e>]) -> Vec<&'e str> {
+    crate::core::dedup(candidates.iter().map(|c| c.state()))
 }
 
 /// The `loop sessions` listing: one line per attempt, oldest first.
@@ -232,45 +237,53 @@ pub fn states(candidates: &[Candidate]) -> Vec<&str> {
 /// Columns are padded to the width of the rows actually printed rather than to
 /// a fixed guess, which is what keeps a run of short state names from being
 /// spread across half a terminal.
-pub fn listing(candidates: &[&Candidate]) -> String {
-    let cells: Vec<[String; 6]> = candidates
+pub fn listing(candidates: &[&Candidate<'_>]) -> String {
+    // Cycle and attempt are counts, so they align right; a two-digit cycle must
+    // not push the columns after it around.
+    const RIGHT: [bool; 6] = [false, false, true, true, false, false];
+
+    let rows: Vec<([String; 6], Option<String>)> = candidates
         .iter()
         .map(|c| {
-            [
-                c.short_ts(),
-                c.state.clone(),
-                c.cycle.to_string(),
-                c.attempt.to_string(),
-                c.outcome.label().to_string(),
-                c.session_id.clone(),
-            ]
+            (
+                [
+                    c.short_ts(),
+                    c.state().to_string(),
+                    c.cycle().to_string(),
+                    c.attempt().to_string(),
+                    c.outcome.label().to_string(),
+                    c.session_id.to_string(),
+                ],
+                c.evidence().map(|e| brief(&e, 72)),
+            )
         })
         .collect();
 
     let mut widths = [0usize; 6];
-    for row in &cells {
-        for (w, cell) in widths.iter_mut().zip(row) {
+    for (cells, _) in &rows {
+        for (w, cell) in widths.iter_mut().zip(cells) {
             *w = (*w).max(cell.chars().count());
         }
     }
 
     let mut out = String::new();
-    for (row, c) in cells.iter().zip(candidates) {
-        let mut line = String::new();
-        for (i, (cell, w)) in row.iter().zip(widths).enumerate() {
-            if i > 0 {
-                line.push_str("  ");
-            }
-            // Cycle and attempt are counts, so they align on the right; a
-            // two-digit cycle must not push the columns after it around.
-            match i {
-                2 | 3 => line.push_str(&format!("{cell:>w$}")),
-                _ => line.push_str(&format!("{cell:<w$}")),
-            }
-        }
-        if let Some(evidence) = c.evidence() {
+    for (cells, evidence) in &rows {
+        let mut line = cells
+            .iter()
+            .zip(widths)
+            .zip(RIGHT)
+            .map(|((cell, w), right)| {
+                if right {
+                    format!("{cell:>w$}")
+                } else {
+                    format!("{cell:<w$}")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("  ");
+        if let Some(evidence) = evidence {
             line.push_str("  ");
-            line.push_str(&crate::output::truncate(&evidence, 72));
+            line.push_str(evidence);
         }
         // No trailing padding: an attempt that reported nothing must not leave
         // whitespace for a `grep -E '…$'` to trip over.
@@ -283,63 +296,28 @@ pub fn listing(candidates: &[&Candidate]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::{ArtifactRef, Budgets, ErrorKind, RunStatus, Totals, Usage};
-
-    fn ev(ts: &str, payload: EventPayload) -> Event {
-        Event {
-            ts: ts.into(),
-            elapsed_s: 0,
-            payload,
-        }
-    }
+    use crate::core::RunStatus;
+    use crate::core::fixtures::EventExt;
 
     fn entered(ts: &str, state: &str, cycle: u32, attempt: u32, session: Option<&str>) -> Event {
-        ev(
-            ts,
-            EventPayload::StateEntered {
-                state: state.into(),
-                cycle,
-                attempt,
-                session_id: session.map(str::to_string),
-                model: "claude-sonnet-5".into(),
-                thinking: "medium".into(),
-                skills: vec![],
-                mcp: vec![],
-            },
-        )
+        crate::core::fixtures::entered(state, cycle, attempt)
+            .at(ts)
+            .session(session)
     }
 
     fn output(ts: &str, state: &str, cycle: u32, summary: &str) -> Event {
-        ev(
-            ts,
-            EventPayload::WorkerOutput {
-                state: state.into(),
-                cycle,
-                summary: summary.into(),
-                artifacts: vec![ArtifactRef {
-                    name: "diff".into(),
-                    path: ".loop/artifacts/d.patch".into(),
-                }],
-                usage: Usage {
-                    tokens: 10,
-                    cost_usd: 0.02,
-                },
-            },
-        )
+        crate::core::fixtures::output(state, cycle)
+            .at(ts)
+            .summary(summary)
+            .artifact("diff", ".loop/artifacts/d.patch")
+            .usage(10, 0.02)
     }
 
     /// The shape every test below reads against: two `implement` attempts (the
     /// first crashed), one `review`, and one still-running `test`.
     fn ledger() -> Vec<Event> {
         vec![
-            ev(
-                "2026-07-26T12:00:00.000Z",
-                EventPayload::RunStarted {
-                    ticket: "PROJ-1".into(),
-                    machine_hash: "x".into(),
-                    budgets: Budgets::default(),
-                },
-            ),
+            crate::core::fixtures::started("PROJ-1").at("2026-07-26T12:00:00.000Z"),
             entered(
                 "2026-07-26T12:01:00.000Z",
                 "implement",
@@ -347,14 +325,8 @@ mod tests {
                 1,
                 Some("s-i-1-1"),
             ),
-            ev(
-                "2026-07-26T12:02:00.000Z",
-                EventPayload::Error {
-                    state: Some("implement".into()),
-                    kind: ErrorKind::Transient,
-                    detail: "executor lost".into(),
-                },
-            ),
+            crate::core::fixtures::error("implement", "executor lost")
+                .at("2026-07-26T12:02:00.000Z"),
             entered(
                 "2026-07-26T12:03:00.000Z",
                 "implement",
@@ -376,10 +348,11 @@ mod tests {
 
     #[test]
     fn candidates_are_in_ledger_order_and_carry_their_episode() {
-        let cs = candidates(&ledger());
+        let events = ledger();
+        let cs = candidates(&events);
         let rows: Vec<(&str, u32, Outcome)> = cs
             .iter()
-            .map(|c| (c.state.as_str(), c.attempt, c.outcome))
+            .map(|c| (c.state(), c.attempt(), c.outcome))
             .collect();
         assert_eq!(
             rows,
@@ -390,7 +363,7 @@ mod tests {
                 ("test", 1, Outcome::Incomplete),
             ]
         );
-        assert_eq!(cs[2].summary.as_deref(), Some("Found a defect."));
+        assert_eq!(cs[2].summary, Some("Found a defect."));
         assert_eq!(cs[0].errors, vec!["executor lost".to_string()]);
     }
 
@@ -399,19 +372,20 @@ mod tests {
     /// regresses, a crashed attempt starts advertising the retry's work.
     #[test]
     fn a_summary_never_leaks_backwards_into_an_earlier_attempt() {
-        let cs = candidates(&ledger());
+        let events = ledger();
+        let cs = candidates(&events);
         let crashed = cs
             .iter()
-            .find(|c| c.state == "implement" && c.attempt == 1)
+            .find(|c| c.state() == "implement" && c.attempt() == 1)
             .unwrap();
         assert!(crashed.summary.is_none(), "{crashed:?}");
         assert_eq!(crashed.outcome, Outcome::Crashed);
         // …while the retry that *did* report keeps its own summary.
         let retried = cs
             .iter()
-            .find(|c| c.state == "implement" && c.attempt == 2)
+            .find(|c| c.state() == "implement" && c.attempt() == 2)
             .unwrap();
-        assert_eq!(retried.summary.as_deref(), Some("Added the guard."));
+        assert_eq!(retried.summary, Some("Added the guard."));
     }
 
     #[test]
@@ -420,8 +394,8 @@ mod tests {
         events.push(entered("2026-07-26T12:08:00.000Z", "open-pr", 1, 1, None));
         events.push(entered("2026-07-26T12:09:00.000Z", "qa", 1, 1, Some("  ")));
         let cs = candidates(&events);
-        assert!(cs.iter().all(|c| c.state != "open-pr"));
-        assert!(cs.iter().all(|c| c.state != "qa"));
+        assert!(cs.iter().all(|c| c.state() != "open-pr"));
+        assert!(cs.iter().all(|c| c.state() != "qa"));
     }
 
     #[test]
@@ -437,7 +411,7 @@ mod tests {
             Some("s-p"),
         ));
         let cs = candidates(&events);
-        assert_eq!(cs.last().unwrap().state, "open-pr");
+        assert_eq!(cs.last().unwrap().state(), "open-pr");
         assert_eq!(latest(&cs, None).unwrap().session_id, "s-p");
     }
 
@@ -454,15 +428,16 @@ mod tests {
         let cs = candidates(&events);
         let filtered = filter_state(&cs, Some("implement"));
         assert_eq!(filtered.len(), 2);
-        assert!(filtered.iter().all(|c| c.state == "implement"));
+        assert!(filtered.iter().all(|c| c.state() == "implement"));
     }
 
     #[test]
     fn latest_respects_the_state_filter_and_ledger_order() {
-        let cs = candidates(&ledger());
-        assert_eq!(latest(&cs, None).unwrap().state, "test");
+        let events = ledger();
+        let cs = candidates(&events);
+        assert_eq!(latest(&cs, None).unwrap().state(), "test");
         let li = latest(&cs, Some("implement")).unwrap();
-        assert_eq!((li.state.as_str(), li.attempt), ("implement", 2));
+        assert_eq!((li.state(), li.attempt()), ("implement", 2));
         assert!(latest(&cs, Some("nope")).is_none());
     }
 
@@ -470,9 +445,10 @@ mod tests {
     /// and nothing about the attempt's text can make another one answer for it.
     #[test]
     fn an_id_resolves_to_exactly_its_own_attempt() {
-        let cs = candidates(&ledger());
+        let events = ledger();
+        let cs = candidates(&events);
         let found = find(&cs, "s-i-1-1").unwrap();
-        assert_eq!((found.state.as_str(), found.attempt), ("implement", 1));
+        assert_eq!((found.state(), found.attempt()), ("implement", 1));
         assert_eq!(found.outcome, Outcome::Crashed);
         assert!(find(&cs, "implement").is_none());
         assert!(find(&cs, "s-i-1-1 ").is_none());
@@ -485,14 +461,7 @@ mod tests {
     fn a_repeated_id_resolves_to_the_later_episode() {
         let events = vec![
             entered("2026-07-26T12:00:00.000Z", "flaky", 1, 1, Some("dup")),
-            ev(
-                "2026-07-26T12:00:10.000Z",
-                EventPayload::Error {
-                    state: Some("flaky".into()),
-                    kind: ErrorKind::Transient,
-                    detail: "executor lost".into(),
-                },
-            ),
+            crate::core::fixtures::error("flaky", "executor lost").at("2026-07-26T12:00:10.000Z"),
             entered("2026-07-26T12:00:20.000Z", "flaky", 1, 1, Some("dup")),
             output("2026-07-26T12:00:30.000Z", "flaky", 1, "second time lucky"),
         ];
@@ -546,7 +515,8 @@ mod tests {
     /// ran, when, how it ended, and the evidence for that.
     #[test]
     fn a_listing_row_carries_the_evidence_for_its_outcome() {
-        let cs = candidates(&ledger());
+        let events = ledger();
+        let cs = candidates(&events);
         let text = listing(&filter_state(&cs, None));
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines.len(), 4);
@@ -583,15 +553,17 @@ mod tests {
 
     #[test]
     fn states_are_distinct_and_in_first_seen_order() {
-        let cs = candidates(&ledger());
+        let events = ledger();
+        let cs = candidates(&events);
         assert_eq!(states(&cs), vec!["implement", "review", "test"]);
         assert!(states(&[]).is_empty());
     }
 
     #[test]
     fn the_opening_line_reads_the_way_the_contract_says() {
-        let cs = candidates(&ledger());
-        let c = cs.iter().find(|c| c.attempt == 2).unwrap();
+        let events = ledger();
+        let cs = candidates(&events);
+        let c = cs.iter().find(|c| c.attempt() == 2).unwrap();
         // Rendered in the local zone, so assert on the stable parts.
         let headline = c.headline();
         assert!(
@@ -602,20 +574,18 @@ mod tests {
         assert_eq!(c.detail().as_deref(), Some("Added the guard."));
     }
 
+    /// The ticket `loop session` names comes off `run_started` — through
+    /// [`crate::core::run_started`], which every other reader of that line
+    /// goes through too.
     #[test]
     fn ticket_comes_off_run_started_and_is_absent_without_one() {
+        let ticket =
+            |events: &[Event]| crate::core::run_started(events).map(|s| s.ticket.to_string());
         assert_eq!(ticket(&ledger()).as_deref(), Some("PROJ-1"));
         assert!(ticket(&[]).is_none());
         assert!(
-            ticket(&[ev(
-                "2026-07-26T12:00:00.000Z",
-                EventPayload::RunFinished {
-                    status: RunStatus::Done,
-                    terminal_state: None,
-                    totals: Totals::default(),
-                }
-            )])
-            .is_none()
+            ticket(&[crate::core::fixtures::finished(RunStatus::Done, "done")]).is_none(),
+            "a ledger that only ends has no ticket to name"
         );
     }
 

@@ -10,5 +10,14 @@ name = "mock-pi"
 path = "src/main.rs"
 
 [dependencies]
+# The harness itself, for the three roles' wire types and the Judge's verdict
+# tokens. A stand-in that spells the contract out again is a stand-in that can
+# disagree with the thing it stands in for — silently, and worst of all in the
+# Judge, where an unrecognized token reads as a failing verdict rather than as
+# a broken contract.
+loop = { path = "../loop" }
 serde.workspace = true
 serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

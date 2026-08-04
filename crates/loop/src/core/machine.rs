@@ -39,19 +39,6 @@ impl Thinking {
             Self::Max => "max",
         }
     }
-
-    pub fn parse(s: &str) -> Option<Self> {
-        Some(match s {
-            "off" => Self::Off,
-            "minimal" => Self::Minimal,
-            "low" => Self::Low,
-            "medium" => Self::Medium,
-            "high" => Self::High,
-            "xhigh" => Self::Xhigh,
-            "max" => Self::Max,
-            _ => return None,
-        })
-    }
 }
 
 impl fmt::Display for Thinking {
@@ -88,6 +75,21 @@ pub enum StagePromptRef {
     Inline(String),
 }
 
+impl StagePromptRef {
+    /// Which kind of reference an authored `:stage-prompt` value is.
+    ///
+    /// The `/` rule is [`crate::core::names_a_path`], shared with skill
+    /// resolution rather than spelled out here — the two kinds offer the same
+    /// escape hatch and must agree on what triggers it.
+    pub fn parse(value: &str) -> Self {
+        if crate::core::names_a_path(value) {
+            Self::Path(PathBuf::from(value))
+        } else {
+            Self::Named(value.to_string())
+        }
+    }
+}
+
 /// A partially-specified model choice: whatever one layer of config declared.
 ///
 /// Four layers stack, most specific first: the **state**, the **stage prompt's
@@ -119,10 +121,6 @@ impl ModelChoice {
             model: self.model.unwrap_or_else(|| base.model.clone()),
             thinking: self.thinking.unwrap_or(base.thinking),
         }
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.provider.is_none() && self.model.is_none() && self.thinking.is_none()
     }
 }
 
@@ -254,18 +252,22 @@ pub struct Budgets {
 impl Budgets {
     /// Take the tighter of each field. A machine may tighten global budgets,
     /// never loosen them.
+    ///
+    /// An absent bound is "unbounded", so it loses to any present one — which
+    /// is why this is not `Option::min` (that would make `None` win on `usd`,
+    /// where `f64` has no `Ord` anyway).
     pub fn tighten(self, other: Budgets) -> Budgets {
-        fn min_opt<T: PartialOrd>(a: Option<T>, b: Option<T>) -> Option<T> {
+        fn tighter<T: PartialOrd>(a: Option<T>, b: Option<T>) -> Option<T> {
             match (a, b) {
-                (Some(a), Some(b)) => Some(if a < b { a } else { b }),
-                (Some(a), None) => Some(a),
+                (Some(a), Some(b)) if b < a => Some(b),
+                (Some(a), _) => Some(a),
                 (None, b) => b,
             }
         }
         Budgets {
-            usd: min_opt(self.usd, other.usd),
-            wallclock_s: min_opt(self.wallclock_s, other.wallclock_s),
-            max_transitions: min_opt(self.max_transitions, other.max_transitions),
+            usd: tighter(self.usd, other.usd),
+            wallclock_s: tighter(self.wallclock_s, other.wallclock_s),
+            max_transitions: tighter(self.max_transitions, other.max_transitions),
         }
     }
 }
@@ -334,33 +336,44 @@ impl Machine {
             .resolve(&self.worker)
     }
 
-    /// Union of the machine defaults and the state's own skills,
-    /// order-preserving and deduplicated.
+    /// The machine defaults unioned with the state's own skills, and likewise
+    /// its MCP servers: order-preserving, deduplicated, defaults first.
     ///
-    /// There is no exclude list and no subtraction. A skill is a prompt plus a
-    /// script the agent runs through bash — loading one grants nothing bash
-    /// did not already grant, so "removing" one would only hide instructions,
-    /// never a capability. What a stage may *do* is decided by the tools pi
-    /// gives it, not here.
-    pub fn resolve_skills(&self, state: &State) -> Vec<String> {
-        union(&self.defaults.skills, &state.skills)
-    }
-
-    /// Union of the machine defaults and the state's own MCP servers,
-    /// order-preserving and deduplicated.
+    /// Both settings are purely additive, and there is no exclude list for
+    /// either. A skill is a prompt plus a script the agent runs through bash —
+    /// loading one grants nothing bash did not already grant, so "removing"
+    /// one would only hide instructions, never a capability. What a stage may
+    /// *do* is decided by the tools pi gives it, not here.
     ///
-    /// These are names out of the *user's* `mcp.json`, which loop never reads.
+    /// MCP names come out of the *user's* `mcp.json`, which loop never reads.
     /// A stage cannot reach a server it doesn't name, because the `mcp`
     /// extension starts every session with all servers off — but that also
     /// means loop cannot tell a typo from a server this machine simply has
     /// installed and loop doesn't, so a name that doesn't exist fails at
     /// connect time rather than at `loop validate`.
+    pub fn resolve_skills(&self, state: &State) -> Vec<String> {
+        union(&self.defaults.skills, &state.skills)
+    }
+
+    /// See [`Machine::resolve_skills`] — the same union, over `:mcp`.
     pub fn resolve_mcp(&self, state: &State) -> Vec<String> {
         union(&self.defaults.mcp, &state.mcp)
     }
 
     pub fn is_terminal(&self, id: &str) -> bool {
         self.terminals.contains(id)
+    }
+
+    /// Whether `id` names anything this machine declared — a state or a
+    /// terminal.
+    ///
+    /// The predicate every reference check wants, and the one the loader and
+    /// the linter each used to write out inline: `convert` spelled it three
+    /// times while validating `:escalation-state` and both ends of every
+    /// transition, and `validate` bound it as a local closure. A third kind of
+    /// declared name is one edit here rather than six spread over two modules.
+    pub fn declares(&self, id: &str) -> bool {
+        self.states.contains_key(id) || self.is_terminal(id)
     }
 
     /// Every edge out of `from`, in declaration order.
@@ -370,14 +383,12 @@ impl Machine {
 
     /// The distinct states reachable in one hop — the targets the handoff
     /// protocol block lists for a Worker, and the Navigator's choice set.
+    ///
+    /// Declaration order, first occurrence kept: this is [`crate::core::dedup`]
+    /// over [`Machine::edges_from`], not a fifth hand-rolled copy of the loop
+    /// that function was extracted to replace.
     pub fn neighbors(&self, from: &str) -> Vec<StateId> {
-        let mut seen = BTreeSet::new();
-        self.transitions
-            .iter()
-            .filter(|t| t.from == from)
-            .map(|t| t.to.clone())
-            .filter(|to| seen.insert(to.clone()))
-            .collect()
+        crate::core::dedup(self.edges_from(from).into_iter().map(|t| t.to.clone()))
     }
 
     /// The edge `from -> to`. First declared wins: a machine may name the same
@@ -397,14 +408,8 @@ impl Machine {
     }
 }
 
-/// Concatenate the three layers of a purely-additive setting, keeping the first
-/// occurrence of each name so the global baseline stays at the front.
+/// Concatenate the two layers of a purely-additive setting, keeping the first
+/// occurrence of each name so the machine's baseline stays at the front.
 fn union(machine: &[String], state: &[String]) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    for s in machine.iter().chain(state.iter()) {
-        if !out.iter().any(|x| x == s) {
-            out.push(s.clone());
-        }
-    }
-    out
+    crate::core::dedup(machine.iter().chain(state).cloned())
 }

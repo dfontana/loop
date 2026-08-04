@@ -5,15 +5,17 @@
 //! from the ledger, a `pi` invocation described. The engine deliberately knows
 //! none of it.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+use crate::core::text::first_line;
 use crate::core::{
-    ArtifactRef, Config, Context, JudgeSpec, Machine, ModelSpec, NavigatorSpec, Proposal, Result,
+    Artifact, Context, JudgeSpec, Machine, ModelSpec, NavigatorSpec, Paths, Proposal, Result,
     State, StateId, WorkerSpec, sanitize_component,
 };
 use crate::engine::{StageBuilder, StagePlan};
-use crate::ledger::{Ledger, digest};
-use crate::toolbox::{ResolvedStagePrompt, Toolbox, frontmatter_model, render};
+use crate::ledger::{self, digest};
+use crate::toolbox::{self, ResolvedStagePrompt, frontmatter_model, render};
 
 /// What a state resolves to before any ledger is read or any file is written:
 /// the four-layer model, the local-first stage prompt, and the effective skill and
@@ -31,23 +33,18 @@ pub struct Resolved<'a> {
 
 /// The read-only half of stage building.
 ///
-/// Everything here is a pure function of the machine, the config, and the
+/// Everything here is a pure function of the machine, the paths, and the
 /// toolbox on disk — it reads files, and writes and creates none. Both
 /// [`CliStage::build_stage`] and `loop preview` go through it, so the layered
 /// model rules and local-first resolution have exactly one implementation.
 pub struct Resolver<'a> {
     pub machine: &'a Machine,
-    pub config: &'a Config,
-    pub toolbox: Toolbox<'a>,
+    pub paths: &'a Paths,
 }
 
 impl<'a> Resolver<'a> {
-    pub fn new(machine: &'a Machine, config: &'a Config) -> Self {
-        Self {
-            machine,
-            config,
-            toolbox: Toolbox::new(config),
-        }
+    pub fn new(machine: &'a Machine, paths: &'a Paths) -> Self {
+        Self { machine, paths }
     }
 
     pub fn resolve(&self, state_id: &StateId) -> Result<Resolved<'a>> {
@@ -55,14 +52,12 @@ impl<'a> Resolver<'a> {
             .machine
             .state(state_id)
             .ok_or_else(|| crate::core::CoreError::machine(format!("no such state: {state_id}")))?;
-        let stage_prompt = self
-            .toolbox
-            .resolve_stage_prompt(&state.stage_prompt, &self.machine.dir)?;
+        let stage_prompt = toolbox::resolve_stage_prompt(&state.stage_prompt, &self.machine.dir)?;
         let model = self
             .machine
             .resolve_model(state, &frontmatter_model(&stage_prompt));
         let skills = self.machine.resolve_skills(state);
-        let skill_paths = self.toolbox.resolve_skills(&skills, &self.machine.dir)?;
+        let skill_paths = toolbox::resolve_skills(&skills, &self.machine.dir)?;
         let mcp = self.machine.resolve_mcp(state);
 
         Ok(Resolved {
@@ -86,37 +81,63 @@ impl<'a> Resolver<'a> {
             attempt
         )
     }
+}
 
-    /// The small, scalar context values that land in a spawn's environment,
-    /// where a stage's tooling reads them to key its idempotency on the cycle
-    /// (docs/03-customizing.md).
-    pub fn env(ctx: &Context) -> Vec<(String, String)> {
-        [
-            ("TICKET_ID", ctx.ticket_id.clone()),
-            ("STATE", ctx.state.clone()),
-            ("CYCLE", ctx.cycle.to_string()),
-            ("ATTEMPT", ctx.attempt.to_string()),
-        ]
-        .into_iter()
-        .map(|(k, v)| (k.to_string(), v))
+/// The context variables that also travel as environment, where a stage's
+/// tooling reads them to key its idempotency on the cycle
+/// (docs/03-customizing.md).
+///
+/// Named once, here. This list used to exist three times — built by hand in
+/// `Resolver::env`, again (as a superset) by [`Context::to_map`], and a third
+/// time as the literal string `loop preview` printed — so adding a fifth
+/// variable made preview quietly lie about what a spawn receives.
+pub const ENV_VARS: [&str; 4] = ["TICKET_ID", "STATE", "CYCLE", "ATTEMPT"];
+
+/// [`ENV_VARS`], picked out of a substitution map.
+///
+/// Takes the map rather than the [`Context`] so a spawn cannot receive a
+/// different value than the stage prompt interpolated: both callers have
+/// already built one for `render::substitute`, and reading the environment out
+/// of that exact map makes the two agree by construction rather than because
+/// [`Context::to_map`] is deterministic. Building a second map here also meant
+/// cloning `TASK`, `PLAN`, the whole rendered `LEDGER_DIGEST` and `QA_CASES` —
+/// every large string in the process — to keep four scalars, twice per check.
+pub fn env(vars: &BTreeMap<String, String>) -> Vec<(String, String)> {
+    ENV_VARS
+        .iter()
+        .filter_map(|k| vars.get(*k).map(|v| (k.to_string(), v.clone())))
         .collect()
-    }
 }
 
 pub struct CliStage<'a> {
-    pub machine: &'a Machine,
-    pub config: &'a Config,
-    pub toolbox: Toolbox<'a>,
+    /// The read-only half, held rather than rebuilt. It *is* the machine and
+    /// the paths — `CliStage` used to carry those two fields and construct a
+    /// `Resolver` out of them on every `build_stage`.
+    pub resolver: Resolver<'a>,
     /// Read-only handle. The engine holds the writable one, so this opens the
     /// same file independently rather than aliasing it — every append is
     /// fsynced, so these reads are always current.
     pub ledger_path: PathBuf,
 }
 
-impl CliStage<'_> {
+impl<'a> CliStage<'a> {
+    pub fn new(machine: &'a Machine, paths: &'a Paths, ledger_path: PathBuf) -> Self {
+        Self {
+            resolver: Resolver::new(machine, paths),
+            ledger_path,
+        }
+    }
+
+    fn machine(&self) -> &'a Machine {
+        self.resolver.machine
+    }
+
+    fn paths(&self) -> &'a Paths {
+        self.resolver.paths
+    }
+
     fn events(&self) -> Result<Vec<crate::core::Event>> {
-        use crate::core::LedgerSink;
-        Ledger::open(&self.ledger_path)?.read_all()
+        ledger::events(&self.ledger_path)
     }
 
     /// The context pack: task, plan, digest, artifacts — the engineered
@@ -130,25 +151,19 @@ impl CliStage<'_> {
         crashed: bool,
     ) -> Result<Context> {
         let events = self.events()?;
-        let folded = crate::core::fold_with_loop_heads(&events, &|s| {
-            self.machine.loop_with_head(s).is_some()
-        });
-        let prev_state = events.iter().rev().find_map(|e| match &e.payload {
-            crate::core::EventPayload::TransitionCommitted { from, .. } => Some(from.clone()),
-            _ => None,
-        });
+        let folded = self.machine().fold(&events);
         Ok(Context {
-            ticket_id: self.machine.ticket.clone(),
-            task: self.machine.task.clone(),
-            plan: self.machine.plan.clone(),
+            ticket_id: self.machine().ticket.clone(),
+            task: self.machine().task.clone(),
+            plan: self.machine().plan.clone(),
             state: state.clone(),
-            prev_state,
+            prev_state: folded.prev_state.clone(),
             cycle,
             attempt,
             crashed,
-            ledger_digest: digest::render(&events, self.machine.digest_last_n),
+            ledger_digest: digest::render(&events, self.machine().digest_last_n),
             entry_addendum: entry_addendum.map(str::to_string),
-            qa_cases: self.machine.qa_cases.clone(),
+            qa_cases: self.machine().qa_cases.clone(),
             artifacts: folded.artifacts.clone(),
         })
     }
@@ -158,15 +173,15 @@ impl CliStage<'_> {
     /// instead of inventing it.
     fn graph_summary(&self, from: &str) -> String {
         let mut out = String::from("## States\n\n");
-        for (id, st) in &self.machine.states {
+        for (id, st) in &self.machine().states {
             let desc = st.description.as_deref().unwrap_or("(no description)");
             out.push_str(&format!("- `{id}` — {desc}\n"));
         }
-        for t in &self.machine.terminals {
+        for t in &self.machine().terminals {
             out.push_str(&format!("- `{t}` — terminal\n"));
         }
         out.push_str(&format!("\n## Edges out of `{from}`\n\n"));
-        for e in self.machine.edges_from(from) {
+        for e in self.machine().edges_from(from) {
             // Both tiers, so the Navigator can see that an edge is gated on a
             // command it cannot talk its way past, not just on a criterion.
             let mut guards = Vec::new();
@@ -187,10 +202,6 @@ impl CliStage<'_> {
     }
 }
 
-fn first_line(s: &str) -> &str {
-    s.lines().next().unwrap_or("").trim()
-}
-
 impl StageBuilder for CliStage<'_> {
     fn build_stage(
         &self,
@@ -200,13 +211,12 @@ impl StageBuilder for CliStage<'_> {
         entry_addendum: Option<&str>,
         crashed: bool,
     ) -> Result<StagePlan> {
-        let resolver = Resolver::new(self.machine, self.config);
-        let resolved = resolver.resolve(state_id)?;
+        let resolved = self.resolver.resolve(state_id)?;
 
         let context = self.context(state_id, cycle, attempt, entry_addendum, crashed)?;
         let vars = context.to_map();
-        let reachable = self.machine.neighbors(state_id);
-        let handoff_path = self.config.paths.handoff_file(state_id, cycle, attempt);
+        let reachable = self.machine().neighbors(state_id);
+        let handoff_path = self.paths().handoff_file(state_id, cycle, attempt);
 
         // The protocol block is appended *after* substitution, and is not
         // itself a template — a stage prompt must not be able to interpolate its
@@ -217,7 +227,7 @@ impl StageBuilder for CliStage<'_> {
             &handoff_path,
             &reachable,
         ));
-        let system_prompt_path = self.toolbox.write_rendered(&context, &body, "system")?;
+        let system_prompt_path = toolbox::write_rendered(self.paths(), &context, &body, "system")?;
 
         let spec = WorkerSpec {
             state: state_id.clone(),
@@ -227,16 +237,15 @@ impl StageBuilder for CliStage<'_> {
             skill_paths: resolved.skill_paths,
             system_prompt_path,
             entry_message: render::entry_message(&context, &resolved.mcp),
-            mcp: resolved.mcp,
             handoff_path,
-            cwd: self.config.paths.project_dir.clone(),
-            session_id: Some(resolver.session_id(state_id, cycle, attempt)),
-            env: Resolver::env(&context),
+            cwd: self.paths().project_dir.clone(),
+            session_id: Some(self.resolver.session_id(state_id, cycle, attempt)),
+            env: env(&vars),
         };
         Ok(StagePlan {
             spec,
-            context,
             skills: resolved.skills,
+            mcp: resolved.mcp,
         })
     }
 
@@ -244,19 +253,15 @@ impl StageBuilder for CliStage<'_> {
         &self,
         criteria: &str,
         worker_summary: &str,
-        artifacts: &[ArtifactRef],
+        artifacts: &[Artifact],
         check_output: Option<&str>,
     ) -> Result<JudgeSpec> {
         Ok(JudgeSpec {
             criteria: criteria.to_string(),
-            worker_digest: digest::worker_digest_for_judge(worker_summary, artifacts),
-            artifact_paths: artifacts
-                .iter()
-                .map(|a| self.config.paths.project_dir.join(&a.path))
-                .collect(),
+            worker_digest: crate::core::worker_digest_for_judge(worker_summary, artifacts),
             check_output: check_output.map(str::to_string),
-            model: self.machine.judge.clone(),
-            cwd: self.config.paths.project_dir.clone(),
+            model: self.machine().judge.clone(),
+            cwd: self.paths().project_dir.clone(),
         })
     }
 
@@ -268,12 +273,12 @@ impl StageBuilder for CliStage<'_> {
         let events = self.events()?;
         Ok(NavigatorSpec {
             graph_summary: self.graph_summary(from),
-            ledger_digest: digest::render(&events, self.machine.digest_last_n),
+            ledger_digest: digest::render(&events, self.machine().digest_last_n),
             from: from.clone(),
             proposal: proposal.cloned(),
-            reachable: self.machine.neighbors(from),
-            model: self.machine.navigator.clone(),
-            cwd: self.config.paths.project_dir.clone(),
+            reachable: self.machine().neighbors(from),
+            model: self.machine().navigator.clone(),
+            cwd: self.paths().project_dir.clone(),
         })
     }
 }
@@ -294,9 +299,10 @@ impl crate::core::CheckRunner for CliStage<'_> {
         attempt: u32,
     ) -> Result<crate::core::CheckOutcome> {
         let context = self.context(from, cycle, attempt, None, false)?;
-        let cmd = render::substitute(&check.cmd, &context.to_map());
-        let env = Resolver::env(&context);
+        let vars = context.to_map();
+        let cmd = render::substitute(&check.cmd, &vars);
+        let env = env(&vars);
 
-        crate::runner::exec_check(&cmd, &self.config.paths.project_dir, &env, check.timeout_s)
+        crate::runner::exec_check(&cmd, &self.paths().project_dir, &env, check.timeout_s)
     }
 }

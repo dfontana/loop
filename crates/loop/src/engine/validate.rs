@@ -7,12 +7,23 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use crate::core::{Machine, StagePromptRef};
+use crate::core::{Machine, StagePromptRef, Transition};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Severity {
     Warning,
     Error,
+}
+
+impl Severity {
+    /// The fixed-width tag a diagnostic line opens with. Padded, so the
+    /// `where_` column after it lines up between a warning and an error.
+    pub fn tag(self) -> &'static str {
+        match self {
+            Self::Error => "error",
+            Self::Warning => "warn ",
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -21,6 +32,22 @@ pub struct Diagnostic {
     /// Where in the machine: a state id, a transition, or the file itself.
     pub where_: String,
     pub message: String,
+}
+
+/// `loop validate` prints these and `loop preview` embeds them, and the two
+/// have to read identically — preview reuses the real linter precisely so that
+/// it reports what validate would. That claim was made in a doc comment while
+/// the format string itself was written out in both places; now there is one.
+impl std::fmt::Display for Diagnostic {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}  {}: {}",
+            self.severity.tag(),
+            self.where_,
+            self.message
+        )
+    }
 }
 
 impl Diagnostic {
@@ -39,6 +66,46 @@ impl Diagnostic {
             message: message.into(),
         }
     }
+}
+
+/// An edge list keyed by source, from whichever end of each transition `edge`
+/// picks — so one map builder serves both the forward and the reversed graph.
+fn adjacency<'m>(
+    transitions: &'m [Transition],
+    edge: impl Fn(&'m Transition) -> Option<(&'m str, &'m str)>,
+) -> BTreeMap<&'m str, Vec<&'m str>> {
+    let mut out: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for (from, to) in transitions.iter().filter_map(edge) {
+        out.entry(from).or_default().push(to);
+    }
+    out
+}
+
+/// Everything reachable from `seeds` over `adjacency`, seeds included.
+///
+/// One worklist traversal. `validate` asks two reachability questions — can
+/// `entry` get here, and can this get to a terminal — which are the same walk
+/// over the graph and over the graph reversed, and were written out twice with
+/// their own `VecDeque`, their own `BTreeSet`, and their own `while let`.
+fn reach<'m>(
+    seeds: impl IntoIterator<Item = &'m str>,
+    adjacency: &BTreeMap<&'m str, Vec<&'m str>>,
+) -> BTreeSet<&'m str> {
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
+    let mut queue: VecDeque<&str> = VecDeque::new();
+    for seed in seeds {
+        if seen.insert(seed) {
+            queue.push_back(seed);
+        }
+    }
+    while let Some(id) = queue.pop_front() {
+        for &next in adjacency.get(id).into_iter().flatten() {
+            if seen.insert(next) {
+                queue.push_back(next);
+            }
+        }
+    }
+    seen
 }
 
 /// Lint a loaded machine.
@@ -76,9 +143,6 @@ pub fn validate(
     let mcp_enabled = machine.pi_extensions.iter().any(|e| e == "mcp");
     let mut out = Vec::new();
 
-    let name_exists =
-        |id: &str| -> bool { machine.states.contains_key(id) || machine.terminals.contains(id) };
-
     // entry exists.
     if !machine.states.contains_key(&machine.entry) {
         out.push(Diagnostic::error(
@@ -89,13 +153,13 @@ pub fn validate(
 
     // Every transition's from/to names a state or terminal.
     for t in &machine.transitions {
-        if !name_exists(&t.from) {
+        if !machine.declares(&t.from) {
             out.push(Diagnostic::error(
                 format!("{} -> {}", t.from, t.to),
                 format!("transition `from` `{}` names no state or terminal", t.from),
             ));
         }
-        if !name_exists(&t.to) {
+        if !machine.declares(&t.to) {
             out.push(Diagnostic::error(
                 format!("{} -> {}", t.from, t.to),
                 format!("transition `to` `{}` names no state or terminal", t.to),
@@ -103,20 +167,17 @@ pub fn validate(
         }
     }
 
-    // Every state is reachable from `entry`.
-    let mut reachable: BTreeSet<&str> = BTreeSet::new();
-    if machine.states.contains_key(&machine.entry) {
-        let mut queue: VecDeque<&str> = VecDeque::new();
-        queue.push_back(machine.entry.as_str());
-        reachable.insert(machine.entry.as_str());
-        while let Some(id) = queue.pop_front() {
-            for t in machine.edges_from(id) {
-                if machine.states.contains_key(&t.to) && reachable.insert(t.to.as_str()) {
-                    queue.push_back(t.to.as_str());
-                }
-            }
-        }
-    }
+    // Every state is reachable from `entry`. Only edges landing in a *defined
+    // state* are followed: a terminal is where a run stops, so reaching one
+    // does not make whatever else points out of it reachable.
+    let forward = adjacency(&machine.transitions, |t| {
+        machine
+            .states
+            .contains_key(&t.to)
+            .then_some((t.from.as_str(), t.to.as_str()))
+    });
+    let entry_exists = machine.states.contains_key(&machine.entry);
+    let reachable = reach(entry_exists.then_some(machine.entry.as_str()), &forward);
     for id in machine.states.keys() {
         if !reachable.contains(id.as_str()) {
             out.push(Diagnostic::error(
@@ -126,25 +187,12 @@ pub fn validate(
         }
     }
 
-    // Every state has a path to some terminal.
-    let mut reverse: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
-    for t in &machine.transitions {
-        reverse
-            .entry(t.to.as_str())
-            .or_default()
-            .push(t.from.as_str());
-    }
-    let mut can_reach_terminal: BTreeSet<&str> = BTreeSet::new();
-    let mut queue: VecDeque<&str> = machine.terminals.iter().map(|s| s.as_str()).collect();
-    while let Some(id) = queue.pop_front() {
-        if let Some(froms) = reverse.get(id) {
-            for &f in froms {
-                if can_reach_terminal.insert(f) {
-                    queue.push_back(f);
-                }
-            }
-        }
-    }
+    // Every state has a path to some terminal — the same walk, over the edges
+    // reversed, seeded from the terminals.
+    let reverse = adjacency(&machine.transitions, |t| {
+        Some((t.to.as_str(), t.from.as_str()))
+    });
+    let can_reach_terminal = reach(machine.terminals.iter().map(String::as_str), &reverse);
     for id in machine.states.keys() {
         if !can_reach_terminal.contains(id.as_str()) {
             out.push(Diagnostic::error(
@@ -203,7 +251,7 @@ pub fn validate(
             continue;
         }
         for s in &l.states {
-            if !name_exists(s) {
+            if !machine.declares(s) {
                 out.push(Diagnostic::error(
                     l.name.clone(),
                     format!("loop `{}` references unknown state `{s}`", l.name),
@@ -235,10 +283,9 @@ pub fn validate(
     // any other stage, which is how a machine gets a "go do recovery work"
     // destination rather than only a "give up here" one. This used to demand a
     // terminal, disagreeing with the loader, docs/03-customizing.md, and the
-    // engine all at once — so a machine with a non-terminal escalation state
-    // loaded fine and then failed its own linter.
+    // linter, loader, docs/03-customizing.md and engine must agree on this.
     if let Some(esc) = &machine.escalation_state
-        && !name_exists(esc)
+        && !machine.declares(esc)
     {
         out.push(Diagnostic::error(
             "machine",
@@ -250,8 +297,7 @@ pub fn validate(
     // between the worker's proposal and the commit, so the worker's word is
     // final on that hop. Sometimes that is exactly right — an unconditional
     // hand-off into the first working state — which is why this is advisory.
-    // It is worth saying out loud because an unguarded edge is now the *shape
-    // you get by forgetting*, where it used to take deleting a `when`.
+    // It is worth saying out loud: unguarded is the shape you get by forgetting.
     for t in &machine.transitions {
         if t.check.is_none() && t.criteria.is_none() {
             out.push(Diagnostic::warning(
@@ -265,9 +311,8 @@ pub fn validate(
         }
     }
 
-    // Error: two edges between the same pair. `when` guards used to tell such
-    // edges apart; without them `Machine::edge` takes the first declared one and
-    // the rest are dead, silently discarding whatever `criteria` they carry.
+    // Error: two edges between the same pair. `Machine::edge` takes the first
+    // declared one, so the rest are dead and their `criteria` silently ignored.
     let mut seen_pairs: BTreeSet<(&str, &str)> = BTreeSet::new();
     for t in &machine.transitions {
         if !seen_pairs.insert((t.from.as_str(), t.to.as_str())) {

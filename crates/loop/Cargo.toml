@@ -32,5 +32,16 @@ sha2.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
 
+[features]
+# Exposes `core::fixtures`, the typed ledger-event builders, to code outside
+# the library. Off in a normal build: nothing shipped needs them.
+testing = []
+
 [dev-dependencies]
 tempfile.workspace = true
+# A dependency on ourselves, which is how cargo lets the integration tests
+# under `tests/` link the library with a feature the binary does not get. They
+# are a separate compilation unit, so without this `e2e.rs` cannot reach
+# `fixtures` and goes back to hand-writing the ledger's wire format as format
+# strings.
+loop = { path = ".", features = ["testing"] }

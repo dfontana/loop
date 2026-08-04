@@ -15,9 +15,13 @@
 //! reopen; the recap keeps every one, because a failed attempt that produced
 //! nothing is exactly what it exists to report.
 
-use crate::core::{Event, EventPayload, StateId};
+use crate::core::{Event, EventPayload, StateEntered};
 
 /// One `state_entered` and everything the harness recorded before the next one.
+///
+/// The entry's fields are reached through [`Episode::header`] rather than
+/// copied out, so `state_entered` is declared once.
+#[derive(Clone, Copy, Debug)]
 pub struct Episode<'e> {
     /// The index of this episode's `state_entered` in the ledger it came from.
     ///
@@ -26,18 +30,29 @@ pub struct Episode<'e> {
     /// which is where the recap finds `run_started`.
     pub ordinal: usize,
     pub entered: &'e Event,
-    pub state: &'e StateId,
-    pub cycle: u32,
-    pub attempt: u32,
-    /// Present only when non-empty: a blank id is nothing to reopen.
-    pub session_id: Option<&'e str>,
-    pub model: &'e str,
-    pub thinking: &'e str,
-    pub skills: &'e [String],
-    pub mcp: &'e [String],
+    pub header: &'e StateEntered,
     /// The events after this `state_entered`, up to the next one, in ledger
     /// order.
     pub body: &'e [Event],
+}
+
+impl<'e> Episode<'e> {
+    pub fn state(&self) -> &'e str {
+        &self.header.state
+    }
+
+    pub fn cycle(&self) -> u32 {
+        self.header.cycle
+    }
+
+    pub fn attempt(&self) -> u32 {
+        self.header.attempt
+    }
+
+    /// Present only when non-empty: a blank id is nothing to reopen.
+    pub fn session(&self) -> Option<&'e str> {
+        self.header.session()
+    }
 }
 
 /// Group a ledger into attempts, in ledger order, losing nothing.
@@ -47,43 +62,23 @@ pub struct Episode<'e> {
 pub fn episodes(events: &[Event]) -> Vec<Episode<'_>> {
     // Where each episode ends, so the scan below is a single pass with a known
     // right edge rather than a nested search.
-    let entered: Vec<usize> = events
+    let starts: Vec<usize> = events
         .iter()
         .enumerate()
-        .filter(|(_, e)| matches!(e.payload, EventPayload::StateEntered { .. }))
+        .filter(|(_, e)| matches!(e.payload, EventPayload::StateEntered(_)))
         .map(|(i, _)| i)
         .collect();
 
-    let mut out = Vec::with_capacity(entered.len());
-    for (n, &start) in entered.iter().enumerate() {
-        let end = entered.get(n + 1).copied().unwrap_or(events.len());
-        let EventPayload::StateEntered {
-            state,
-            cycle,
-            attempt,
-            session_id,
-            model,
-            thinking,
-            skills,
-            mcp,
-        } = &events[start].payload
-        else {
+    let mut out = Vec::with_capacity(starts.len());
+    for (n, &start) in starts.iter().enumerate() {
+        let end = starts.get(n + 1).copied().unwrap_or(events.len());
+        let EventPayload::StateEntered(header) = &events[start].payload else {
             continue;
         };
         out.push(Episode {
             ordinal: start,
             entered: &events[start],
-            state,
-            cycle: *cycle,
-            attempt: *attempt,
-            session_id: session_id
-                .as_deref()
-                .map(str::trim)
-                .filter(|s| !s.is_empty()),
-            model,
-            thinking,
-            skills,
-            mcp,
+            header,
             body: &events[start + 1..end],
         });
     }

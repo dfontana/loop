@@ -61,18 +61,24 @@
 //!
 //! Step fields (all optional; unset ones behave as if absent — they do not
 //! fall back to `default`'s fields individually, `default` is only used
-//! wholesale when nothing in `steps` matches):
+//! wholesale when nothing in `steps` matches). The three answer fields
+//! deserialize into the harness's own types, so a script is accepted on
+//! exactly the terms a real agent's answer is — `rationale` is required on a
+//! `transition` because `Proposal` requires it:
 //! - `summary`: the assistant's final text.
-//! - `usage`: `{"tokens": u64, "cost_usd": f64}`, emitted as one assistant
-//!   `message_end`'s usage.
-//! - `transition`: `{"to": string|null, "blocked": bool, "rationale": string,
-//!   "artifacts": [{"name","path"}]}` — worker only. **Written as JSON to
-//!   `$LOOP_HANDOFF`**, exactly as a real worker would. Omit it to simulate a
-//!   worker that ends its turn without handing off.
-//! - `verdict`: `{"pass": bool, "rationale": string}` — judge only. Rendered
-//!   into the final assistant message as `PASS|FAIL\n<rationale>`.
-//! - `choice`: `{"to": string, "entry_prompt": string}` — navigator only.
-//!   Rendered into the final assistant message as `<to>\n<entry_prompt>`.
+//! - `usage`: `loop::core::Usage` — `{"tokens": u64, "cost_usd": f64}`,
+//!   emitted as one assistant `message_end`'s usage.
+//! - `transition`: `loop::core::Proposal` — `{"to": string|null, "blocked":
+//!   bool, "rationale": string, "artifacts": [{"name","path"}]}`, worker only.
+//!   **Written as JSON to `$LOOP_HANDOFF`**, exactly as a real worker would.
+//!   Omit it to simulate a worker that ends its turn without handing off.
+//! - `verdict`: `loop::core::Verdict` — `{"pass": bool, "rationale": string}`,
+//!   judge only. Rendered into the final assistant message as
+//!   `PASS|FAIL\n<rationale>`, with the two tokens taken from
+//!   `runner::reply`'s constants rather than typed out here.
+//! - `choice`: `loop::core::Choice` — `{"to": string, "entry_prompt": string}`,
+//!   navigator only. Rendered into the final assistant message as
+//!   `<to>\n<entry_prompt>`.
 //!
 //! Because the tool-less roles answer in prose, scripting `summary` *without*
 //! `verdict`/`choice` is how a test drives an off-contract reply and asserts
@@ -111,8 +117,16 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::{Value, json};
+
+// The three roles' answers, in the harness's own types rather than in copies
+// of them. A script writes what a real agent writes, and is rejected on
+// exactly what the harness would reject — a `transition` with no `rationale`
+// is not a handoff `read_handoff` would accept, so it is not one a script can
+// script either.
+use r#loop::core::{Choice, Proposal, Usage, Verdict};
+use r#loop::runner::reply::{VERDICT_FAIL, VERDICT_PASS};
 
 #[derive(Debug, Deserialize, Default)]
 struct Script {
@@ -140,58 +154,23 @@ struct Matcher {
     attempt: Option<u32>,
 }
 
+/// One scripted spawn. The three answer fields are the harness's own types:
+/// [`Proposal`] is what a Worker writes to `$LOOP_HANDOFF`, and [`Verdict`] /
+/// [`Choice`] are what the two tool-less roles' replies parse back into.
 #[derive(Debug, Deserialize, Default, Clone)]
 struct Step {
     #[serde(default)]
     summary: Option<String>,
     #[serde(default)]
-    usage: Option<UsageSpec>,
+    usage: Option<Usage>,
     #[serde(default)]
-    transition: Option<TransitionSpec>,
+    transition: Option<Proposal>,
     #[serde(default)]
-    verdict: Option<VerdictSpec>,
+    verdict: Option<Verdict>,
     #[serde(default)]
-    choice: Option<ChoiceSpec>,
+    choice: Option<Choice>,
     #[serde(default)]
     exit: Option<String>,
-}
-
-#[derive(Debug, Deserialize, Serialize, Default, Clone)]
-struct UsageSpec {
-    #[serde(default)]
-    tokens: u64,
-    #[serde(default)]
-    cost_usd: f64,
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone)]
-struct ArtifactSpec {
-    name: String,
-    path: String,
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone)]
-struct TransitionSpec {
-    #[serde(default)]
-    to: Option<String>,
-    #[serde(default)]
-    blocked: bool,
-    #[serde(default)]
-    rationale: String,
-    #[serde(default)]
-    artifacts: Vec<ArtifactSpec>,
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone)]
-struct VerdictSpec {
-    pass: bool,
-    rationale: String,
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone)]
-struct ChoiceSpec {
-    to: String,
-    entry_prompt: String,
 }
 
 struct Invocation {
@@ -277,36 +256,6 @@ fn select_step(script: &Script, inv: &Invocation, consumed_path: &Path) -> Step 
     }
 }
 
-/// A tiny line-writer that also tracks whether anything failed, so we don't
-/// need to `.unwrap()` at every `writeln!`.
-struct Emitter<W: Write> {
-    out: W,
-}
-
-impl<W: Write> Emitter<W> {
-    fn line(&mut self, v: &Value) {
-        let _ = writeln!(self.out, "{v}");
-    }
-
-    fn raw(&mut self, s: &str) {
-        let _ = write!(self.out, "{s}");
-    }
-
-    fn flush(&mut self) {
-        let _ = self.out.flush();
-    }
-}
-
-fn now_iso() -> String {
-    // No chrono dependency here; a fixed-format placeholder is fine since
-    // nothing in the harness parses this field's contents, only its presence.
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    format!("1970-01-01T00:00:{secs:02}Z")
-}
-
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -314,7 +263,13 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-fn assistant_message(summary: &str, usage: &UsageSpec) -> Value {
+/// No chrono dependency here; a fixed-format placeholder is fine, since nothing
+/// in the harness parses this field's contents — only its presence.
+fn now_iso() -> String {
+    format!("1970-01-01T00:00:{:02}Z", now_ms() / 1000)
+}
+
+fn assistant_message(summary: &str, usage: &Usage) -> Value {
     let content = if summary.is_empty() {
         json!([])
     } else {
@@ -350,21 +305,25 @@ fn assistant_message(summary: &str, usage: &UsageSpec) -> Value {
 /// For a Worker this is just the scripted summary — its decision travels in
 /// the handoff file, not in prose. For the two tool-less roles the final
 /// message *is* the answer, so this renders the scripted verdict/choice into
-/// the first-line contract `loop_runner::reply` parses. A step that scripts
+/// the first-line contract `r#loop::runner::reply` parses. A step that scripts
 /// neither falls back to `summary`, which is how a test exercises an
 /// off-contract reply.
+///
+/// The two verdict tokens are [`VERDICT_PASS`]/[`VERDICT_FAIL`], not literals:
+/// the parser reads the same two constants, so a reworded contract cannot make
+/// every scripted verdict quietly start failing closed.
 fn final_text(role: &str, step: &Step) -> String {
     let summary = step.summary.clone().unwrap_or_default();
     match role {
         "judge" => match &step.verdict {
             Some(v) => {
-                let token = if v.pass { "PASS" } else { "FAIL" };
+                let token = if v.pass { VERDICT_PASS } else { VERDICT_FAIL };
                 format!("{token}\n{}", v.rationale).trim_end().to_string()
             }
             None => summary,
         },
         "navigator" => match &step.choice {
-            Some(c) => format!("{}\n{}", c.to, c.entry_prompt)
+            Some(c) => format!("{}\n{}", c.to, c.entry_prompt.as_deref().unwrap_or(""))
                 .trim_end()
                 .to_string(),
             None => summary,
@@ -375,31 +334,33 @@ fn final_text(role: &str, step: &Step) -> String {
 
 /// Write the Worker's handoff file, the way a real agent would during its turn.
 ///
-/// Silently does nothing when `LOOP_HANDOFF` is unset, so a spawn built by
-/// something other than the harness still runs.
-fn write_handoff(step: &Step) {
-    let Some(t) = &step.transition else { return };
-    let Some(path) = std::env::var_os("LOOP_HANDOFF") else {
+/// The path is passed in rather than read from `$LOOP_HANDOFF` here: `main`
+/// reads the variable once, and the tests below hand this a tempdir directly
+/// instead of racing each other over one process-global.
+fn write_handoff(step: &Step, path: &Path) {
+    let Some(proposal) = &step.transition else {
         return;
     };
-    let payload = json!({
-        "to": t.to,
-        "blocked": t.blocked,
-        "rationale": t.rationale,
-        "artifacts": t.artifacts,
-    });
-    let path = PathBuf::from(path);
+    // Serialized from the `Proposal` the harness deserializes, so the file
+    // this writes is a file `read_handoff` accepts by construction.
+    let Ok(payload) = serde_json::to_string(proposal) else {
+        return;
+    };
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    if let Err(e) = std::fs::write(&path, payload.to_string()) {
+    if let Err(e) = std::fs::write(path, payload) {
         eprintln!("mock-pi: failed writing handoff {}: {e}", path.display());
     }
 }
 
-fn run_stream<W: Write>(out: W, role: &str, inv: &Invocation, step: &Step) -> ExitCode {
-    let mut em = Emitter { out };
-
+fn run_stream<W: Write>(
+    mut out: W,
+    role: &str,
+    inv: &Invocation,
+    step: &Step,
+    handoff: Option<&Path>,
+) -> ExitCode {
     let cwd = std::env::current_dir().unwrap_or_default();
     let session_id = format!(
         "mock-{role}-{}-{}-{}",
@@ -407,41 +368,61 @@ fn run_stream<W: Write>(out: W, role: &str, inv: &Invocation, step: &Step) -> Ex
         inv.cycle.unwrap_or(0),
         inv.attempt.unwrap_or(0),
     );
-    em.line(&json!({
-        "type": "session",
-        "version": 3,
-        "id": session_id,
-        "timestamp": now_iso(),
-        "cwd": cwd,
-    }));
-    em.line(&json!({"type": "agent_start"}));
-    em.line(&json!({"type": "turn_start"}));
+    let _ = writeln!(
+        out,
+        "{}",
+        json!({
+            "type": "session",
+            "version": 3,
+            "id": session_id,
+            "timestamp": now_iso(),
+            "cwd": cwd,
+        })
+    );
+    let _ = writeln!(out, "{}", json!({"type": "agent_start"}));
+    let _ = writeln!(out, "{}", json!({"type": "turn_start"}));
 
     if step.exit.as_deref() == Some("crash") {
         // Simulate a process killed mid-write: a syntactically broken final
         // line, with no trailing newline at all. No handoff is written — a
         // stage that died never decided anything.
-        em.raw(r#"{"type":"message_start","message":{"role":"assistant","con"#);
-        em.flush();
+        let _ = out.write_all(br#"{"type":"message_start","message":{"role":"assistant","con"#);
+        let _ = out.flush();
         return ExitCode::from(1);
     }
 
-    if role == "worker" {
-        write_handoff(step);
+    if let (Some(path), "worker") = (handoff, role) {
+        write_handoff(step, path);
     }
 
-    let usage = step.usage.clone().unwrap_or_default();
+    let usage = step.usage.unwrap_or_default();
     let assistant = assistant_message(&final_text(role, step), &usage);
-    em.line(&json!({"type": "message_start", "message": assistant}));
-    em.line(&json!({"type": "message_end", "message": assistant}));
+    let _ = writeln!(
+        out,
+        "{}",
+        json!({"type": "message_start", "message": assistant})
+    );
+    let _ = writeln!(
+        out,
+        "{}",
+        json!({"type": "message_end", "message": assistant})
+    );
 
-    em.line(&json!({
-        "type": "turn_end",
-        "message": assistant,
-        "toolResults": [],
-    }));
-    em.line(&json!({"type": "agent_end", "messages": [assistant]}));
-    em.flush();
+    let _ = writeln!(
+        out,
+        "{}",
+        json!({
+            "type": "turn_end",
+            "message": assistant,
+            "toolResults": [],
+        })
+    );
+    let _ = writeln!(
+        out,
+        "{}",
+        json!({"type": "agent_end", "messages": [assistant]})
+    );
+    let _ = out.flush();
 
     ExitCode::SUCCESS
 }
@@ -547,8 +528,9 @@ fn main() -> ExitCode {
     let consumed_path = sidecar_path(&script_path);
     let step = select_step(&script, &inv, &consumed_path);
 
+    let handoff = std::env::var_os("LOOP_HANDOFF").map(PathBuf::from);
     let stdout = std::io::stdout();
-    run_stream(stdout.lock(), &role, &inv, &step)
+    run_stream(stdout.lock(), &role, &inv, &step, handoff.as_deref())
 }
 
 #[cfg(test)]
@@ -557,6 +539,28 @@ mod tests {
 
     fn step_matching(json: &str) -> Script {
         serde_json::from_str(json).unwrap()
+    }
+
+    /// A private sidecar path, and the tempdir keeping it alive.
+    ///
+    /// Three tests built this by hand out of `temp_dir()` and `now_ms()`,
+    /// offsetting the clock by `+1` and `+2` so they would not collide — an
+    /// admission that the scheme did not work. `tempfile` is already a
+    /// workspace dependency and gives each test its own directory.
+    fn sidecar() -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("consumed.json");
+        (dir, path)
+    }
+
+    /// The invocation every matcher test varies one field of.
+    fn inv(role: &str) -> Invocation {
+        Invocation {
+            role: role.into(),
+            state: None,
+            cycle: None,
+            attempt: None,
+        }
     }
 
     #[test]
@@ -579,23 +583,13 @@ mod tests {
                 {"match":{"role":"worker"},"summary":"second"}
             ]}"#,
         );
-        let dir = std::env::temp_dir().join(format!("mockpi-test-{}", now_ms()));
-        let sidecar = dir.with_extension("consumed.json");
-        let _ = std::fs::remove_file(&sidecar);
-
-        let inv = Invocation {
-            role: "worker".into(),
-            state: None,
-            cycle: None,
-            attempt: None,
-        };
+        let (_dir, sidecar) = sidecar();
+        let inv = inv("worker");
 
         let s1 = select_step(&script, &inv, &sidecar);
         assert_eq!(s1.summary.as_deref(), Some("first"));
         let s2 = select_step(&script, &inv, &sidecar);
         assert_eq!(s2.summary.as_deref(), Some("second"));
-
-        let _ = std::fs::remove_file(&sidecar);
     }
 
     #[test]
@@ -603,23 +597,13 @@ mod tests {
         let script = step_matching(
             r#"{"steps":[{"match":{"role":"judge"},"repeat":true,"verdict":{"pass":true,"rationale":"ok"}}]}"#,
         );
-        let dir = std::env::temp_dir().join(format!("mockpi-test-{}", now_ms() + 1));
-        let sidecar = dir.with_extension("consumed.json");
-        let _ = std::fs::remove_file(&sidecar);
-
-        let inv = Invocation {
-            role: "judge".into(),
-            state: None,
-            cycle: None,
-            attempt: None,
-        };
+        let (_dir, sidecar) = sidecar();
+        let inv = inv("judge");
 
         for _ in 0..3 {
             let s = select_step(&script, &inv, &sidecar);
             assert!(s.verdict.is_some());
         }
-
-        let _ = std::fs::remove_file(&sidecar);
     }
 
     #[test]
@@ -627,21 +611,10 @@ mod tests {
         let script = step_matching(
             r#"{"default":{"summary":"fallback"},"steps":[{"match":{"role":"judge"},"summary":"nope"}]}"#,
         );
-        let dir = std::env::temp_dir().join(format!("mockpi-test-{}", now_ms() + 2));
-        let sidecar = dir.with_extension("consumed.json");
-        let _ = std::fs::remove_file(&sidecar);
+        let (_dir, sidecar) = sidecar();
 
-        let inv = Invocation {
-            role: "worker".into(),
-            state: None,
-            cycle: None,
-            attempt: None,
-        };
-
-        let s = select_step(&script, &inv, &sidecar);
+        let s = select_step(&script, &inv("worker"), &sidecar);
         assert_eq!(s.summary.as_deref(), Some("fallback"));
-
-        let _ = std::fs::remove_file(&sidecar);
     }
 
     fn worker_inv() -> Invocation {
@@ -660,14 +633,11 @@ mod tests {
         )
         .unwrap();
 
-        let dir = std::env::temp_dir().join(format!("mock-pi-handoff-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let handoff = dir.join("h.json");
-        // SAFETY: single-threaded test; `run_stream` reads this synchronously.
-        unsafe { std::env::set_var("LOOP_HANDOFF", &handoff) };
+        let dir = tempfile::tempdir().expect("tempdir");
+        let handoff = dir.path().join("h.json");
 
         let mut buf = Vec::new();
-        let code = run_stream(&mut buf, "worker", &worker_inv(), &step);
+        let code = run_stream(&mut buf, "worker", &worker_inv(), &step, Some(&handoff));
         assert_eq!(code, ExitCode::SUCCESS);
 
         let text = String::from_utf8(buf).unwrap();
@@ -679,9 +649,6 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(&handoff).unwrap()).unwrap();
         assert_eq!(written["to"], "review");
         assert_eq!(written["rationale"], "ok");
-
-        unsafe { std::env::remove_var("LOOP_HANDOFF") };
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The tool-less roles answer in their final message, so their scripted
@@ -717,20 +684,15 @@ mod tests {
         )
         .unwrap();
 
-        let dir = std::env::temp_dir().join(format!("mock-pi-crash-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let handoff = dir.join("h.json");
-        unsafe { std::env::set_var("LOOP_HANDOFF", &handoff) };
+        let dir = tempfile::tempdir().expect("tempdir");
+        let handoff = dir.path().join("h.json");
 
         let mut buf = Vec::new();
         assert_eq!(
-            run_stream(&mut buf, "worker", &worker_inv(), &step),
+            run_stream(&mut buf, "worker", &worker_inv(), &step, Some(&handoff)),
             ExitCode::from(1)
         );
         assert!(!handoff.exists());
-
-        unsafe { std::env::remove_var("LOOP_HANDOFF") };
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// `--session` and `--session-id` differ by four characters and mean
@@ -761,7 +723,7 @@ mod tests {
             attempt: Some(1),
         };
         let mut buf = Vec::new();
-        let code = run_stream(&mut buf, "worker", &inv, &step);
+        let code = run_stream(&mut buf, "worker", &inv, &step, None);
         assert_eq!(code, ExitCode::from(1));
 
         let text = String::from_utf8(buf).unwrap();

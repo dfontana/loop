@@ -14,18 +14,11 @@
 use std::path::PathBuf;
 use std::process::{Command, Output};
 
-/// `mock-pi` is a sibling workspace member rather than a dependency, so cargo
-/// exports no `CARGO_BIN_EXE_` for it; it sits beside the binary under test.
-fn mock_pi() -> PathBuf {
-    let loop_bin = PathBuf::from(env!("CARGO_BIN_EXE_loop"));
-    let path = loop_bin.with_file_name("mock-pi");
-    assert!(
-        path.exists(),
-        "mock-pi not built at {}; run `cargo build --workspace`",
-        path.display()
-    );
-    path
-}
+mod common;
+
+use common::mock_pi;
+use r#loop::core::fixtures::{self, EventExt};
+use r#loop::core::{Event, GuardOutcome, RunStatus, Totals, Usage, sanitize_component};
 
 struct Fixture {
     _tmp: tempfile::TempDir,
@@ -72,12 +65,7 @@ impl Fixture {
     }
 
     fn ledger(&self) -> Vec<serde_json::Value> {
-        let path = self.project.join(".loop/ledger.jsonl");
-        std::fs::read_to_string(path)
-            .unwrap_or_default()
-            .lines()
-            .filter_map(|l| serde_json::from_str(l).ok())
-            .collect()
+        jsonl(&self.project.join(".loop/ledger.jsonl"))
     }
 
     fn write_ledger(&self, lines: &[String]) {
@@ -106,11 +94,16 @@ impl Fixture {
 
     /// Every `pi --session` launch, in order.
     fn pi_launches(&self) -> Vec<serde_json::Value> {
-        std::fs::read_to_string(&self.argv_log)
-            .unwrap_or_default()
-            .lines()
-            .filter_map(|l| serde_json::from_str(l).ok())
-            .collect()
+        jsonl(&self.argv_log)
+    }
+
+    /// `loop init <TICKET>`, then the smallest machine that runs. The three
+    /// lines a dozen tests opened with, in the order they have to happen:
+    /// `init` refuses to overwrite an existing `machine.fnl`, so the template
+    /// is replaced after it, not before.
+    fn init_tiny(&self, ticket: &str) {
+        self.run(&["init", ticket]);
+        self.machine(TINY_MACHINE);
     }
 
     /// Write a file under the project, creating parents. Relative to the
@@ -122,6 +115,23 @@ impl Fixture {
         std::fs::write(&path, body).unwrap();
         path
     }
+}
+
+/// A fixture whose mock-pi never has anything to say — for the commands that
+/// spawn nothing. Still a *readable* script: `LOOP_MOCK_SCRIPT` naming a file
+/// that isn't there is a harness misconfiguration, and mock-pi exits 1 on it.
+fn unscripted() -> Fixture {
+    Fixture::new(r#"{"steps":[]}"#)
+}
+
+/// Every parseable line of a JSONL file, or nothing if it isn't there.
+/// The ledger and the argv log are both read this way.
+fn jsonl(path: &std::path::Path) -> Vec<serde_json::Value> {
+    std::fs::read_to_string(path)
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect()
 }
 
 fn stdout(o: &Output) -> String {
@@ -136,16 +146,124 @@ fn kinds(events: &[serde_json::Value]) -> Vec<&str> {
     events.iter().filter_map(|e| e["type"].as_str()).collect()
 }
 
+// ── ledger lines ─────────────────────────────────────────────────────────────
+//
+// A test that plants a ledger writes it in the wire format, but does not get to
+// *decide* the wire format: these build a typed `Event` with the library's own
+// fixtures and let the harness's serde impls spell it. They used to be six
+// hand-written format strings, ~60 lines of them, and a field added to
+// `StateEntered` desynced every one of them silently — the run would write
+// ledgers these tests could no longer produce, and nothing would fail.
+
+/// One ledger line: a fixture event, serialized the way the harness writes it.
+fn line(event: Event) -> String {
+    serde_json::to_string(&event).expect("a fixture event serializes")
+}
+
+fn run_started_line(ticket: &str) -> String {
+    line(fixtures::started(ticket).at("2026-07-26T12:00:00.000Z"))
+}
+
+fn entered_line(ts: &str, state: &str, cycle: u32, attempt: u32, session: Option<&str>) -> String {
+    // The `Option` goes straight through: "no session id recorded" and "an
+    // empty one" stay distinguishable at the call site, and the setter itself
+    // takes the `Option` so this is no longer a match.
+    line(
+        fixtures::entered(state, cycle, attempt)
+            .at(ts)
+            .session(session),
+    )
+}
+
+fn output_line(ts: &str, state: &str, cycle: u32, summary: &str) -> String {
+    line(
+        fixtures::output(state, cycle)
+            .at(ts)
+            .summary(summary)
+            .usage(10, 0.02),
+    )
+}
+
+fn proposed_line(ts: &str, from: &str, to: &str, rationale: &str) -> String {
+    line(fixtures::proposed(from, to).at(ts).rationale(rationale))
+}
+
+fn guard_line(
+    ts: &str,
+    from: &str,
+    to: &str,
+    check: GuardOutcome,
+    criteria: GuardOutcome,
+    check_output: Option<&str>,
+    judge: Option<&str>,
+) -> String {
+    line(
+        fixtures::guard_checked(from, to)
+            .at(ts)
+            .guards(check, criteria)
+            .evidence(check_output, judge)
+            .usage(10, 0.01),
+    )
+}
+
+fn committed_line(ts: &str, from: &str, to: &str, cycle: u32) -> String {
+    line(fixtures::committed(from, to, cycle).at(ts))
+}
+
+/// A ledger being planted, with the clock advancing one minute per event.
+///
+/// The timestamps in a planted ledger are load-bearing in two tests below and
+/// scaffolding in every other — but they were typed out by hand everywhere, and
+/// kept monotonic by the author, which is one more thing to get wrong when a
+/// line is inserted in the middle. Tests that care about a particular stamp
+/// still build their lines explicitly; the rest describe the *shape* of the
+/// run and let this assign the clock.
+#[derive(Default)]
+struct Plant {
+    lines: Vec<String>,
+    minute: u32,
+}
+
+impl Plant {
+    /// A ledger that opens with `run_started` for this ticket.
+    fn started(ticket: &str) -> Self {
+        let mut p = Plant::default();
+        p.push(fixtures::started(ticket));
+        p
+    }
+
+    fn push(&mut self, event: Event) -> &mut Self {
+        let ts = format!("2026-07-26T12:{:02}:00.000Z", self.minute);
+        self.minute += 1;
+        self.lines.push(line(event.at(&ts)));
+        self
+    }
+
+    /// One finished attempt: `state_entered` under the deterministic session
+    /// id `stage.rs` would assign, then the `worker_output` that ended it.
+    fn attempt(&mut self, ticket: &str, state: &str, cycle: u32, summary: &str) -> &mut Self {
+        let id = session_id(ticket, state, cycle, 1);
+        self.push(fixtures::entered(state, cycle, 1).session(Some(&id)));
+        self.push(
+            fixtures::output(state, cycle)
+                .summary(summary)
+                .usage(10, 0.02),
+        )
+    }
+
+    fn lines(&self) -> &[String] {
+        &self.lines
+    }
+}
+
 fn note_lines(count: usize) -> Vec<String> {
     (0..count)
         .map(|i| {
-            serde_json::json!({
-                "ts": format!("2026-07-24T22:00:{i:02}.000Z"),
-                "elapsed_s": i,
-                "type": "note",
-                "text": format!("event {i}"),
-            })
-            .to_string()
+            line(
+                fixtures::note(&format!("event {i}"))
+                    .at(&format!("2026-07-24T22:00:{i:02}.000Z"))
+                    .elapsed(i as u64),
+            )
         })
         .collect()
 }
@@ -257,8 +375,7 @@ fn the_rendered_prompt_carries_the_handoff_protocol() {
           {"match":{"role":"judge"},"repeat":true,"verdict":{"pass":true,"rationale":"done"}}
         ]}"#,
     );
-    fx.run(&["init", "TINY-1"]);
-    fx.machine(TINY_MACHINE);
+    fx.init_tiny("TINY-1");
 
     let run = fx.run(&["run"]);
     assert!(run.status.success(), "run failed: {}", combined(&run));
@@ -310,8 +427,7 @@ fn a_worker_that_writes_no_handoff_is_treated_as_blocked() {
           {"match":{"role":"judge"},"repeat":true,"verdict":{"pass":true,"rationale":"done"}}
         ]}"#,
     );
-    fx.run(&["init", "TINY-1"]);
-    fx.machine(TINY_MACHINE);
+    fx.init_tiny("TINY-1");
 
     let run = fx.run(&["run"]);
     assert!(run.status.success(), "run failed: {}", combined(&run));
@@ -342,8 +458,7 @@ fn a_crashed_stage_is_retried_and_the_run_still_completes() {
           {"match":{"role":"judge"},"repeat":true,"verdict":{"pass":true,"rationale":"done"}}
         ]}"#,
     );
-    fx.run(&["init", "TINY-1"]);
-    fx.machine(TINY_MACHINE);
+    fx.init_tiny("TINY-1");
 
     let run = fx.run(&["run"]);
     assert!(run.status.success(), "run failed: {}", combined(&run));
@@ -375,13 +490,18 @@ fn resume_after_a_torn_write_re_enters_and_completes() {
           {"match":{"role":"judge"},"repeat":true,"verdict":{"pass":true,"rationale":"done"}}
         ]}"#,
     );
-    fx.run(&["init", "TINY-1"]);
-    fx.machine(TINY_MACHINE);
+    fx.init_tiny("TINY-1");
 
-    // A run killed by SIGKILL partway through writing `worker_output`.
+    // A run killed by SIGKILL partway through writing `worker_output`. The
+    // last line stays hand-written: a torn line is the one thing a serializer
+    // cannot produce, and reproducing it exactly is the point of this test.
     fx.write_ledger(&[
-        r#"{"ts":"2026-07-24T22:00:00.000Z","elapsed_s":0,"type":"run_started","ticket":"TINY-1","machine_hash":"x","budgets":{"usd":null,"wallclock_s":null,"max_transitions":null}}"#.into(),
-        r#"{"ts":"2026-07-24T22:00:01.000Z","elapsed_s":41,"type":"state_entered","state":"implement","cycle":1,"attempt":1,"session_id":null,"model":"claude-sonnet-5","thinking":"medium","skills":[],"mcp":[]}"#.into(),
+        run_started_line("TINY-1"),
+        line(
+            fixtures::entered("implement", 1, 1)
+                .at("2026-07-24T22:00:01.000Z")
+                .elapsed(41),
+        ),
         r#"{"ts":"2026-07-24T22:00:02.000Z","elapsed_s":95,"type":"worker_ou"#.into(),
     ]);
 
@@ -420,8 +540,7 @@ fn an_escalated_run_exits_non_zero() {
            "choice":{"to":"escalate","entry_prompt":"needs a human"}}
         ]}"#,
     );
-    fx.run(&["init", "TINY-1"]);
-    fx.machine(TINY_MACHINE);
+    fx.init_tiny("TINY-1");
 
     let run = fx.run(&["run"]);
     assert!(
@@ -443,7 +562,7 @@ fn an_escalated_run_exits_non_zero() {
 /// a straight line — the one thing this command must not do.
 #[test]
 fn diagram_draws_the_shipped_template_including_its_on_fail_back_edges() {
-    let fx = Fixture::new(r#"{"steps":[]}"#);
+    let fx = unscripted();
     fx.run(&["init", "DEMO-2"]);
 
     let out = fx.run(&["diagram"]);
@@ -479,7 +598,7 @@ fn diagram_draws_the_shipped_template_including_its_on_fail_back_edges() {
 /// the whole point of the Fennel error plumbing.
 #[test]
 fn validate_reports_a_fennel_syntax_error_against_the_source_file() {
-    let fx = Fixture::new(r#"{"steps":[]}"#);
+    let fx = unscripted();
     fx.run(&["init", "TINY-1"]);
     fx.machine("{:ticket \"BROKEN\"\n :entry \"implement\"\n"); // unclosed table
 
@@ -545,7 +664,7 @@ fn a_failing_check_overrules_a_worker_that_claims_success() {
 
 #[test]
 fn logs_default_tail_and_n_override_are_oldest_first() {
-    let fx = Fixture::new(r#"{"steps":[]}"#);
+    let fx = unscripted();
     fx.run(&["init", "TINY-1"]);
     fx.write_ledger(&note_lines(25));
 
@@ -574,7 +693,7 @@ fn logs_default_tail_and_n_override_are_oldest_first() {
 
 #[test]
 fn logs_raw_is_parseable_and_preserves_repaired_bytes() {
-    let fx = Fixture::new(r#"{"steps":[]}"#);
+    let fx = unscripted();
     fx.run(&["init", "TINY-1"]);
     fx.write_ledger(&note_lines(2));
     let expected = std::fs::read(fx.project.join(".loop/ledger.jsonl")).unwrap();
@@ -603,7 +722,7 @@ fn logs_raw_is_parseable_and_preserves_repaired_bytes() {
 
 #[test]
 fn logs_rejects_corrupt_interior_content_without_printing_it() {
-    let fx = Fixture::new(r#"{"steps":[]}"#);
+    let fx = unscripted();
     fx.run(&["init", "TINY-1"]);
     fx.write_ledger(&note_lines(1));
     let path = fx.project.join(".loop/ledger.jsonl");
@@ -623,7 +742,7 @@ fn logs_rejects_corrupt_interior_content_without_printing_it() {
 
 #[test]
 fn logs_raw_rejects_an_explicit_n() {
-    let fx = Fixture::new(r#"{"steps":[]}"#);
+    let fx = unscripted();
     let out = fx.run(&["logs", "--raw", "-n", "3"]);
     assert_eq!(out.status.code(), Some(2));
     assert!(stdout(&out).is_empty());
@@ -632,7 +751,7 @@ fn logs_raw_rejects_an_explicit_n() {
 
 #[test]
 fn logs_empty_ledger_has_human_message_but_raw_is_empty() {
-    let fx = Fixture::new(r#"{"steps":[]}"#);
+    let fx = unscripted();
     fx.run(&["init", "TINY-1"]);
 
     let human = fx.run(&["logs"]);
@@ -651,7 +770,7 @@ fn logs_empty_ledger_has_human_message_but_raw_is_empty() {
 
 #[test]
 fn logs_does_not_load_a_missing_or_invalid_machine() {
-    let fx = Fixture::new(r#"{"steps":[]}"#);
+    let fx = unscripted();
     fx.run(&["init", "TINY-1"]);
     fx.write_ledger(&note_lines(1));
     let expected = std::fs::read(fx.project.join(".loop/ledger.jsonl")).unwrap();
@@ -674,9 +793,8 @@ fn logs_does_not_load_a_missing_or_invalid_machine() {
 /// branch, so `loop status --json` on a fresh project handed a parser prose.
 #[test]
 fn status_json_is_parseable_on_an_empty_ledger() {
-    let fx = Fixture::new(r#"{"steps":[]}"#);
-    fx.run(&["init", "TINY-1"]);
-    fx.machine(TINY_MACHINE);
+    let fx = unscripted();
+    fx.init_tiny("TINY-1");
 
     let out = fx.run(&["status", "--json"]);
     assert!(out.status.success(), "{}", combined(&out));
@@ -704,13 +822,16 @@ fn a_resumed_run_keeps_the_wallclock_it_had_already_spent() {
           {"match":{"role":"judge"},"repeat":true,"verdict":{"pass":true,"rationale":"done"}}
         ]}"#,
     );
-    fx.run(&["init", "TINY-1"]);
-    fx.machine(TINY_MACHINE);
+    fx.init_tiny("TINY-1");
 
     // An interrupted run that had already burned an hour.
     fx.write_ledger(&[
-        r#"{"ts":"2026-07-24T22:00:00.000Z","elapsed_s":0,"type":"run_started","ticket":"TINY-1","machine_hash":"x","budgets":{"usd":null,"wallclock_s":null,"max_transitions":null}}"#.into(),
-        r#"{"ts":"2026-07-24T23:00:00.000Z","elapsed_s":3600,"type":"state_entered","state":"implement","cycle":1,"attempt":1,"session_id":null,"model":"claude-sonnet-5","thinking":"medium","skills":[],"mcp":[]}"#.into(),
+        run_started_line("TINY-1"),
+        line(
+            fixtures::entered("implement", 1, 1)
+                .at("2026-07-24T23:00:00.000Z")
+                .elapsed(3600),
+        ),
     ]);
 
     // `status` reports the run's clock, not zero, before anything resumes.
@@ -749,36 +870,15 @@ fn a_resumed_run_keeps_the_wallclock_it_had_already_spent() {
 // and that every way this can go wrong is a loud failure rather than a wrong
 // session.
 
-/// The deterministic id `stage.rs` assigns, mirrored here so a change to that
-/// scheme breaks these tests loudly instead of silently reopening nothing.
+/// The deterministic id `stage.rs` assigns, built from the harness's own
+/// sanitizer rather than from a second one written here. The copy this
+/// replaces dropped `_`, which `sanitize_component` deliberately keeps — the
+/// exact disagreement `config.rs` has a test pinning as the bug it once was.
 fn session_id(ticket: &str, state: &str, cycle: u32, attempt: u32) -> String {
-    let slug = |s: &str| {
-        s.chars()
-            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-            .collect::<String>()
-    };
-    format!("{}-{}-{cycle}-{attempt}", slug(ticket), slug(state))
-}
-
-fn entered_line(ts: &str, state: &str, cycle: u32, attempt: u32, session: Option<&str>) -> String {
-    let session = match session {
-        Some(s) => format!("\"{s}\""),
-        None => "null".to_string(),
-    };
     format!(
-        r#"{{"ts":"{ts}","elapsed_s":0,"type":"state_entered","state":"{state}","cycle":{cycle},"attempt":{attempt},"session_id":{session},"model":"claude-sonnet-5","thinking":"medium","skills":[],"mcp":[]}}"#
-    )
-}
-
-fn output_line(ts: &str, state: &str, cycle: u32, summary: &str) -> String {
-    format!(
-        r#"{{"ts":"{ts}","elapsed_s":0,"type":"worker_output","state":"{state}","cycle":{cycle},"summary":"{summary}","artifacts":[],"usage":{{"tokens":10,"cost_usd":0.02}}}}"#
-    )
-}
-
-fn run_started_line(ticket: &str) -> String {
-    format!(
-        r#"{{"ts":"2026-07-26T12:00:00.000Z","elapsed_s":0,"type":"run_started","ticket":"{ticket}","machine_hash":"x","budgets":{{"usd":null,"wallclock_s":null,"max_transitions":null}}}}"#
+        "{}-{}-{cycle}-{attempt}",
+        sanitize_component(ticket, "ticket"),
+        sanitize_component(state, "state")
     )
 }
 
@@ -795,8 +895,7 @@ fn session_latest_hands_the_recorded_id_to_pi_as_a_session_reopen() {
           {"match":{"role":"judge"},"repeat":true,"verdict":{"pass":true,"rationale":"done"}}
         ]}"#,
     );
-    fx.run(&["init", "TINY-1"]);
-    fx.machine(TINY_MACHINE);
+    fx.init_tiny("TINY-1");
     let run = fx.run(&["run"]);
     assert!(run.status.success(), "run failed: {}", combined(&run));
 
@@ -850,7 +949,7 @@ fn session_latest_hands_the_recorded_id_to_pi_as_a_session_reopen() {
 /// being rewritten, so it must not be a prerequisite.
 #[test]
 fn session_state_filter_is_exact_and_works_without_a_machine() {
-    let fx = Fixture::new(r#"{"steps":[]}"#);
+    let fx = unscripted();
     for (state, cycle, attempt) in [
         ("implement", 1, 1),
         ("implement-hotfix", 1, 1),
@@ -859,46 +958,13 @@ fn session_state_filter_is_exact_and_works_without_a_machine() {
     ] {
         fx.plant_session(&session_id("PROJ-9", state, cycle, attempt));
     }
-    fx.write_ledger(&[
-        run_started_line("PROJ-9"),
-        entered_line(
-            "2026-07-26T12:01:00.000Z",
-            "implement",
-            1,
-            1,
-            Some(&session_id("PROJ-9", "implement", 1, 1)),
-        ),
-        output_line("2026-07-26T12:02:00.000Z", "implement", 1, "first pass"),
-        entered_line(
-            "2026-07-26T12:03:00.000Z",
-            "implement-hotfix",
-            1,
-            1,
-            Some(&session_id("PROJ-9", "implement-hotfix", 1, 1)),
-        ),
-        output_line(
-            "2026-07-26T12:04:00.000Z",
-            "implement-hotfix",
-            1,
-            "patched around it",
-        ),
-        entered_line(
-            "2026-07-26T12:05:00.000Z",
-            "implement",
-            2,
-            1,
-            Some(&session_id("PROJ-9", "implement", 2, 1)),
-        ),
-        output_line("2026-07-26T12:06:00.000Z", "implement", 2, "second pass"),
-        entered_line(
-            "2026-07-26T12:07:00.000Z",
-            "review",
-            2,
-            1,
-            Some(&session_id("PROJ-9", "review", 2, 1)),
-        ),
-        output_line("2026-07-26T12:08:00.000Z", "review", 2, "clean"),
-    ]);
+    let mut plant = Plant::started("PROJ-9");
+    plant
+        .attempt("PROJ-9", "implement", 1, "first pass")
+        .attempt("PROJ-9", "implement-hotfix", 1, "patched around it")
+        .attempt("PROJ-9", "implement", 2, "second pass")
+        .attempt("PROJ-9", "review", 2, "clean");
+    fx.write_ledger(plant.lines());
     assert!(
         !fx.project.join(".loop/machine.fnl").exists(),
         "this test is about surviving without one"
@@ -947,7 +1013,7 @@ fn session_state_filter_is_exact_and_works_without_a_machine() {
 /// and every `awk` after it rests on.
 #[test]
 fn sessions_lists_every_attempt_oldest_first_and_its_ids_reopen_them() {
-    let fx = Fixture::new(r#"{"steps":[]}"#);
+    let fx = unscripted();
     let ids: Vec<String> = [
         ("implement", 1, 1),
         ("implement", 1, 2),
@@ -964,7 +1030,7 @@ fn sessions_lists_every_attempt_oldest_first_and_its_ids_reopen_them() {
     fx.write_ledger(&[
         run_started_line("PROJ-9"),
         entered_line("2026-07-26T12:01:00.000Z", "implement", 1, 1, Some(&ids[0])),
-        r#"{"ts":"2026-07-26T12:02:00.000Z","elapsed_s":0,"type":"error","state":"implement","kind":"transient","detail":"executor lost"}"#.into(),
+        line(fixtures::error("implement", "executor lost").at("2026-07-26T12:02:00.000Z")),
         entered_line("2026-07-26T12:03:00.000Z", "implement", 1, 2, Some(&ids[1])),
         output_line("2026-07-26T12:04:00.000Z", "implement", 1, "second pass"),
         entered_line("2026-07-26T12:05:00.000Z", "review", 1, 1, Some(&ids[2])),
@@ -1029,14 +1095,14 @@ fn sessions_lists_every_attempt_oldest_first_and_its_ids_reopen_them() {
 /// anything else, and it must not fail with a bare usage error either.
 #[test]
 fn session_without_an_id_names_the_command_that_replaced_the_picker() {
-    let fx = Fixture::new(r#"{"steps":[]}"#);
+    let fx = unscripted();
     let id = session_id("PROJ-9", "implement", 1, 1);
     fx.plant_session(&id);
-    fx.write_ledger(&[
-        run_started_line("PROJ-9"),
-        entered_line("2026-07-26T12:01:00.000Z", "implement", 1, 1, Some(&id)),
-        output_line("2026-07-26T12:02:00.000Z", "implement", 1, "did it"),
-    ]);
+    fx.write_ledger(
+        Plant::started("PROJ-9")
+            .attempt("PROJ-9", "implement", 1, "did it")
+            .lines(),
+    );
 
     let out = fx.run(&["session"]);
     assert!(!out.status.success(), "{}", combined(&out));
@@ -1083,7 +1149,7 @@ fn session_without_an_id_names_the_command_that_replaced_the_picker() {
 /// `loop sessions | fzf` that prints nothing has to say why.
 #[test]
 fn session_with_no_usable_candidate_names_the_filter() {
-    let fx = Fixture::new(r#"{"steps":[]}"#);
+    let fx = unscripted();
 
     // An empty ledger.
     let empty = fx.run(&["sessions"]);
@@ -1135,13 +1201,13 @@ fn session_with_no_usable_candidate_names_the_filter() {
 /// survives a piped stdout and never contaminates it.
 #[test]
 fn session_warns_when_the_chosen_attempt_never_reported() {
-    let fx = Fixture::new(r#"{"steps":[]}"#);
+    let fx = unscripted();
     let id = session_id("PROJ-9", "implement", 1, 1);
     fx.plant_session(&id);
     fx.write_ledger(&[
         run_started_line("PROJ-9"),
         entered_line("2026-07-26T12:01:00.000Z", "implement", 1, 1, Some(&id)),
-        r#"{"ts":"2026-07-26T12:02:00.000Z","elapsed_s":0,"type":"error","state":"implement","kind":"transient","detail":"executor lost"}"#.into(),
+        line(fixtures::error("implement", "executor lost").at("2026-07-26T12:02:00.000Z")),
     ]);
 
     let out = fx.run(&["session", "--latest"]);
@@ -1170,14 +1236,14 @@ fn session_warns_when_the_chosen_attempt_never_reported() {
 /// like a Worker that did nothing.
 #[test]
 fn session_propagates_a_failed_pi_launch() {
-    let fx = Fixture::new(r#"{"steps":[]}"#);
+    let fx = unscripted();
     let id = session_id("PROJ-9", "implement", 1, 1);
     fx.plant_session(&id);
-    fx.write_ledger(&[
-        run_started_line("PROJ-9"),
-        entered_line("2026-07-26T12:01:00.000Z", "implement", 1, 1, Some(&id)),
-        output_line("2026-07-26T12:02:00.000Z", "implement", 1, "did it"),
-    ]);
+    fx.write_ledger(
+        Plant::started("PROJ-9")
+            .attempt("PROJ-9", "implement", 1, "did it")
+            .lines(),
+    );
 
     // It works while the session exists…
     assert!(fx.run(&["session", "--latest"]).status.success());
@@ -1236,7 +1302,7 @@ const PREVIEW_MACHINE: &str = r#"
 /// a toolbox one, a toolbox stage prompt with no frontmatter model, and a skill at
 /// each level.
 fn preview_fixture() -> Fixture {
-    let fx = Fixture::new(r#"{"steps":[]}"#);
+    let fx = unscripted();
     fx.run(&["init", "PREV-1"]);
     fx.machine(PREVIEW_MACHINE);
 
@@ -1374,7 +1440,7 @@ fn preview_of_one_state_shows_the_worker_inputs_and_a_labelled_render() {
 /// exit-0 report for a machine that cannot run.
 #[test]
 fn preview_prints_diagnostics_then_fails_on_a_validation_error() {
-    let fx = Fixture::new(r#"{"steps":[]}"#);
+    let fx = unscripted();
     fx.run(&["init", "PREV-2"]);
     fx.machine(&TINY_MACHINE.replace(
         r#":stage-prompt "implement""#,
@@ -1465,41 +1531,6 @@ fn preview_is_deterministic_and_creates_no_run_or_render_files() {
 // produces a report naming every attempt and labelling its evidence by author,
 // that a partial run is reported rather than refused, and that a machine edited
 // since the run cannot quietly explain it.
-
-fn guard_line(
-    ts: &str,
-    from: &str,
-    to: &str,
-    check: &str,
-    criteria: &str,
-    check_output: Option<&str>,
-    judge: Option<&str>,
-) -> String {
-    // `Option`, matching `entered_line`'s session id, so "no Judge ran" and "an
-    // empty rationale" stay distinguishable at the call site.
-    let opt = |s: Option<&str>| {
-        s.map_or("null".to_string(), |s| {
-            serde_json::Value::from(s).to_string()
-        })
-    };
-    format!(
-        r#"{{"ts":"{ts}","elapsed_s":0,"type":"guard_checked","from":"{from}","to":"{to}","structural":"pass","check":"{check}","criteria":"{criteria}","check_output":{},"judge_rationale":{},"usage":{{"tokens":10,"cost_usd":0.01}}}}"#,
-        opt(check_output),
-        opt(judge)
-    )
-}
-
-fn proposed_line(ts: &str, from: &str, to: &str, rationale: &str) -> String {
-    format!(
-        r#"{{"ts":"{ts}","elapsed_s":0,"type":"transition_proposed","from":"{from}","to":"{to}","blocked":false,"rationale":"{rationale}","by":"worker"}}"#
-    )
-}
-
-fn committed_line(ts: &str, from: &str, to: &str, cycle: u32) -> String {
-    format!(
-        r#"{{"ts":"{ts}","elapsed_s":0,"type":"transition_committed","from":"{from}","to":"{to}","cycle":{cycle}}}"#
-    )
-}
 
 /// The end-to-end shape of the feature: a real run of the shipped template,
 /// recapped. Every attempt gets a section, the Worker's own account is labelled
@@ -1605,7 +1636,7 @@ fn recap_of_a_finished_run_names_every_attempt_and_labels_its_evidence() {
 /// worse than an error.
 #[test]
 fn recap_of_an_empty_ledger_is_an_error() {
-    let fx = Fixture::new(r#"{"steps":[]}"#);
+    let fx = unscripted();
     fx.run(&["init", "TINY-1"]);
 
     let out = fx.run(&["recap"]);
@@ -1621,9 +1652,8 @@ fn recap_of_an_empty_ledger_is_an_error() {
 /// `run_finished` that never arrived.
 #[test]
 fn recap_of_an_interrupted_run_reports_it_to_date() {
-    let fx = Fixture::new(r#"{"steps":[]}"#);
-    fx.run(&["init", "TINY-1"]);
-    fx.machine(TINY_MACHINE);
+    let fx = unscripted();
+    fx.init_tiny("TINY-1");
     fx.write_ledger(&[
         run_started_line("TINY-1"),
         entered_line("2026-07-26T12:00:01Z", "implement", 1, 1, Some("s-1")),
@@ -1652,7 +1682,7 @@ fn recap_of_an_interrupted_run_reports_it_to_date() {
 /// attempts the way `status`'s recent window does.
 #[test]
 fn recap_needs_no_machine_and_keeps_the_earliest_attempts() {
-    let fx = Fixture::new(r#"{"steps":[]}"#);
+    let fx = unscripted();
     fx.run(&["init", "TINY-1"]);
 
     let mut lines = vec![run_started_line("TINY-1")];
@@ -1665,8 +1695,8 @@ fn recap_needs_no_machine_and_keeps_the_earliest_attempts() {
             &ts,
             "implement",
             "implement",
-            "pass",
-            "skip",
+            GuardOutcome::Pass,
+            GuardOutcome::Skip,
             Some("ok"),
             None,
         ));
@@ -1710,8 +1740,7 @@ fn recap_refuses_to_explain_a_run_with_a_machine_that_has_since_changed() {
           {"match":{"role":"judge"},"repeat":true,"verdict":{"pass":true,"rationale":"ok"}}
         ]}"#,
     );
-    fx.run(&["init", "TINY-1"]);
-    fx.machine(TINY_MACHINE);
+    fx.init_tiny("TINY-1");
     assert!(fx.run(&["run"]).status.success());
 
     // The description a reader would otherwise see attached to the attempt.
@@ -1739,9 +1768,8 @@ fn recap_refuses_to_explain_a_run_with_a_machine_that_has_since_changed() {
 /// the shapes a healthy run never produces and a recap exists to explain.
 #[test]
 fn recap_reports_guard_failures_navigator_routes_and_the_fatal_error() {
-    let fx = Fixture::new(r#"{"steps":[]}"#);
-    fx.run(&["init", "TINY-1"]);
-    fx.machine(TINY_MACHINE);
+    let fx = unscripted();
+    fx.init_tiny("TINY-1");
     fx.write_ledger(&[
         run_started_line("TINY-1"),
         entered_line("2026-07-26T12:00:01Z", "implement", 1, 1, Some("s-1")),
@@ -1751,17 +1779,44 @@ fn recap_reports_guard_failures_navigator_routes_and_the_fatal_error() {
             "2026-07-26T12:01:02Z",
             "implement",
             "done",
-            "fail",
-            "skip",
+            GuardOutcome::Fail,
+            GuardOutcome::Skip,
             Some("cargo test\nFAILED: 3 tests"),
             None,
         ),
         entered_line("2026-07-26T12:02:00Z", "implement", 1, 2, Some("s-2")),
         output_line("2026-07-26T12:03:00Z", "implement", 1, "second try"),
-        r#"{"ts":"2026-07-26T12:03:01Z","elapsed_s":0,"type":"transition_proposed","from":"implement","to":null,"blocked":true,"rationale":"I cannot get the suite green","by":"worker"}"#.into(),
-        r#"{"ts":"2026-07-26T12:03:02Z","elapsed_s":0,"type":"navigator_invoked","from":"implement","proposal":"blocked: I cannot get the suite green","chosen_to":"blocked","entry_prompt":"summarize what you tried","usage":{"tokens":50,"cost_usd":0.001}}"#.into(),
-        r#"{"ts":"2026-07-26T12:03:03Z","elapsed_s":0,"type":"error","state":"implement","kind":"fatal","detail":"escalated: the suite never went green"}"#.into(),
-        r#"{"ts":"2026-07-26T12:03:04Z","elapsed_s":0,"type":"run_finished","status":"aborted","terminal_state":null,"totals":{"cost_usd":0.05,"wallclock_s":184,"transitions":0}}"#.into(),
+        line(
+            fixtures::blocked("implement", "I cannot get the suite green")
+                .at("2026-07-26T12:03:01Z"),
+        ),
+        line(
+            fixtures::navigator("implement", "blocked")
+                .at("2026-07-26T12:03:02Z")
+                .routing(
+                    "blocked: I cannot get the suite green",
+                    Some("summarize what you tried"),
+                )
+                .usage(50, 0.001),
+        ),
+        line(
+            fixtures::error("implement", "escalated: the suite never went green")
+                .at("2026-07-26T12:03:03Z")
+                .fatal(),
+        ),
+        line(
+            fixtures::finished(RunStatus::Aborted, "blocked")
+                .at("2026-07-26T12:03:04Z")
+                .no_terminal()
+                .totals(Totals {
+                    usage: Usage {
+                        cost_usd: 0.05,
+                        tokens: 0,
+                    },
+                    wallclock_s: 184,
+                    transitions: 0,
+                }),
+        ),
     ]);
 
     let out = fx.run(&["recap"]);

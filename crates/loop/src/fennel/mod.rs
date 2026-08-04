@@ -8,9 +8,7 @@
 
 use std::path::{Path, PathBuf};
 
-use sha2::{Digest, Sha256};
-
-use crate::core::{Config, CoreError, Machine, Result};
+use crate::core::{CoreError, Floor, Machine, Result, machine_hash};
 
 mod convert;
 mod eval;
@@ -25,6 +23,13 @@ pub const FENNEL_LUA: &str = include_str!("../../vendor/fennel.lua");
 /// `package.preload`.
 pub struct FennelVm {
     lua: mlua::Lua,
+    /// The `fennel` module table, kept from `install_fennel`.
+    ///
+    /// `eval_fennel` used to look it up through `package.loaded` on every call
+    /// and fall back to installing the compiler if it was missing — a fallback
+    /// that could never fire, since `new` installs it and then threw the table
+    /// it got back away.
+    fennel: mlua::Table,
 }
 
 impl FennelVm {
@@ -42,31 +47,41 @@ impl FennelVm {
         // full stdlib access (including `debug`) is required by fennel.lua
         // itself and is an explicit, documented design choice (docs/05-design-notes.md).
         let lua = unsafe { mlua::Lua::unsafe_new() };
-        eval::install_fennel(&lua)?;
+        let fennel = eval::install_fennel(&lua)?;
         eval::install_loop_module(&lua)?;
-        Ok(Self { lua })
+        Ok(Self { lua, fennel })
     }
 
     /// Load `.loop/machine.fnl`, resolve `:task`/`:plan` file references
     /// against the machine's directory, apply `config` where the machine is
     /// silent, and hash the source.
     ///
-    /// `config` is [`Config::defaults`] — the built-in floor. There is no
+    /// `floor` is [`Floor::default`] — the built-in defaults. There is no
     /// `config.fnl` to read first; a machine that wants a different model or
     /// budget says so itself, and a template you copied with `loop init
     /// --from` is how that stops being retyped per ticket.
-    pub fn load_machine(&self, path: &Path, config: &Config) -> Result<Machine> {
+    pub fn load_machine(&self, path: &Path, floor: &Floor) -> Result<Machine> {
         let source = std::fs::read_to_string(path)
             .map_err(|e| CoreError::io(format!("reading machine file {}", path.display()), e))?;
+        self.load_machine_source(path, &source, floor)
+    }
+
+    /// The same, for a caller that has already read the file.
+    ///
+    /// `loop recap` has: it reads and hashes `machine.fnl` to decide whether
+    /// the machine on disk is even the one that ran, and on a match then paid
+    /// for a second read and a second hash of the identical bytes inside
+    /// `load_machine`.
+    pub fn load_machine_source(&self, path: &Path, source: &str, floor: &Floor) -> Result<Machine> {
         let filename = path.to_string_lossy().to_string();
-        let value = eval::eval_fennel(&self.lua, &source, &filename)?;
+        let value = eval::eval_fennel(&self.lua, &self.fennel, source, &filename)?;
         let table = self.value_as_table(value, path)?;
-        let source_hash = hex::encode(Sha256::digest(source.as_bytes()));
+        let source_hash = machine_hash(source);
         let machine_dir = path
             .parent()
             .map(Path::to_path_buf)
             .unwrap_or_else(|| PathBuf::from("."));
-        convert::machine_from_table(&table, &machine_dir, source_hash, path, config)
+        convert::machine_from_table(&table, &machine_dir, source_hash, path, floor)
     }
 
     /// A missing/empty file compiles to Lua `nil`; treat that as an empty

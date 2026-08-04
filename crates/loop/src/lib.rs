@@ -1,20 +1,18 @@
 //! `loop` — a local, ticket-level agent orchestrator.
 //!
-//! The modules below were seven separate crates until they weren't. They still
-//! layer the same way, bottom to top: [`core`] is the IR and the traits;
+//! The modules layer bottom to top: [`core`] is the IR and the traits;
 //! `ledger`, [`fennel`], `toolbox` and [`runner`] are the four I/O halves
 //! (disk, Lua, prose, subprocesses); `engine` is the control loop written
 //! against nothing but `core`'s traits; and the rest — [`commands`] and its
 //! private neighbours — is the CLI wiring that hands the engine the real
 //! implementations.
 //!
-//! What cargo used to enforce, this file now only declares. A module here is
+//! This file only declares that layering; nothing enforces it. A module is
 //! `pub` when something outside the library reads it — the binary, or the
-//! integration tests under `tests/` — and `pub(crate)` otherwise. That is a
-//! weaker guarantee than a crate graph and it is worth being explicit about:
-//! nothing stops `engine` from reaching into `fennel` except review and the
-//! test that would have to grow a Lua VM to keep passing. See the header on
-//! `engine/mod.rs` for the boundary that actually matters.
+//! integration tests under `tests/` — and `pub(crate)` otherwise. Nothing stops
+//! `engine` reaching into `fennel` except review and the test that would have
+//! to grow a Lua VM to keep passing. See the header on `engine/mod.rs` for the
+//! boundary that actually matters.
 
 // `core`, `fennel` and `runner` are the three the integration tests link
 // against — `tests/machine_test.rs` needs a Fennel VM, `tests/mock_pi_e2e.rs`

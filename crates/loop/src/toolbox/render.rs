@@ -100,15 +100,14 @@ pub fn substitute(template: &str, vars: &BTreeMap<String, String>) -> String {
 /// template *asks for*, including names that will pass through untouched.
 /// `loop preview` splits the two against [`crate::core::Context::to_map`].
 pub fn referenced_vars(template: &str) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    for piece in pieces(template) {
-        if let Piece::Var(name) = piece
-            && !out.iter().any(|seen| seen == name)
-        {
-            out.push(name.to_string());
-        }
-    }
-    out
+    crate::core::dedup(
+        pieces(template)
+            .into_iter()
+            .filter_map(|piece| match piece {
+                Piece::Var(name) => Some(name.to_string()),
+                Piece::Text(_) => None,
+            }),
+    )
 }
 
 fn is_ident_start(b: u8) -> bool {

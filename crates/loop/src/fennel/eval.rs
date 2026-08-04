@@ -29,17 +29,6 @@ pub fn install_fennel(lua: &mlua::Lua) -> Result<mlua::Table> {
     Ok(fennel)
 }
 
-/// The `fennel` module table, from `package.loaded` if already installed,
-/// otherwise installing it fresh.
-fn fennel_table(lua: &mlua::Lua) -> Result<mlua::Table> {
-    let package: mlua::Table = lua.globals().get("package").map_err(lua_err)?;
-    let loaded: mlua::Table = package.get("loaded").map_err(lua_err)?;
-    match loaded.get::<mlua::Value>("fennel").map_err(lua_err)? {
-        mlua::Value::Table(t) => Ok(t),
-        _ => install_fennel(lua),
-    }
-}
-
 /// True when `scope` is a table whose `error_class` field equals `expected`.
 fn error_class_is(scope: &mlua::Value, expected: &str) -> bool {
     if let mlua::Value::Table(t) = scope {
@@ -92,8 +81,12 @@ pub fn install_loop_module(lua: &mlua::Lua) -> Result<()> {
 /// `correlate` makes the compiler emit one Lua line per Fennel top-level form,
 /// and we load the chunk under the `.fnl` filename, so `chunkname:line` in any
 /// error — compile or runtime — already *is* a Fennel source position.
-pub fn eval_fennel(lua: &mlua::Lua, source: &str, filename: &str) -> Result<mlua::Value> {
-    let fennel = fennel_table(lua)?;
+pub fn eval_fennel(
+    lua: &mlua::Lua,
+    fennel: &mlua::Table,
+    source: &str,
+    filename: &str,
+) -> Result<mlua::Value> {
     let eval_fn: mlua::Function = fennel
         .get("eval")
         .map_err(|e| CoreError::machine(format!("internal: fennel.eval missing: {e}")))?;

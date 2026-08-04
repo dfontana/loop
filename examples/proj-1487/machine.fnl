@@ -89,14 +89,14 @@
             :description "Open or update the pull request for this branch."}}
 
  ;; ── Transitions ───────────────────────────────────────────────────────────
- ;; Three tiers, cheapest first.
+ ;; Only these edges exist at all — a target that is not one of them goes to
+ ;; the Navigator, not to a guard. Past that, two tiers, cheapest first.
  ;;
- ;;  1. structural — only these edges exist at all.
- ;;  2. :check     — a command the HARNESS runs, in its own subprocess, after
+ ;;  1. :check     — a command the HARNESS runs, in its own subprocess, after
  ;;                  the stage exits. Exit 0 passes. The one signal here a
  ;;                  worker cannot author, because it never touches the
  ;;                  worker's session. A failed check is not appealable.
- ;;  3. :criteria  — an independent cheap Judge, which sees the stage's output,
+ ;;  2. :criteria  — an independent cheap Judge, which sees the stage's output,
  ;;                  its artifacts, and the check's stdout — but never the
  ;;                  worker's own claim that it succeeded.
  ;;

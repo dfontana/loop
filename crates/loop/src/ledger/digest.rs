@@ -5,10 +5,10 @@
 //! and pinned artifact references. Cost and drift are the reasons this is a
 //! summary and not a replay.
 
-use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
-use crate::core::{ArtifactRef, Event, EventPayload};
+use crate::core::Event;
+use crate::core::text::truncate;
 
 /// Rationale text longer than this is truncated in the digest. Rationales are
 /// meant to be one sentence; a worker padding one out shouldn't be able to
@@ -17,52 +17,26 @@ const MAX_RATIONALE_CHARS: usize = 300;
 
 /// Render the digest fed to a stage as `$LEDGER_DIGEST`.
 ///
-/// Deliberately reads only the *decisions* out of the log — `run_started`,
-/// `transition_committed`/`transition_proposed` (for the rationale), and the
-/// artifact refs on `worker_output` — and never the
-/// `worker_output.summary` prose. That's what keeps this a summary rather
-/// than a transcript by construction, not by convention: there's no field in
-/// this function that could leak one in.
+/// Deliberately reads only the *decisions* out of the log — the ticket, the
+/// committed hops with their rationales, the totals, and the artifact refs —
+/// and never `worker_output.summary`. That is what keeps this a summary rather
+/// than a transcript by construction rather than by convention: every field it
+/// reads comes off [`crate::core::RunState`], which carries no prose a worker
+/// wrote about itself.
 pub fn render(events: &[Event], last_n: usize) -> String {
-    let ticket = events.iter().find_map(|e| match &e.payload {
-        EventPayload::RunStarted { ticket, .. } => Some(ticket.clone()),
-        _ => None,
-    });
+    let ticket = crate::core::run_started(events).map(|s| s.ticket);
 
-    let mut cost_usd = 0.0_f64;
-    let mut tokens: u64 = 0;
-    let mut transitions: u32 = 0;
-    let mut artifacts: BTreeMap<String, String> = BTreeMap::new();
-    let mut committed_idx: Vec<usize> = Vec::new();
-
-    for (i, e) in events.iter().enumerate() {
-        match &e.payload {
-            EventPayload::WorkerOutput {
-                usage,
-                artifacts: arts,
-                ..
-            } => {
-                cost_usd += usage.cost_usd;
-                tokens += usage.tokens;
-                for a in arts {
-                    artifacts.insert(a.name.clone(), a.path.clone());
-                }
-            }
-            EventPayload::NavigatorInvoked { usage, .. }
-            | EventPayload::GuardChecked { usage, .. } => {
-                cost_usd += usage.cost_usd;
-                tokens += usage.tokens;
-            }
-            EventPayload::TransitionCommitted { .. } => {
-                transitions += 1;
-                committed_idx.push(i);
-            }
-            _ => {}
-        }
-    }
+    // Everything below the heading comes off the fold, which already walks
+    // these events for the engine: the spend, the transition count, the
+    // artifact table, and the committed hops with their rationales. This
+    // function used to fold *and* re-walk for the commit indices *and* walk
+    // backwards from each one hunting the matching proposal — three passes,
+    // and the last of them a nearest-match search for something the fold has
+    // in hand at the moment the commit arrives.
+    let rs = crate::core::fold(events);
 
     let mut out = String::new();
-    match &ticket {
+    match ticket {
         Some(t) => {
             let _ = writeln!(out, "# Ledger digest — {t}");
         }
@@ -70,30 +44,31 @@ pub fn render(events: &[Event], last_n: usize) -> String {
             let _ = writeln!(out, "# Ledger digest");
         }
     }
-    let _ = writeln!(
-        out,
-        "totals: ${cost_usd:.2} · {tokens} tokens · {transitions} transition(s)"
-    );
+    let _ = writeln!(out, "totals: {}", crate::output::fmt_totals(&rs.totals));
 
     out.push_str("\n## Recent transitions\n");
-    let tail_start = committed_idx.len().saturating_sub(last_n);
-    if committed_idx[tail_start..].is_empty() {
+    let tail = &rs.hops[rs.hops.len().saturating_sub(last_n)..];
+    if tail.is_empty() {
         out.push_str("(none yet)\n");
     }
-    for &i in &committed_idx[tail_start..] {
-        if let EventPayload::TransitionCommitted { from, to, cycle } = &events[i].payload {
-            let rationale = rationale_for(events, i, from, to)
-                .map(|r| truncate(&r, MAX_RATIONALE_CHARS))
-                .unwrap_or_else(|| "(no rationale recorded)".to_string());
-            let _ = writeln!(out, "- cycle {cycle}: {from} -> {to} — {rationale}");
-        }
+    for hop in tail {
+        let rationale = hop
+            .rationale
+            .as_deref()
+            .map(|r| truncate(r, MAX_RATIONALE_CHARS))
+            .unwrap_or_else(|| "(no rationale recorded)".to_string());
+        let _ = writeln!(
+            out,
+            "- cycle {}: {} -> {} — {rationale}",
+            hop.cycle, hop.from, hop.to
+        );
     }
 
     out.push_str("\n## Artifacts\n");
-    if artifacts.is_empty() {
+    if rs.artifacts.is_empty() {
         out.push_str("(none)\n");
     } else {
-        for (name, path) in &artifacts {
+        for (name, path) in &rs.artifacts {
             let _ = writeln!(out, "- {name}: {path}");
         }
     }
@@ -101,99 +76,30 @@ pub fn render(events: &[Event], last_n: usize) -> String {
     out
 }
 
-/// The rationale of the `transition_proposed` immediately behind a given
-/// `transition_committed`, matched by `(from, to)`. Committed events are
-/// always preceded by the proposal they ratify (docs/02-how-it-works.md's control loop:
-/// propose -> guard -> commit), so the nearest match walking backward is the
-/// right one even across cycles that revisit the same edge.
-fn rationale_for(events: &[Event], committed_at: usize, from: &str, to: &str) -> Option<String> {
-    events[..committed_at]
-        .iter()
-        .rev()
-        .find_map(|e| match &e.payload {
-            EventPayload::TransitionProposed {
-                from: f,
-                to: t,
-                rationale,
-                ..
-            } if f == from && t.as_deref() == Some(to) => Some(rationale.clone()),
-            _ => None,
-        })
-}
-
-/// Keep the first `max_chars` characters, marking elision with a trailing `…`
-/// (so a truncated result is `max_chars + 1` characters long).
-///
-/// Distinct from [`crate::output::truncate`], which bounds the *result* to `n`
-/// and collapses newlines for single-line terminal rows. This one preserves
-/// the text as-is, because what it bounds lands in the ledger and in prompts.
-pub(crate) fn truncate(s: &str, max_chars: usize) -> String {
-    if s.chars().count() <= max_chars {
-        return s.to_string();
-    }
-    let mut out: String = s.chars().take(max_chars).collect();
-    out.push('…');
-    out
-}
-
-/// A one-paragraph summary of a single stage's output, for the Judge. It must
-/// exclude the worker's own pass/fail claim — the Judge grades artifacts, not
-/// self-assessment (docs/05-design-notes.md).
-///
-/// The exclusion is structural, not a filter: this takes `summary` (what
-/// `worker_output` records the worker *did*) and the artifact list, never the
-/// `transition_proposed.rationale` or the worker's `vars` hints, which are
-/// exactly where a self-graded "QA passed" would live. Callers must not paste
-/// those in themselves.
-pub fn worker_digest_for_judge(summary: &str, artifacts: &[ArtifactRef]) -> String {
-    let mut out = String::new();
-    out.push_str(summary.trim());
-    if !artifacts.is_empty() {
-        out.push_str("\n\nArtifacts:\n");
-        for a in artifacts {
-            let _ = writeln!(out, "- {} ({})", a.name, a.path);
-        }
-    }
-    out
-}
+// `worker_digest_for_judge` used to live here. It moved to `core::runner`,
+// beside the `JudgeSpec` field it fills: it is pure, and filing it under
+// `ledger` put it out of `engine`'s reach and cost the engine's fake a second
+// implementation of it. `render` above stays, because it does depend on this
+// layer's neighbour `output::fmt_totals`.
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::{Actor, Budgets, Event, EventPayload, RunStatus, Totals, Usage};
-
-    fn ev(payload: EventPayload) -> Event {
-        Event::now(payload)
-    }
+    use crate::core::fixtures::{EventExt, committed, guard_checked, output, proposed, started};
+    use crate::core::{Event, RunStatus};
 
     fn sample_events(n_transitions: usize) -> Vec<Event> {
-        let mut events = vec![ev(EventPayload::RunStarted {
-            ticket: "PROJ-1".into(),
-            machine_hash: "sha256:abc".into(),
-            budgets: Budgets::default(),
-        })];
-
+        let mut events = vec![started("PROJ-1")];
         for i in 0..n_transitions {
             let from = format!("state{i}");
             let to = format!("state{}", i + 1);
-            events.push(ev(EventPayload::WorkerOutput {
-                state: from.clone(),
-                cycle: 1,
-                summary: format!("did work in {from}"),
-                artifacts: vec![],
-                usage: Usage {
-                    tokens: 10,
-                    cost_usd: 0.1,
-                },
-            }));
-            events.push(ev(EventPayload::TransitionProposed {
-                from: from.clone(),
-                to: Some(to.clone()),
-                blocked: false,
-                rationale: format!("rationale {i}"),
-                by: Actor::Worker,
-            }));
-            events.push(ev(EventPayload::TransitionCommitted { from, to, cycle: 1 }));
+            events.push(
+                output(&from, 1)
+                    .summary(&format!("did work in {from}"))
+                    .usage(10, 0.1),
+            );
+            events.push(proposed(&from, &to).rationale(&format!("rationale {i}")));
+            events.push(committed(&from, &to, 1));
         }
         events
     }
@@ -237,18 +143,8 @@ mod tests {
     fn never_includes_a_raw_transcript() {
         let mut events = sample_events(1);
         let huge_summary = "TRANSCRIPT-MARKER-".to_string() + &"x".repeat(10_000);
-        events.push(ev(EventPayload::WorkerOutput {
-            state: "state1".into(),
-            cycle: 1,
-            summary: huge_summary,
-            artifacts: vec![],
-            usage: Usage::default(),
-        }));
-        events.push(ev(EventPayload::RunFinished {
-            status: RunStatus::Done,
-            terminal_state: Some("done".into()),
-            totals: Totals::default(),
-        }));
+        events.push(output("state1", 1).summary(&huge_summary));
+        events.push(crate::core::fixtures::finished(RunStatus::Done, "done"));
 
         let digest = render(&events, 8);
         assert!(
@@ -261,16 +157,7 @@ mod tests {
     #[test]
     fn includes_artifact_table() {
         let mut events = sample_events(0);
-        events.push(ev(EventPayload::WorkerOutput {
-            state: "implement".into(),
-            cycle: 1,
-            summary: "did stuff".into(),
-            artifacts: vec![ArtifactRef {
-                name: "diff".into(),
-                path: ".loop/artifacts/implement-1-diff".into(),
-            }],
-            usage: Usage::default(),
-        }));
+        events.push(output("implement", 1).artifact("diff", ".loop/artifacts/implement-1-diff"));
 
         let digest = render(&events, 8);
         assert!(digest.contains("diff: .loop/artifacts/implement-1-diff"));
@@ -283,65 +170,29 @@ mod tests {
     #[test]
     fn totals_include_the_judges_spend() {
         let mut events = sample_events(1);
-        events.push(ev(EventPayload::GuardChecked {
-            from: "state0".into(),
-            to: "state1".into(),
-            structural: crate::core::GuardOutcome::Pass,
-            check: crate::core::GuardOutcome::Skip,
-            criteria: crate::core::GuardOutcome::Pass,
-            check_output: None,
-            judge_rationale: Some("meets every criterion".into()),
-            usage: Usage {
-                tokens: 900,
-                cost_usd: 0.4,
-            },
-        }));
+        events.push(
+            guard_checked("state0", "state1")
+                .guards(
+                    crate::core::GuardOutcome::Skip,
+                    crate::core::GuardOutcome::Pass,
+                )
+                .usage(900, 0.4),
+        );
 
         let digest = render(&events, 8);
         assert!(digest.contains("$0.50"), "got: {digest}");
-        assert!(digest.contains("910 tokens"), "got: {digest}");
+        assert!(digest.contains("910 token(s)"), "got: {digest}");
     }
 
     #[test]
     fn long_rationale_is_truncated() {
-        let mut events = vec![ev(EventPayload::RunStarted {
-            ticket: "T".into(),
-            machine_hash: "h".into(),
-            budgets: Budgets::default(),
-        })];
+        let mut events = vec![started("T")];
         let long_rationale = "a".repeat(1000);
-        events.push(ev(EventPayload::TransitionProposed {
-            from: "a".into(),
-            to: Some("b".into()),
-            blocked: false,
-            rationale: long_rationale.clone(),
-            by: Actor::Worker,
-        }));
-        events.push(ev(EventPayload::TransitionCommitted {
-            from: "a".into(),
-            to: "b".into(),
-            cycle: 1,
-        }));
+        events.push(proposed("a", "b").rationale(&long_rationale));
+        events.push(committed("a", "b", 1));
 
         let digest = render(&events, 8);
         assert!(!digest.contains(&long_rationale));
         assert!(digest.len() < long_rationale.len());
-    }
-
-    #[test]
-    fn worker_digest_excludes_pass_fail_self_assessment() {
-        let artifacts = vec![ArtifactRef {
-            name: "report".into(),
-            path: ".loop/artifacts/qa-1-report".into(),
-        }];
-        let digest = worker_digest_for_judge("Ran the QA suite against staging.", &artifacts);
-        assert!(digest.contains("Ran the QA suite"));
-        assert!(digest.contains("report"));
-        // The function has no parameter through which a worker's self-graded
-        // verdict could enter — this just documents that the summary text
-        // itself (which callers must draw from `worker_output`, not from a
-        // `transition` proposal) passes through unedited.
-        let lower = digest.to_lowercase();
-        assert!(!lower.contains("i passed") && !lower.contains("qa passed"));
     }
 }

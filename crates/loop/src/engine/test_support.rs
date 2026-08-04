@@ -7,11 +7,10 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::path::PathBuf;
 
 use crate::core::{
-    AgentRunner, ArtifactClaim, ArtifactRef, ArtifactSink, Budgets, Check, CheckOutcome,
-    CheckRunner, Choice, Context, CoreError, Defaults, Event, EventPayload, JudgeSpec, LoopSpec,
-    Machine, ModelChoice, ModelSpec, NavigatorSpec, OnExhausted, OnFail, Proposal, QaCase, Result,
-    StagePromptRef, State, StateId, Thinking, Totals, Transition, Usage, Verdict, WorkerResult,
-    WorkerSpec,
+    AgentRunner, Artifact, ArtifactSink, Budgets, Check, CheckOutcome, CheckRunner, Choice,
+    Context, CoreError, Defaults, Event, EventPayload, JudgeSpec, LoopSpec, Machine, ModelChoice,
+    ModelSpec, NavigatorSpec, OnExhausted, OnFail, Proposal, QaCase, Result, StagePromptRef, State,
+    StateId, Thinking, Transition, Usage, Verdict, WorkerResult, WorkerSpec,
 };
 
 use crate::engine::prompts::{StageBuilder, StagePlan};
@@ -48,7 +47,7 @@ pub fn base_machine() -> Machine {
         navigator_max_invocations: 5,
         digest_last_n: 8,
         pi_extensions: vec!["mcp".into()],
-        source_hash: "sha256:test".into(),
+        source_hash: crate::core::machine_hash("(test machine)"),
         source_path: PathBuf::from("machine.fnl"),
         dir: PathBuf::from("."),
     }
@@ -120,6 +119,116 @@ pub fn loop_spec(
     }
 }
 
+// ── machine builder ───────────────────────────────────────────────────────
+
+/// Assemble a test machine from its shape rather than its field assignments.
+///
+/// [`Build::entry`] and [`Build::edge`] insert any state they name, so a test
+/// cannot describe an unreachable state or a missing terminal by accident.
+pub struct Build(Machine);
+
+pub fn machine() -> Build {
+    Build(base_machine())
+}
+
+impl Build {
+    /// The entry state, inserted if it isn't already there.
+    pub fn entry(mut self, id: &str) -> Self {
+        self.0.entry = id.into();
+        self.ensure(id);
+        self
+    }
+
+    pub fn state(mut self, id: &str) -> Self {
+        self.ensure(id);
+        self
+    }
+
+    /// A state built by hand — [`state_with_skills`], [`state_with_mcp`].
+    pub fn with(mut self, s: State) -> Self {
+        self.0.states.insert(s.id.clone(), s);
+        self
+    }
+
+    pub fn terminal(mut self, id: &str) -> Self {
+        self.0.terminals.insert(id.into());
+        self
+    }
+
+    /// A terminal that is also where escalation lands.
+    pub fn escalate_to(mut self, id: &str) -> Self {
+        self.0.terminals.insert(id.into());
+        self.0.escalation_state = Some(id.into());
+        self
+    }
+
+    /// An edge, plus any endpoint that is neither already a state nor a
+    /// declared terminal. Keeps a test from silently describing a machine whose
+    /// own linter would reject it.
+    pub fn edge(mut self, t: Transition) -> Self {
+        for id in [t.from.clone(), t.to.clone()] {
+            if !self.0.terminals.contains(&id) {
+                self.ensure(&id);
+            }
+        }
+        self.0.transitions.push(t);
+        self
+    }
+
+    pub fn loop_over(mut self, l: LoopSpec) -> Self {
+        self.0.loops.push(l);
+        self
+    }
+
+    pub fn budget_usd(mut self, usd: f64) -> Self {
+        self.0.budgets.usd = Some(usd);
+        self
+    }
+
+    pub fn budget_transitions(mut self, n: u32) -> Self {
+        self.0.budgets.max_transitions = Some(n);
+        self
+    }
+
+    pub fn budget_wallclock_s(mut self, s: u64) -> Self {
+        self.0.budgets.wallclock_s = Some(s);
+        self
+    }
+
+    pub fn navigator_cap(mut self, n: u32) -> Self {
+        self.0.navigator_max_invocations = n;
+        self
+    }
+
+    pub fn default_skills(mut self, names: &[&str]) -> Self {
+        self.0.defaults.skills = names.iter().map(|s| s.to_string()).collect();
+        self
+    }
+
+    pub fn default_mcp(mut self, names: &[&str]) -> Self {
+        self.0.defaults.mcp = names.iter().map(|s| s.to_string()).collect();
+        self
+    }
+
+    /// Drop every declared pi-extension, so a stage naming MCP servers has no
+    /// tool to connect them with.
+    pub fn without_extensions(mut self) -> Self {
+        self.0.pi_extensions.clear();
+        self
+    }
+
+    pub fn build(self) -> Machine {
+        self.0
+    }
+
+    fn ensure(&mut self, id: &str) {
+        self.0
+            .states
+            .entry(id.to_string())
+            .or_insert_with(|| state(id));
+    }
+}
+
 // ── CheckRunner fake ──────────────────────────────────────────────────────
 
 /// Scriptable stand-in for the harness's own subprocess. Queued outcomes are
@@ -141,7 +250,6 @@ impl FakeChecks {
     pub fn script_pass(&self, output: &str) {
         self.script(CheckOutcome {
             passed: true,
-            exit_code: Some(0),
             output: output.into(),
         });
     }
@@ -149,7 +257,6 @@ impl FakeChecks {
     pub fn script_fail(&self, output: &str) {
         self.script(CheckOutcome {
             passed: false,
-            exit_code: Some(1),
             output: output.into(),
         });
     }
@@ -176,7 +283,6 @@ impl CheckRunner for FakeChecks {
             .pop_front()
             .unwrap_or(CheckOutcome {
                 passed: true,
-                exit_code: Some(0),
                 output: String::new(),
             }))
     }
@@ -187,30 +293,136 @@ impl CheckRunner for FakeChecks {
 #[derive(Default)]
 pub struct FakeLedger {
     pub events: Vec<Event>,
+    /// How many times the engine has read the whole log back.
+    ///
+    /// Against a real `Ledger` that is a syscall and a full re-parse of a file
+    /// that grows all run, so it is worth being able to assert on.
+    reads: std::cell::Cell<usize>,
 }
 
 impl crate::core::LedgerSink for FakeLedger {
     fn append(&mut self, payload: EventPayload) -> Result<Event> {
-        let e = Event::now(payload);
+        let e = Event::stamped(payload, 0);
         self.events.push(e.clone());
         Ok(e)
     }
 
     fn read_all(&self) -> Result<Vec<Event>> {
+        self.reads.set(self.reads.get() + 1);
         Ok(self.events.clone())
     }
 }
 
+/// One `guard_checked`, projected — what a test asserting on the guard tiers
+/// actually reads.
+#[derive(Clone, Debug)]
+pub struct Guard {
+    pub check: crate::core::GuardOutcome,
+    pub criteria: crate::core::GuardOutcome,
+    pub check_output: Option<String>,
+    pub usage: Usage,
+}
+
 impl FakeLedger {
+    /// A ledger that already holds these events — a run being resumed.
+    pub fn holding(events: Vec<Event>) -> Self {
+        Self {
+            events,
+            ..Self::default()
+        }
+    }
+
+    pub fn reads(&self) -> usize {
+        self.reads.get()
+    }
+
     pub fn kinds(&self) -> Vec<&'static str> {
         self.events.iter().map(|e| e.kind()).collect()
     }
 
-    pub fn payloads_of<'a>(&'a self, kind: &str) -> Vec<&'a EventPayload> {
+    pub fn count_of(&self, kind: &str) -> usize {
+        self.events.iter().filter(|e| e.kind() == kind).count()
+    }
+
+    // ── projections ───────────────────────────────────────────────────────
+    //
+    // The variant is already known from the event kind, so the match belongs
+    // here rather than in every test that wants one field off one event.
+
+    /// `(state, cycle, attempt)` per `state_entered`, in order.
+    pub fn entered(&self) -> Vec<(String, u32, u32)> {
         self.events
             .iter()
-            .filter(|e| e.kind() == kind)
-            .map(|e| &e.payload)
+            .filter_map(|e| match &e.payload {
+                EventPayload::StateEntered(h) => Some((h.state.clone(), h.cycle, h.attempt)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    pub fn attempts(&self) -> Vec<u32> {
+        self.entered().into_iter().map(|(_, _, a)| a).collect()
+    }
+
+    pub fn state_cycles(&self) -> Vec<(String, u32)> {
+        self.entered().into_iter().map(|(s, c, _)| (s, c)).collect()
+    }
+
+    pub fn guards(&self) -> Vec<Guard> {
+        self.events
+            .iter()
+            .filter_map(|e| match &e.payload {
+                EventPayload::GuardChecked {
+                    check,
+                    criteria,
+                    check_output,
+                    usage,
+                    ..
+                } => Some(Guard {
+                    check: *check,
+                    criteria: *criteria,
+                    check_output: check_output.clone(),
+                    usage: *usage,
+                }),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// `(from, to)` per `transition_committed`, in order.
+    pub fn commits(&self) -> Vec<(String, String)> {
+        self.events
+            .iter()
+            .filter_map(|e| match &e.payload {
+                EventPayload::TransitionCommitted { from, to, .. } => {
+                    Some((from.clone(), to.clone()))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The detail of each `error`, in order.
+    pub fn errors(&self) -> Vec<String> {
+        self.events
+            .iter()
+            .filter_map(|e| match &e.payload {
+                EventPayload::Error { detail, .. } => Some(detail.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The artifact *names* recorded on each `worker_output`, in order.
+    pub fn artifact_names(&self) -> Vec<Vec<String>> {
+        self.events
+            .iter()
+            .filter_map(|e| match &e.payload {
+                EventPayload::WorkerOutput { artifacts, .. } => {
+                    Some(artifacts.iter().map(|a| a.name.clone()).collect())
+                }
+                _ => None,
+            })
             .collect()
     }
 }
@@ -221,8 +433,8 @@ impl FakeLedger {
 pub struct FakeArtifacts;
 
 impl ArtifactSink for FakeArtifacts {
-    fn capture(&self, state: &str, cycle: u32, claim: &ArtifactClaim) -> Result<ArtifactRef> {
-        Ok(ArtifactRef {
+    fn capture(&self, state: &str, cycle: u32, claim: &Artifact) -> Result<Artifact> {
+        Ok(Artifact {
             name: claim.name.clone(),
             path: format!(".loop/artifacts/{state}-{cycle}-{}", claim.name),
         })
@@ -336,7 +548,6 @@ impl<'m> StageBuilder for FakeStageBuilder<'m> {
             skill_paths: skills.iter().map(PathBuf::from).collect(),
             system_prompt_path: PathBuf::from("/dev/null"),
             entry_message: format!("enter {state} cycle {cycle} attempt {attempt}"),
-            mcp,
             handoff_path: PathBuf::from("/tmp/handoff.json"),
             cwd: PathBuf::new(),
             session_id: None,
@@ -351,26 +562,26 @@ impl<'m> StageBuilder for FakeStageBuilder<'m> {
             crashed,
             ..Context::default()
         };
-        self.contexts.borrow_mut().push(context.clone());
-        Ok(StagePlan {
-            spec,
-            context,
-            skills,
-        })
+        self.contexts.borrow_mut().push(context);
+        Ok(StagePlan { spec, skills, mcp })
     }
 
     fn build_judge(
         &self,
         criteria: &str,
         worker_summary: &str,
-        artifacts: &[ArtifactRef],
+        artifacts: &[Artifact],
         check_output: Option<&str>,
     ) -> Result<JudgeSpec> {
         Ok(JudgeSpec {
             check_output: check_output.map(str::to_string),
             criteria: criteria.into(),
-            worker_digest: worker_summary.into(),
-            artifact_paths: artifacts.iter().map(|a| PathBuf::from(&a.path)).collect(),
+            // The same function `CliStage` builds the real one with. It used to
+            // be unreachable from here — it sat in `ledger`, which `engine` may
+            // not import — so this fake carried its own version, with different
+            // separators and no `Artifacts:` header. Every engine test that
+            // asserted on a Judge's digest was asserting on the fake's.
+            worker_digest: crate::core::worker_digest_for_judge(worker_summary, artifacts),
             model: self.machine.judge.clone(),
             cwd: PathBuf::new(),
         })
@@ -381,18 +592,17 @@ impl<'m> StageBuilder for FakeStageBuilder<'m> {
         from: &StateId,
         proposal: Option<&Proposal>,
     ) -> Result<NavigatorSpec> {
-        let mut reachable = self.machine.neighbors(from);
-        if let Some(esc) = &self.machine.escalation_state {
-            if !reachable.contains(esc) {
-                reachable.push(esc.clone());
-            }
-        }
+        // The declared neighbours, exactly as `CliStage` passes them. This
+        // fake used to append `escalation_state` as well, so every engine test
+        // ran against a choice set no real Navigator is ever offered — the
+        // sentinel is added by `runner::command::navigator_choices`, one layer
+        // out, and the escalation *state* is reached by naming it.
         Ok(NavigatorSpec {
             graph_summary: String::new(),
             ledger_digest: String::new(),
             from: from.clone(),
             proposal: proposal.cloned(),
-            reachable,
+            reachable: self.machine.neighbors(from),
             model: self.machine.navigator.clone(),
             cwd: PathBuf::new(),
         })
@@ -427,7 +637,6 @@ pub fn worker_result(proposal: Proposal) -> WorkerResult {
             tokens: 100,
             cost_usd: 0.1,
         },
-        session_id: None,
         exit_ok: true,
         stderr_tail: String::new(),
     }
@@ -467,11 +676,6 @@ pub fn choice_with_addendum(to: &str, addendum: &str) -> Choice {
     }
 }
 
-#[allow(dead_code)]
-pub fn zero_totals() -> Totals {
-    Totals::default()
-}
-
 /// An artifact sink that refuses one particular claimed path, standing in for
 /// the real store's "that file is not there" / "that escapes the project root".
 pub struct RefusingArtifacts {
@@ -479,7 +683,7 @@ pub struct RefusingArtifacts {
 }
 
 impl ArtifactSink for RefusingArtifacts {
-    fn capture(&self, state: &str, cycle: u32, claim: &ArtifactClaim) -> Result<ArtifactRef> {
+    fn capture(&self, state: &str, cycle: u32, claim: &Artifact) -> Result<Artifact> {
         if claim.path == self.refuse {
             return Err(CoreError::other(format!(
                 "resolving claimed artifact path {}",

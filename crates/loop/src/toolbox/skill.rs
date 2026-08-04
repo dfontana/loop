@@ -35,7 +35,9 @@ pub fn candidates(name: &str, skills_dir: &Path) -> Vec<PathBuf> {
 pub fn resolve(name: &str, machine_dir: &Path) -> Result<PathBuf> {
     let skills_dir = machine_dir.join(crate::core::config::SKILLS_DIR);
     let candidates = candidates(name, &skills_dir);
-    let lookup = if name.contains('/') {
+    // The same predicate `StagePromptRef::parse` uses, so the two kinds agree
+    // on what an author meant by a `/`.
+    let lookup = if crate::core::names_a_path(name) {
         Lookup::Exact(Path::new(name))
     } else {
         Lookup::Named(&candidates)

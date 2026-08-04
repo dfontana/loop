@@ -22,7 +22,7 @@ flowchart TD
     C -->|"blocked / to is null /<br/>unknown target"| N["Navigator picks a target"]
     N --> D
     D -->|yes| K["transition_committed"]
-    D -->|no| G["guard tiers:<br/>structural → check → criteria"]
+    D -->|no| G["guard tiers:<br/>check → criteria"]
     G -->|pass| K
     G -->|"fail, on-fail retry"| A
     G -->|"fail, on-fail route"| K
@@ -34,7 +34,7 @@ flowchart TD
 
 Two things in that diagram are easy to miss and matter a lot:
 
-- A commit to the **escalation state bypasses every guard tier**, including the structural one. It does not need a declared transition.
+- A commit to the **escalation state bypasses every guard tier**. It does not need a declared transition — edge selection never runs for it.
 - An `on-fail` **route also bypasses every guard tier** — and its backoff.
 
 ## One stage, start to finish
@@ -63,9 +63,9 @@ The engine's outer loop reads the whole ledger, folds it into a run state, and d
 
 1. **Decide whether the Navigator is needed.** It is, if `blocked` is true, or `to` is null, or `to` is not a declared neighbor of the current state.
 2. **If so, invoke the Navigator.** It picks a target or escalates; its choice may finish the run.
-3. **If the target is the escalation state, commit directly** — no edge selection, no guard tiers.
-4. **Select the edge.** The first `:transitions` entry matching `(from, to)` wins; duplicates after it are dead (`loop validate` flags them). No match means the harness writes `guard_checked{structural: fail}` and escalates.
-5. **Run the guard pipeline** — structural, then check, then criteria.
+3. **If the target is `escalate` or the escalation state, escalate directly** — no edge selection, no guard tiers. `escalate` is the sentinel the Navigator names when nothing reachable fits, and the one the harness substitutes when a Navigator reply is unusable; it resolves to the machine's escalation state, or aborts the run if none is declared.
+4. **Select the edge.** The first `:transitions` entry matching `(from, to)` wins; duplicates after it are dead (`loop validate` flags them). A target that matches no edge is unreachable by construction — the Navigator can only pick from the states it was offered — so no match is recorded as `error{fatal}` and escalates.
+5. **Run the guard pipeline** — check, then criteria.
 6. **Append `guard_checked`** with each tier's outcome, the check's captured output, and the Judge's rationale.
 7. **Fail → handle `:on-fail`. Pass → commit.**
 
@@ -167,16 +167,16 @@ The harness appends an **Ending this stage** section to every rendered Worker pr
   "to": "<next state>",
   "blocked": false,
   "rationale": "why this is the right next step",
-  "artifacts": [{"name": "diff", "path": "relative/path.patch"}]
+  "artifacts": [{ "name": "diff", "path": "relative/path.patch" }]
 }
 ```
 
-| Field | Type | Required |
-| --- | --- | --- |
-| `to` | state id, or `null` | optional* |
-| `blocked` | bool, default `false` | optional* |
-| `rationale` | string | **yes** |
-| `artifacts` | `[{name, path}]`, default `[]` | optional |
+| Field       | Type                           | Required  |
+| ----------- | ------------------------------ | --------- |
+| `to`        | state id, or `null`            | optional* |
+| `blocked`   | bool, default `false`          | optional* |
+| `rationale` | string                         | **yes**   |
+| `artifacts` | `[{name, path}]`, default `[]` | optional  |
 
 \* A handoff with neither `to` nor `blocked: true` parses, and is routed exactly as a proposal naming an unknown target is: to the Navigator.
 
@@ -212,13 +212,14 @@ The Judge's and Navigator's fallbacks quote the reply, truncated to 400 characte
 
 ## Guards
 
-Three tiers, evaluated in order, cheapest first:
+Two tiers, evaluated in order, cheapest first:
 
 | # | Tier | What it is | Skipped when |
 | --- | --- | --- | --- |
-| 1 | `structural` | the edge must exist in `:transitions` | never — but it is really enforced by edge selection; in the guard function itself this tier is a hardcoded pass |
-| 2 | `check` | the edge's `:check` shell command | the edge has no `:check` |
-| 3 | `criteria` | the Judge, against the edge's `:criteria` | the edge has no `:criteria` |
+| 1 | `check` | the edge's `:check` shell command | the edge has no `:check` |
+| 2 | `criteria` | the Judge, against the edge's `:criteria` | the edge has no `:criteria` |
+
+There is no third, structural tier in the record. The edge _is_ required to exist in `:transitions` — that is what step 4 above enforces — but enforcing it is edge selection's job, and a tier that could only ever be recorded as `pass` was a field in every `guard_checked` that carried no information.
 
 `skip` counts as passing. A report passes when **no tier failed**.
 
@@ -338,13 +339,13 @@ Budgets are sampled at exactly two points: the top of stage entry — before any
 | `run_started` | `ticket`, `machine_hash`, `budgets{usd,wallclock_s,max_transitions}` | first step of a run |
 | `state_entered` | `state`, `cycle`, `attempt`, `session_id`, `model`, `thinking`, `skills[]`, `mcp[]` | immediately before spawning the Worker |
 | `worker_output` | `state`, `cycle`, `summary`, `artifacts[{name,path}]`, `usage{tokens,cost_usd}` | after a clean Worker exit, after artifact capture |
-| `transition_proposed` | `from`, `to` (nullable), `blocked`, `rationale`, `by` (`worker`\|`navigator`\|`harness`) | right after `worker_output` |
-| `guard_checked` | `from`, `to`, `structural`, `check`, `criteria` (each `pass`\|`fail`\|`skip`), `check_output`, `judge_rationale`, `usage{tokens,cost_usd}` (the Judge's, zero when no criteria ran) | after the guard tiers run |
+| `transition_proposed` | `from`, `to` (nullable), `blocked`, `rationale` | right after `worker_output` |
+| `guard_checked` | `from`, `to`, `check`, `criteria` (each `pass`\|`fail`\|`skip`), `check_output`, `judge_rationale`, `usage{tokens,cost_usd}` (the Judge's, zero when no criteria ran) | after the guard tiers run |
 | `navigator_invoked` | `from`, `proposal`, `chosen_to`, `entry_prompt`, `usage` | when the Navigator fires |
 | `transition_committed` | `from`, `to`, `cycle` | after guards pass, or on a route or escalation |
 | `error` | `state`, `kind` (`transient`\|`fatal`), `detail` | budget breach, loop exhausted, Worker crash, dropped artifact claim |
 | `note` | `text` | 3 crashes → escalating; otherwise a human annotation slot |
-| `run_finished` | `status` (`done`\|`failed`\|`aborted`), `terminal_state`, `totals{cost_usd,wallclock_s,transitions}` | terminal |
+| `run_finished` | `status` (`done`\|`failed`\|`aborted`), `terminal_state`, `totals{cost_usd,tokens,wallclock_s,transitions}` | terminal |
 
 ### The ledger is a record, not a transcript
 
@@ -413,15 +414,15 @@ loop status --json
 Human mode:
 
 ```
-running — at `review`
-  5 transitions, $1.23, 12m3s
+unfinished — last at `review`
+  5 transition(s), $1.23, 38104 token(s), 12m3s
   cycles: implement#2, qa#1
 
 recent:
   <ts>  <summary>
 ```
 
-The header is `not started`, ``running — at `{state}` ``, or `finished — {status}` (rendered as `Done`, `Failed`, or `Aborted`). The `cycles:` line appears only when the machine loaded and at least one cycle has been counted. `recent:` shows the last 12 events, oldest-first within that window, each rendered as a one-line summary in one of these forms:
+The header is `not started`, ``unfinished — last at `{state}` ``, or ``finished — {status} at `{state}` `` (status rendered as `Done`, `Failed`, or `Aborted`) — the same sentence `loop recap`'s `outcome:` line carries, from the same function, so the two never describe one ledger two ways. It says "unfinished" rather than "running" because status reads a ledger and nothing else: a run whose process died an hour ago is indistinguishable here from one still working, and only the first of those is honest. The `cycles:` line appears only when the machine loaded and at least one cycle has been counted. `recent:` shows the last 12 events, oldest-first within that window, each rendered as a one-line summary in one of these forms:
 
 ```
 run_started <ticket>

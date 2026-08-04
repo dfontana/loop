@@ -3,15 +3,55 @@
 
 mod common;
 
-use r#loop::core::{OnExhausted, OnFail, StagePromptRef, Thinking};
+use r#loop::core::{Floor, Machine, OnExhausted, OnFail, StagePromptRef, Thinking};
+
+/// Load a fixture machine, or fail naming it.
+///
+/// Every test here opened with the same five lines — a VM, a fixture path,
+/// `load_machine(&path, &Floor::default())`, a `to_string()`, an assert — so
+/// they open with one now. The path comes back too, for the two tests that
+/// hash or locate the source file.
+fn load_ok(name: &str) -> (Machine, std::path::PathBuf) {
+    let path = common::fixture(name);
+    let machine = common::vm()
+        .load_machine(&path, &Floor::default())
+        .unwrap_or_else(|e| panic!("{name} must load: {e}"));
+    (machine, path)
+}
+
+/// Load a machine written inline, for the shapes no fixture file carries.
+///
+/// The tempdir it writes into is dropped before this returns: a `Machine`
+/// records its `source_path` but never reads it again, so nothing downstream
+/// needs the file to survive the load.
+fn load_source(src: &str) -> Result<Machine, String> {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("machine.fnl");
+    std::fs::write(&path, src).unwrap();
+    common::vm()
+        .load_machine(&path, &Floor::default())
+        .map_err(|e| e.to_string())
+}
+
+/// The message a fixture that must *not* load produces.
+///
+/// A `String` rather than the `CoreError`: `core/error.rs` says nothing should
+/// match on a variant ("the coarse type is the point"), and five tests here
+/// asserted `matches!(err, CoreError::Machine(_))` — pinning a promise the
+/// error type deliberately does not make. What a load failure owes its reader
+/// is a message that names the problem, which is what these assert on.
+fn load_err(name: &str) -> String {
+    let path = common::fixture(name);
+    common::vm()
+        .load_machine(&path, &Floor::default())
+        .err()
+        .unwrap_or_else(|| panic!("{name} must not load"))
+        .to_string()
+}
 
 #[test]
 fn proj1487_machine_loads_completely() {
-    let vm = common::vm();
-    let config = common::default_config();
-    let path = common::fixture("proj1487/machine.fnl");
-
-    let machine = vm.load_machine(&path, &config).expect("load_machine");
+    let (machine, path) = load_ok("proj1487/machine.fnl");
 
     assert_eq!(machine.ticket, "PROJ-1487");
     assert!(machine.task.contains("churn_score"));
@@ -107,28 +147,18 @@ fn proj1487_machine_loads_completely() {
 
 #[test]
 fn missing_entry_with_multiple_states_is_a_clear_error() {
-    let vm = common::vm();
-    let config = common::default_config();
-    let path = common::fixture("missing_entry.fnl");
-
-    let err = vm.load_machine(&path, &config).unwrap_err();
-    let msg = err.to_string();
+    let msg = load_err("missing_entry.fnl");
     assert!(
         msg.contains("entry"),
         "expected the error to mention `:entry`, got: {msg}"
     );
-    assert!(matches!(err, r#loop::core::CoreError::Machine(_)));
 }
 
 /// `:check` accepts a bare command string (the common case) and a
 /// `{:cmd .. :timeout-s ..}` table for the rest.
 #[test]
 fn check_parses_from_both_the_string_and_table_forms() {
-    let vm = common::vm();
-    let config = common::default_config();
-    let path = common::fixture("checks.fnl");
-
-    let machine = vm.load_machine(&path, &config).expect("load_machine");
+    let (machine, _) = load_ok("checks.fnl");
 
     let bare = machine.edge("a", "b").expect("edge a->b");
     let check = bare.check.as_ref().expect("a bare-string check");
@@ -154,29 +184,19 @@ fn check_parses_from_both_the_string_and_table_forms() {
 /// gate that checks nothing — the most dangerous way for this to fail.
 #[test]
 fn an_empty_check_command_is_rejected() {
-    let vm = common::vm();
-    let config = common::default_config();
-    let path = common::fixture("check_empty.fnl");
-
-    let err = vm.load_machine(&path, &config).unwrap_err();
-    assert!(err.to_string().contains("empty"), "got: {err}");
+    let err = load_err("check_empty.fnl");
+    assert!(err.contains("empty"), "got: {err}");
 }
 
 /// A leftover `:when` must fail the load rather than being ignored — silently
 /// dropping it would leave the edge with no guard at all.
 #[test]
 fn leftover_when_guard_is_rejected_with_a_migration_message() {
-    let vm = common::vm();
-    let config = common::default_config();
-    let path = common::fixture("when_removed.fnl");
-
-    let err = vm.load_machine(&path, &config).unwrap_err();
-    let msg = err.to_string();
+    let msg = load_err("when_removed.fnl");
     assert!(
         msg.contains(":criteria"),
         "expected the error to name the replacement, got: {msg}"
     );
-    assert!(matches!(err, r#loop::core::CoreError::Machine(_)));
 }
 
 /// `:transition-mode` chose between two schemas for a tool that no longer
@@ -184,17 +204,11 @@ fn leftover_when_guard_is_rejected_with_a_migration_message() {
 /// meaning anything must say so, and name what replaced it.
 #[test]
 fn leftover_transition_mode_is_rejected_with_a_migration_message() {
-    let vm = common::vm();
-    let config = common::default_config();
-    let path = common::fixture("transition_mode_removed.fnl");
-
-    let err = vm.load_machine(&path, &config).unwrap_err();
-    let msg = err.to_string();
+    let msg = load_err("transition_mode_removed.fnl");
     assert!(
         msg.contains("$LOOP_HANDOFF"),
         "expected the error to name the replacement, got: {msg}"
     );
-    assert!(matches!(err, r#loop::core::CoreError::Machine(_)));
 }
 
 /// `:playbook` is a rename, not a removal, and that is exactly why it needs a
@@ -204,12 +218,7 @@ fn leftover_transition_mode_is_rejected_with_a_migration_message() {
 /// as its prompt.
 #[test]
 fn the_renamed_playbook_key_names_its_replacement() {
-    let vm = common::vm();
-    let config = common::default_config();
-    let path = common::fixture("playbook_renamed.fnl");
-
-    let err = vm.load_machine(&path, &config).unwrap_err();
-    let msg = err.to_string();
+    let msg = load_err("playbook_renamed.fnl");
     assert!(
         msg.contains(":stage-prompt"),
         "expected the error to name the replacement, got: {msg}"
@@ -224,32 +233,20 @@ fn the_renamed_playbook_key_names_its_replacement() {
         msg.contains(":prompt"),
         "expected the error to distinguish the inline key, got: {msg}"
     );
-    assert!(matches!(err, r#loop::core::CoreError::Machine(_)));
 }
 
 #[test]
 fn wrong_lua_type_for_a_string_field_is_rejected() {
-    let vm = common::vm();
-    let config = common::default_config();
-    let path = common::fixture("bad_from_type.fnl");
-
-    let err = vm.load_machine(&path, &config).unwrap_err();
-    let msg = err.to_string();
+    let msg = load_err("bad_from_type.fnl");
     assert!(
         msg.contains("string") && msg.contains("integer"),
         "expected a type-mismatch message, got: {msg}"
     );
-    assert!(matches!(err, r#loop::core::CoreError::Machine(_)));
 }
 
 #[test]
 fn syntax_error_points_at_fennel_source() {
-    let vm = common::vm();
-    let config = common::default_config();
-    let path = common::fixture("syntax_error.fnl");
-
-    let err = vm.load_machine(&path, &config).unwrap_err();
-    let msg = err.to_string();
+    let msg = load_err("syntax_error.fnl");
     assert!(
         msg.contains("syntax_error.fnl"),
         "expected the .fnl filename in the error, got: {msg}"
@@ -275,12 +272,7 @@ fn syntax_error_points_at_fennel_source() {
 /// about a line where something spelled almost exactly that is right there.
 #[test]
 fn a_misspelled_key_is_rejected_by_name() {
-    let vm = common::vm();
-    let config = common::default_config();
-    let path = common::fixture("typo_key.fnl");
-
-    let err = vm.load_machine(&path, &config).unwrap_err();
-    let msg = err.to_string();
+    let msg = load_err("typo_key.fnl");
     assert!(
         msg.contains("playbok"),
         "must name the offending key: {msg}"
@@ -299,20 +291,12 @@ fn a_misspelled_key_is_rejected_by_name() {
 /// fields are added without anyone maintaining a context string.
 #[test]
 fn a_bad_value_reports_its_path_and_the_valid_ones() {
-    let vm = common::vm();
-    let config = common::default_config();
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("machine.fnl");
-    std::fs::write(
-        &path,
+    let msg = load_source(
         r#"{:ticket "T" :task "t" :plan "p" :entry "a" :terminals ["done"]
             :states {:a {:stage-prompt "p"} :qa-staging {:stage-prompt "q" :thinking "hihg"}}
             :transitions [{:from "a" :to "done"}]}"#,
     )
-    .unwrap();
-
-    let err = vm.load_machine(&path, &config).unwrap_err();
-    let msg = err.to_string();
+    .expect_err("a bad `:thinking` must not load");
     assert!(
         msg.contains("qa-staging") && msg.contains("thinking"),
         "must locate the bad value: {msg}"
@@ -325,12 +309,7 @@ fn a_bad_value_reports_its_path_and_the_valid_ones() {
 /// was merged into the machine.
 #[test]
 fn top_level_provider_is_the_base_for_every_role() {
-    let vm = common::vm();
-    let config = common::default_config();
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("machine.fnl");
-    std::fs::write(
-        &path,
+    let m = load_source(
         r#"{:ticket "T" :task "t" :plan "p" :entry "a" :terminals ["done"]
             :provider "openai"
             :worker {:model "gpt-5"}
@@ -338,9 +317,7 @@ fn top_level_provider_is_the_base_for_every_role() {
             :states {:a {:stage-prompt "p"}}
             :transitions [{:from "a" :to "done"}]}"#,
     )
-    .unwrap();
-
-    let m = vm.load_machine(&path, &config).expect("load_machine");
+    .expect("load_machine");
 
     // A role that names no provider inherits the top-level one...
     assert_eq!(m.worker.provider, "openai");
@@ -354,28 +331,20 @@ fn top_level_provider_is_the_base_for_every_role() {
 /// gone this is the only source of defaults, so it has to actually work.
 #[test]
 fn an_unopinionated_machine_gets_the_built_in_defaults() {
-    let vm = common::vm();
-    let config = common::default_config();
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("machine.fnl");
-    std::fs::write(
-        &path,
+    let m = load_source(
         r#"{:ticket "T" :task "t" :plan "p" :entry "a" :terminals ["done"]
             :states {:a {:stage-prompt "p"}}
             :transitions [{:from "a" :to "done"}]}"#,
     )
-    .unwrap();
+    .expect("load_machine");
 
-    let m = vm.load_machine(&path, &config).expect("load_machine");
-    assert_eq!(m.worker, config.worker);
-    assert_eq!(m.judge, config.judge);
-    assert_eq!(m.navigator, config.navigator);
-    assert_eq!(
-        m.navigator_max_invocations,
-        config.navigator_max_invocations
-    );
-    assert_eq!(m.digest_last_n, config.digest_last_n);
-    assert_eq!(m.pi_extensions, config.pi_extensions);
+    let floor = Floor::default();
+    assert_eq!(m.worker, floor.worker);
+    assert_eq!(m.judge, floor.judge);
+    assert_eq!(m.navigator, floor.navigator);
+    assert_eq!(m.navigator_max_invocations, floor.navigator_max_invocations);
+    assert_eq!(m.digest_last_n, floor.digest_last_n);
+    assert_eq!(m.pi_extensions, floor.pi_extensions);
 }
 
 /// Keys that only ever lived in `config.fnl` must say where they went, rather
@@ -383,28 +352,18 @@ fn an_unopinionated_machine_gets_the_built_in_defaults() {
 /// to know the tier still exists under a different name.
 #[test]
 fn config_only_keys_are_rejected_with_a_migration_message() {
-    let vm = common::vm();
-    let config = common::default_config();
-    let dir = tempfile::tempdir().unwrap();
-
     for (key, expect) in [
         (r#":context "full""#, "$LEDGER_DIGEST"),
         (r#":default-skills ["jj"]"#, ":defaults {:skills"),
         (r#":default-mcp ["warehouse"]"#, ":defaults {:mcp"),
     ] {
-        let path = dir.path().join("machine.fnl");
-        std::fs::write(
-            &path,
-            format!(
-                r#"{{:ticket "T" :task "t" :plan "p" :entry "a" :terminals ["done"] {key}
-                    :states {{:a {{:stage-prompt "p"}}}}
-                    :transitions [{{:from "a" :to "done"}}]}}"#
-            ),
-        )
-        .unwrap();
-
-        let err = vm.load_machine(&path, &config).expect_err("must not load");
-        assert!(err.to_string().contains(expect), "for {key}: got {err}");
+        let err = load_source(&format!(
+            r#"{{:ticket "T" :task "t" :plan "p" :entry "a" :terminals ["done"] {key}
+                :states {{:a {{:stage-prompt "p"}}}}
+                :transitions [{{:from "a" :to "done"}}]}}"#
+        ))
+        .expect_err("must not load");
+        assert!(err.contains(expect), "for {key}: got {err}");
     }
 }
 
@@ -414,12 +373,7 @@ fn config_only_keys_are_rejected_with_a_migration_message() {
 /// whose job is to stop a slow check being killed early.
 #[test]
 fn a_misspelled_check_key_is_rejected_by_name() {
-    let vm = common::vm();
-    let config = common::default_config();
-    let path = common::fixture("typo_check_key.fnl");
-
-    let err = vm.load_machine(&path, &config).unwrap_err();
-    let msg = err.to_string();
+    let msg = load_err("typo_check_key.fnl");
     assert!(
         msg.contains("timeut-s"),
         "must name the offending key: {msg}"

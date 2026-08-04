@@ -9,18 +9,17 @@ use crate::core::machine::{Budgets, ModelSpec};
 
 /// Everything loop reads or writes, all of it under `<project>/.loop/`.
 ///
-/// There used to be three roots: a toolbox at `~/.config/loop`, the ticket at
-/// `<project>/.loop`, and generated renders at `~/.local/state/loop`. Stage prompts
-/// and skills resolved local-first across the first two, which meant "where
-/// does this come from" had two answers, `loop preview` had to report which
-/// one won, and editing a toolbox stage prompt silently changed the next stage of
-/// every in-flight ticket.
+/// One root, so "where does this come from" has one answer. A ticket directory
+/// is self-contained: committable, reviewable, and `rm -rf`-able in the same
+/// breath as the branch it belongs to. Reuse is `loop init --from <dir>`, which
+/// copies — so what you started from is recorded in the ticket rather than
+/// resolved out from under it, and editing the source cannot change a run
+/// already in flight.
 ///
-/// One root instead. A ticket directory is now self-contained: committable,
-/// reviewable, and `rm -rf`-able in the same breath as the branch it belongs
-/// to. Reuse is `loop init --from <dir>`, which copies — so what you started
-/// from is recorded in the ticket rather than resolved out from under it.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// A newtype over one `PathBuf` because what it earns is the methods below,
+/// not the field: nothing serializes or compares a `Paths`, so it derives
+/// neither.
+#[derive(Clone, Debug)]
 pub struct Paths {
     /// The project root the run drives — where `.loop/` lives and pi is spawned.
     pub project_dir: PathBuf,
@@ -34,7 +33,11 @@ pub const STAGE_PROMPTS_DIR: &str = "stage-prompts";
 pub const SKILLS_DIR: &str = "skills";
 
 impl Paths {
-    pub fn discover(project_dir: impl Into<PathBuf>) -> Self {
+    /// Root everything at `project_dir`. Not `discover`: nothing is
+    /// discovered, and the old name promised an upward search for a `.loop/`
+    /// that has never happened — `loop` works in the directory it is run in,
+    /// or in `--project-dir`.
+    pub fn new(project_dir: impl Into<PathBuf>) -> Self {
         Self {
             project_dir: project_dir.into(),
         }
@@ -84,25 +87,28 @@ impl Paths {
         self.run_file(state, cycle, attempt, &format!("{suffix}.md"))
     }
 
-    /// The one place that knows how a `run/` filename is spelled.
+    /// The rendered-prompt path with the cycle and attempt left as placeholders
+    /// — what `loop preview` shows for a stage that has not run.
     ///
-    /// It was three: this, the rendered-prompt name in `toolbox`, and a third
-    /// literal in `report` so `loop preview` could *guess* what the second one
-    /// would produce. Only this one sanitized, so a state id containing a `/`
-    /// wrote its handoff correctly and its prompt to a path that did not exist.
-    fn run_file(&self, state: &str, cycle: u32, attempt: u32, tail: &str) -> PathBuf {
-        self.run_dir().join(format!(
-            "{}-{cycle}-{attempt}-{tail}",
-            sanitize_component(state, "state")
-        ))
+    /// The *same* builder as the real thing, handed `<cycle>` and `<attempt>`
+    /// instead of numbers, rather than a second format string that has to be
+    /// kept in step with it. There is a test pinning the two together, which
+    /// was the tell that they were two.
+    #[must_use]
+    pub fn render_file_pattern(&self, state: &str, suffix: &str) -> PathBuf {
+        self.run_file(state, "<cycle>", "<attempt>", &format!("{suffix}.md"))
     }
 
-    /// The rendered-prompt path with the cycle and attempt left as placeholders
-    /// — what `loop preview` shows for a stage that has not run. Built from the
-    /// same sanitizer as the real thing, so the two cannot drift.
-    pub fn render_file_pattern(&self, state: &str, suffix: &str) -> PathBuf {
+    /// The one place that knows how a `run/` filename is spelled.
+    fn run_file(
+        &self,
+        state: &str,
+        cycle: impl std::fmt::Display,
+        attempt: impl std::fmt::Display,
+        tail: &str,
+    ) -> PathBuf {
         self.run_dir().join(format!(
-            "{}-<cycle>-<attempt>-{suffix}.md",
+            "{}-{cycle}-{attempt}-{tail}",
             sanitize_component(state, "state")
         ))
     }
@@ -112,11 +118,8 @@ impl Paths {
 /// `-`, falling back to `fallback` when nothing usable survives.
 ///
 /// One function for every name the harness interpolates into a path: run-file
-/// names, artifact filenames, and session ids. There used to be three, and they
-/// disagreed — `.loop/run/` kept `_`, session ids did not, and artifact names
-/// kept `.` as well — so a state named `open_pr` wrote `open_pr-1-1-handoff.json`
-/// beside a session id of `PROJ-open-pr-1-1`: two spellings of one state, ten
-/// files apart.
+/// names, artifact filenames, and session ids. One rather than three, so a
+/// state named `open_pr` cannot be spelled two ways ten files apart.
 ///
 /// Two properties are load-bearing rather than cosmetic:
 /// - **No `/` survives**, so a name the harness did not choose can never
@@ -124,9 +127,8 @@ impl Paths {
 ///   kept, because it is harmless in a lone component and keeps an artifact
 ///   called `report.md` readable.
 /// - **The result is never empty and never all dots**, so it can never be a
-///   bare `..`. That guard used to protect artifact names alone, on the grounds
-///   that those are worker-supplied — but a state id reaches a path too, and
-///   there was no reason for the weaker rule to hold anywhere.
+///   bare `..`. Worker-supplied artifact names make that necessary; state ids
+///   reach a path too, so it holds for every caller.
 pub fn sanitize_component(s: &str, fallback: &str) -> String {
     let cleaned: String = s
         .chars()
@@ -145,10 +147,38 @@ pub fn sanitize_component(s: &str, fallback: &str) -> String {
     }
 }
 
+/// The hash recorded in `run_started` and re-checked by `loop recap`.
+///
+/// One function rather than the expression written out at each call site: the
+/// whole of `recap`'s provenance decision is these bytes matching the ones
+/// `fennel` recorded at load time, and two spellings of one algorithm is how
+/// they quietly stop matching. The test fixtures build their `machine_hash`
+/// through it too, so a fixture ledger carries a hash the real reader would
+/// accept rather than a `"sha256:test"` shaped like nothing the harness writes.
+pub fn machine_hash(source: &str) -> String {
+    hex::encode(<sha2::Sha256 as sha2::Digest>::digest(source.as_bytes()))
+}
+
 fn home() -> Option<PathBuf> {
     std::env::var_os("HOME")
         .map(PathBuf::from)
         .filter(|p| !p.as_os_str().is_empty())
+}
+
+/// Whether an authored name is meant as a path rather than a bare name.
+///
+/// The escape hatch both `:stage-prompt` and `:skills` offer: a value with a
+/// `/` in it is taken as an exact path relative to the machine file, instead of
+/// being looked up under `stage-prompts/` or `skills/`.
+///
+/// One predicate, because it was two — decided at *load* time for a stage
+/// prompt (`convert` picking a [`crate::core::StagePromptRef`] variant) and at
+/// *resolve* time for a skill (`toolbox::skill` picking a `Lookup`) — so
+/// widening the rule, say to treat a leading `./` as a path too, had to be done
+/// in two modules at two different layers or the two kinds would disagree about
+/// what an author had written.
+pub fn names_a_path(value: &str) -> bool {
+    value.contains('/')
 }
 
 /// Expand a leading `~/` against `$HOME`.
@@ -162,31 +192,28 @@ pub fn expand_tilde(p: &Path) -> PathBuf {
     }
 }
 
-/// The settings a run uses, and where it works.
+/// The built-in defaults a machine overlays, and nothing else.
 ///
-/// This is no longer read from a file. `config.fnl` was a second authored
-/// artifact in a second directory whose only job was to hold values a machine
-/// could already override — so the values moved into the machine, the file
-/// went, and what remains here is the built-in floor a machine overlays plus
-/// the two things a machine has no business setting (`paths`, `pi_bin`).
+/// Not read from a file: a machine that wants a different model or budget says
+/// so itself, and `loop init --from <dir>` is how that stops being retyped per
+/// ticket.
+///
+/// Every field is consumed exactly once, by [`crate::fennel::convert`], and
+/// copied into the `Machine`. Nothing reads them again — so runtime callers
+/// take [`Paths`] or [`pi_bin`], not this.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct Config {
-    // No bare `provider` here. Each role spec below carries its own, and the
-    // machine's `:provider` key is what rewrites all three at once — a
-    // separate fallback field read by nothing was a fourth tier waiting to be
-    // wired to something that never merged it.
+pub struct Floor {
+    // No bare `provider`: each role spec carries its own, and the machine's
+    // `:provider` key rewrites all three at once.
     /// Default Worker model when a state doesn't specify one.
     pub worker: ModelSpec,
     pub judge: ModelSpec,
     pub navigator: ModelSpec,
     pub navigator_max_invocations: u32,
 
-    // No `default_skills` / `default_mcp` here. They were the config file's
-    // spelling of a baseline tier the machine already had as `:defaults`, and
-    // with one authored file there is one baseline: `Machine::resolve_skills`
-    // unions the machine defaults with the state's, and that is the whole
-    // chain. Keeping empty fields around invited a third tier that nothing
-    // merged.
+    // No `default_skills` / `default_mcp`: there is one baseline, the
+    // machine's `:defaults`, which `Machine::resolve_skills` unions with the
+    // state's. A second would be a tier nothing merges.
     /// Installed pi-extension package names activated per spawn
     /// (`mcp`, `review-model-selector`).
     pub pi_extensions: Vec<String>,
@@ -194,33 +221,20 @@ pub struct Config {
     pub budgets: Budgets,
     /// How many recent transitions the digest includes verbatim.
     pub digest_last_n: usize,
-
-    /// The pi executable. `LOOP_PI_BIN` overrides it — that is how the
-    /// integration tests point the whole harness at `mock-pi`.
-    pub pi_bin: String,
-
-    pub paths: Paths,
 }
 
-impl Config {
-    /// The built-in floor, before the machine overlays its own keys.
-    pub fn defaults(paths: Paths) -> Self {
+impl Default for Floor {
+    fn default() -> Self {
+        let anthropic = |model: &str, thinking| ModelSpec {
+            provider: "anthropic".into(),
+            model: model.into(),
+            thinking,
+        };
+        use crate::core::machine::Thinking;
         Self {
-            worker: ModelSpec {
-                provider: "anthropic".into(),
-                model: "claude-sonnet-5".into(),
-                thinking: crate::core::machine::Thinking::Medium,
-            },
-            judge: ModelSpec {
-                provider: "anthropic".into(),
-                model: "claude-haiku-4-5".into(),
-                thinking: crate::core::machine::Thinking::Low,
-            },
-            navigator: ModelSpec {
-                provider: "anthropic".into(),
-                model: "claude-haiku-4-5".into(),
-                thinking: crate::core::machine::Thinking::Low,
-            },
+            worker: anthropic("claude-sonnet-5", Thinking::Medium),
+            judge: anthropic("claude-haiku-4-5", Thinking::Low),
+            navigator: anthropic("claude-haiku-4-5", Thinking::Low),
             navigator_max_invocations: 5,
             pi_extensions: vec!["mcp".into(), "review-model-selector".into()],
             budgets: Budgets {
@@ -229,10 +243,14 @@ impl Config {
                 max_transitions: Some(60),
             },
             digest_last_n: 8,
-            pi_bin: std::env::var("LOOP_PI_BIN").unwrap_or_else(|_| "pi".into()),
-            paths,
         }
     }
+}
+
+/// The pi executable. `LOOP_PI_BIN` overrides it — that is how the integration
+/// tests point the whole harness at `mock-pi`.
+pub fn pi_bin() -> String {
+    std::env::var("LOOP_PI_BIN").unwrap_or_else(|_| "pi".into())
 }
 
 #[cfg(test)]
@@ -261,8 +279,7 @@ mod tests {
         // `_` and the session-id one did not, so one state had two spellings.
         assert_eq!(sanitize_component("open_pr", "state"), "open_pr");
 
-        // Never empty, never a bare `..` — the guard that used to apply to
-        // artifact names alone.
+        // Never empty, never a bare `..`.
         assert_eq!(sanitize_component("", "state"), "state");
         assert_eq!(sanitize_component("..", "artifact"), "artifact");
         assert_eq!(sanitize_component("...", "state"), "state");
@@ -275,7 +292,7 @@ mod tests {
     /// agree, since preview's whole job is to name the file a run would write.
     #[test]
     fn preview_pattern_matches_the_file_a_run_would_write() {
-        let paths = Paths::discover("/proj");
+        let paths = Paths::new("/proj");
         let real = paths.render_file("open_pr", 2, 3, "system");
         let pattern = paths.render_file_pattern("open_pr", "system");
 

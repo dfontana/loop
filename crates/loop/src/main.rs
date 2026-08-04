@@ -113,7 +113,7 @@ fn try_main() -> anyhow::Result<()> {
         Some(d) => d,
         None => std::env::current_dir()?,
     };
-    let paths = Paths::discover(project_dir);
+    let paths = Paths::new(project_dir);
 
     match cli.command {
         Command::Init { ticket, from } => commands::init(paths, &ticket, from.as_deref()),

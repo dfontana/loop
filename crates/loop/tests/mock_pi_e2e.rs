@@ -2,12 +2,9 @@
 //! the `mock-pi` fixture binary — the offline, $0 substitute for real `pi`
 //! that `crates/mock-pi/src/main.rs` implements.
 //!
-//! `mock-pi` is a sibling workspace member, not a dependency of this crate
-//! (and we're not allowed to touch `Cargo.toml` to make it one), so
-//! `CARGO_BIN_EXE_mock-pi` isn't available here. Instead we shell out to
-//! `cargo build -p mock-pi` once and locate the resulting binary under the
-//! workspace's target directory — just process spawning, same as `PiRunner`
-//! itself does for real `pi`.
+//! `mock-pi` is located by `common::mock_pi()` and pointed at through
+//! `LOOP_PI_BIN` — the same switch an operator would use to run loop against a
+//! different pi, so this drives the real `PiRunner` with no test-only seam.
 //!
 //! All four scenarios live in **one** `#[test]` function. `run_judge` and
 //! `run_navigator` have no per-spawn `env` field on their specs (unlike
@@ -17,47 +14,10 @@
 //! this edition, so keeping every scenario sequential in a single test avoids
 //! any race with a sibling test mutating the same variable.
 
-use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+mod common;
 
-use r#loop::core::{
-    AgentRunner, Config, JudgeSpec, ModelSpec, NavigatorSpec, Paths, Thinking, WorkerSpec,
-};
+use r#loop::core::{AgentRunner, JudgeSpec, ModelSpec, NavigatorSpec, Thinking, WorkerSpec};
 use r#loop::runner::PiRunner;
-
-fn workspace_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent() // crates/
-        .unwrap()
-        .parent() // workspace root
-        .unwrap()
-        .to_path_buf()
-}
-
-fn mock_pi_bin() -> PathBuf {
-    static BIN: OnceLock<PathBuf> = OnceLock::new();
-    BIN.get_or_init(|| {
-        let root = workspace_root();
-        let status = std::process::Command::new(env!("CARGO"))
-            .args(["build", "-p", "mock-pi"])
-            .current_dir(&root)
-            .status()
-            .expect("failed to run `cargo build -p mock-pi`");
-        assert!(status.success(), "cargo build -p mock-pi failed");
-
-        let target_dir = std::env::var("CARGO_TARGET_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| root.join("target"));
-        let bin = target_dir.join("debug").join("mock-pi");
-        assert!(
-            bin.exists(),
-            "expected a mock-pi binary at {}",
-            bin.display()
-        );
-        bin
-    })
-    .clone()
-}
 
 fn cheap_model() -> ModelSpec {
     ModelSpec {
@@ -65,15 +25,6 @@ fn cheap_model() -> ModelSpec {
         model: "claude-haiku-4-5".into(),
         thinking: Thinking::Low,
     }
-}
-
-fn test_config(pi_bin: &Path) -> Config {
-    let paths = Paths {
-        project_dir: PathBuf::from("/tmp/loop-e2e-project"),
-    };
-    let mut cfg = Config::defaults(paths);
-    cfg.pi_bin = pi_bin.display().to_string();
-    cfg
 }
 
 #[test]
@@ -98,9 +49,17 @@ fn mock_pi_drives_worker_judge_navigator_and_a_crash() {
     )
     .unwrap();
 
-    let bin = mock_pi_bin();
-    let cfg = test_config(&bin);
-    let runner = PiRunner::new(&cfg);
+    let bin = common::mock_pi();
+    // `PiRunner` reads `LOOP_PI_BIN`, the same switch the CLI honours — so this
+    // test points the real runner at the fixture binary the way an operator
+    // would point it at a different pi.
+    //
+    // SAFETY: see the module doc — this test is single-threaded end to end and
+    // is the only one in this binary touching the environment.
+    unsafe {
+        std::env::set_var("LOOP_PI_BIN", &bin);
+    }
+    let runner = PiRunner::new();
 
     // Every spawn in this test inherits this from the process environment;
     // see the module doc for why that's safe here.
@@ -120,7 +79,6 @@ fn mock_pi_drives_worker_judge_navigator_and_a_crash() {
         skill_paths: vec![],
         system_prompt_path: tmp.path().join("stage-prompt.md"),
         entry_message: "Entering implement, cycle 1".into(),
-        mcp: vec![],
         handoff_path: tmp.path().join("implement-1-1-handoff.json"),
         cwd: tmp.path().to_path_buf(),
         session_id: Some("PROJ-1-implement-1".into()),
@@ -155,7 +113,6 @@ fn mock_pi_drives_worker_judge_navigator_and_a_crash() {
     let judge_spec = JudgeSpec {
         criteria: "All checklist items must be present.".into(),
         worker_digest: "Added churn_score column; build green.".into(),
-        artifact_paths: vec![],
         check_output: None,
         model: cheap_model(),
         cwd: tmp.path().to_path_buf(),
@@ -193,7 +150,6 @@ fn mock_pi_drives_worker_judge_navigator_and_a_crash() {
     let unavailable_judge_spec = JudgeSpec {
         criteria: "must be great".into(),
         worker_digest: "did stuff".into(),
-        artifact_paths: vec![],
         check_output: None,
         model: cheap_model(),
         cwd: tmp.path().to_path_buf(),

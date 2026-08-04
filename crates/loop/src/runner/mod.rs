@@ -18,8 +18,8 @@ use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};
 
 use crate::core::{
-    AgentRunner, Choice, Config, CoreError, JudgeSpec, NavigatorSpec, Result, Verdict,
-    WorkerResult, WorkerSpec,
+    AgentRunner, Choice, CoreError, JudgeSpec, NavigatorSpec, Result, Verdict, WorkerResult,
+    WorkerSpec, with_stderr_tail,
 };
 
 pub mod check;
@@ -53,10 +53,16 @@ struct SpawnOutcome {
     stderr_tail: String,
 }
 
+impl Default for PiRunner {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PiRunner {
-    pub fn new(config: &Config) -> Self {
+    pub fn new() -> Self {
         Self {
-            pi_bin: config.pi_bin.clone(),
+            pi_bin: crate::core::pi_bin(),
             verbose: false,
         }
     }
@@ -64,10 +70,6 @@ impl PiRunner {
     pub fn verbose(mut self, verbose: bool) -> Self {
         self.verbose = verbose;
         self
-    }
-
-    pub fn pi_bin(&self) -> &str {
-        &self.pi_bin
     }
 
     /// Spawn `cmd`, stream-parse its stdout, and wait for it to exit.
@@ -132,32 +134,39 @@ impl PiRunner {
     }
 }
 
-/// Append a spawn's stderr tail to a message, when it had anything to say.
-/// The label matters: this is the subprocess talking, not the harness.
-fn with_stderr(message: &str, stderr_tail: &str) -> String {
-    if stderr_tail.trim().is_empty() {
-        return message.to_string();
-    }
-    format!("{message}; pi stderr tail:\n{stderr_tail}")
-}
-
 /// How many characters of an off-contract reply to keep in the ledger.
 const OFF_CONTRACT_REPLY_CHARS: usize = 400;
 
-/// Attach what the spawn actually said to a "no usable answer" message.
-///
-/// A judge that fails closed and a navigator that escalates both end a run's
-/// forward progress, and "returned no usable verdict" alone tells whoever
-/// reads the ledger nothing about whether the model refused, rambled, or
-/// answered fine in the wrong format. Bounded, because a reply can be long and
-/// this lands in an event.
-fn off_contract(message: &str, reply: &str) -> String {
-    let reply = reply.trim();
-    if reply.is_empty() {
-        return format!("{message} (the spawn produced no text at all)");
+impl SpawnOutcome {
+    /// The reply, when the spawn both exited clean and answered on contract.
+    ///
+    /// The Judge and the Navigator have the same shape here — parse the final
+    /// message, and treat *anything* else as no answer — so they share the
+    /// check rather than each writing `if exit_ok { if let Some(..) { .. } }`.
+    fn on_contract<T>(&self, parse: impl FnOnce(&str) -> Option<T>) -> Option<T> {
+        self.exit_ok.then(|| parse(&self.stream.summary)).flatten()
     }
-    let shown = crate::ledger::digest::truncate(reply, OFF_CONTRACT_REPLY_CHARS);
-    format!("{message}; it said:\n{shown}")
+
+    /// Why there was no usable answer, in terms a human reading the ledger can
+    /// act on.
+    ///
+    /// A judge that fails closed and a navigator that escalates both end a
+    /// run's forward progress, and "returned no usable verdict" alone says
+    /// nothing about whether the model refused, rambled, or answered fine in
+    /// the wrong format. So this carries whatever the spawn said — bounded,
+    /// because a reply can be long and this lands in an event — and whatever it
+    /// complained about on stderr, labelled, because that is the subprocess
+    /// talking rather than the harness.
+    fn off_contract(&self, message: &str) -> String {
+        let reply = self.stream.summary.trim();
+        let said = if reply.is_empty() {
+            format!("{message} (the spawn produced no text at all)")
+        } else {
+            let shown = crate::core::text::truncate(reply, OFF_CONTRACT_REPLY_CHARS);
+            format!("{message}; it said:\n{shown}")
+        };
+        with_stderr_tail(said, &self.stderr_tail)
+    }
 }
 
 impl AgentRunner for PiRunner {
@@ -191,7 +200,6 @@ impl AgentRunner for PiRunner {
             summary: out.stream.summary,
             proposal: reply::read_handoff(&spec.handoff_path),
             usage: out.stream.usage,
-            session_id: out.stream.session_id,
             exit_ok: out.exit_ok,
             stderr_tail: out.stderr_tail,
         })
@@ -210,25 +218,15 @@ impl AgentRunner for PiRunner {
         let cmd = command::judge_command(&self.pi_bin, spec);
         let out = self.spawn_and_parse(cmd, "judge")?;
 
-        if out.exit_ok {
-            if let Some((pass, rationale)) = reply::parse_verdict(&out.stream.summary) {
-                return Ok(Verdict {
-                    pass,
-                    rationale,
-                    usage: out.stream.usage,
-                });
-            }
-        }
-
         // The fail-closed rationale is what a human reads when a guard fails
-        // for a reason that has nothing to do with the work, so it carries
-        // whatever the spawn managed to say before giving up.
+        // for a reason that has nothing to do with the work.
+        let (pass, rationale) = out
+            .on_contract(reply::parse_verdict)
+            .unwrap_or_else(|| (false, out.off_contract("judge returned no usable verdict")));
+
         Ok(Verdict {
-            pass: false,
-            rationale: with_stderr(
-                &off_contract("judge returned no usable verdict", &out.stream.summary),
-                &out.stderr_tail,
-            ),
+            pass,
+            rationale,
             usage: out.stream.usage,
         })
     }
@@ -244,25 +242,20 @@ impl AgentRunner for PiRunner {
         let out = self.spawn_and_parse(cmd, "navigator")?;
         let choices = command::navigator_choices(spec);
 
-        if out.exit_ok {
-            if let Some((to, entry_prompt)) = reply::parse_choice(&out.stream.summary, &choices) {
-                return Ok(Choice {
-                    to,
-                    entry_prompt,
-                    usage: out.stream.usage,
-                });
-            }
-        }
+        let (to, entry_prompt) = out
+            .on_contract(|reply| reply::parse_choice(reply, &choices))
+            .unwrap_or_else(|| {
+                (
+                    command::ESCALATE.to_string(),
+                    Some(out.off_contract(
+                        "the navigator spawn produced no usable choice, so the harness escalated",
+                    )),
+                )
+            });
 
         Ok(Choice {
-            to: command::ESCALATE.to_string(),
-            entry_prompt: Some(with_stderr(
-                &off_contract(
-                    "the navigator spawn produced no usable choice, so the harness escalated",
-                    &out.stream.summary,
-                ),
-                &out.stderr_tail,
-            )),
+            to,
+            entry_prompt,
             usage: out.stream.usage,
         })
     }

@@ -37,7 +37,7 @@ The rendered prompt under `run/` is the single most useful file when a stage mis
 
 Both are markdown with YAML frontmatter, and a file that works as one will usually parse as the other. The format is where the similarity stops. What separates them is **how each reaches the model**, and it is worth getting straight before you write either, because it decides which one a given piece of text has to be.
 
-| | Stage prompt | Skill |
+|  | Stage prompt | Skill |
 | --- | --- | --- |
 | Bound to | Exactly one state | Any state that names it, via `:skills` |
 | Reaches pi as | `--append-system-prompt <path>` | `--skill <path>` |
@@ -91,7 +91,7 @@ The project root is the only path loop takes from outside the directory, and it 
 | `:transitions` | no | list | Absent means no edges, which `loop validate` will reject as unreachable/terminal-less. |
 | `:loops` | no | list | Cycle counting and caps. |
 
-**What a machine does not name comes from loop's built-in floor**, which is code rather than a file — `Config::defaults` in `crates/loop/src/core/config.rs`. There is nothing to edit there and nothing to scaffold; a machine that wants a different model, budget, or digest length says so in `machine.fnl`, in the file under review. The one setting no machine can reach is the pi binary itself, which comes from `LOOP_PI_BIN` (default `pi`).
+**What a machine does not name comes from loop's built-in floor**, which is code rather than a file — `Floor::default()` in `crates/loop/src/core/config.rs`. There is nothing to edit there and nothing to scaffold; a machine that wants a different model, budget, or digest length says so in `machine.fnl`, in the file under review. The one setting no machine can reach is the pi binary itself, which is not on the floor at all: it comes from `core::pi_bin()`, reading `LOOP_PI_BIN` (default `pi`).
 
 **Every struct is `deny_unknown_fields`.** A misspelled key is an error naming the field and listing the ones that exist, at any depth — `:playbok "implement"` no longer loads and then complains about a missing stage prompt, and `:max-cycels 4` no longer leaves the bound at its default while the run keeps going. Errors carry the path to the offending value:
 

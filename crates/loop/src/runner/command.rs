@@ -22,12 +22,30 @@
 use std::process::Command;
 
 use crate::core::{HANDOFF_ENV, JudgeSpec, NavigatorSpec, WorkerSpec};
-use crate::runner::reply::{VERDICT_FAIL, VERDICT_PASS};
+use crate::runner::reply::{self, VERDICT_FAIL, VERDICT_PASS};
 
-/// The sentinel a Navigator names when no reachable state fits. Not a state:
-/// it takes the same "unknown target" path through the engine that any
-/// unroutable choice does, and lands on the machine's escalation state.
-pub const ESCALATE: &str = "escalate";
+/// The sentinel a Navigator names when no reachable state fits, re-exported
+/// beside the prompt that offers it. Defined in [`crate::core`] because the
+/// engine has to recognize it too — see the note there.
+pub use crate::core::ESCALATE;
+
+/// Reopen a persisted session interactively: `pi --session <id>`, in `cwd`,
+/// with stdio inherited untouched.
+///
+/// `--session` rather than `--session-id`: `loop session` exists to *read*
+/// history, so a session pi no longer has must fail loudly instead of silently
+/// creating a fresh empty one under the same id and looking like the work
+/// vanished.
+///
+/// Here rather than in `commands`, which built this argv itself with its own
+/// `pi_bin()` lookup. This module's header and the README both claim every
+/// pi-specific argv lives in one place; that claim is now true, and "driving a
+/// different headless agent is a new `*_command` builder" means these four.
+pub fn session_command(pi_bin: &str, session_id: &str, cwd: &std::path::Path) -> Command {
+    let mut cmd = Command::new(pi_bin);
+    cmd.arg("--session").arg(session_id).current_dir(cwd);
+    cmd
+}
 
 /// Build the Worker command.
 ///
@@ -162,32 +180,31 @@ pub fn judge_prompt(spec: &JudgeSpec) -> String {
         "You are an independent reviewer. You have no tools: you cannot read files, \
          run commands, or gather any evidence beyond what is in the message below. \
          Judge only what you were given, against the criteria.\n\n\
-         Reply in exactly this shape:\n\n\
-         ```\n\
-         {pass}\n\
-         <one or two sentences citing the specific evidence behind the verdict>\n\
-         ```\n\n\
-         The first line must be the single word `{pass}` or `{fail}` and nothing \
-         else. A reply that does not start that way is read as a failure, so do \
-         not preface it with anything.\n\n\
+         {contract}\
          Pass only if every part of the criteria is satisfied by the evidence. \
          Absence of evidence is not satisfaction: if the criteria says something \
          was run and you cannot see that it was run, that is a `{fail}`.\n\n\
          ## Criteria\n\n{criteria}\n",
-        pass = VERDICT_PASS,
+        contract = reply::first_line_contract(
+            &[VERDICT_PASS, VERDICT_FAIL],
+            VERDICT_PASS,
+            "<one or two sentences citing the specific evidence behind the verdict>",
+            "A reply that does not start that way is read as a failure, so do not \
+             preface it with anything.",
+        ),
         fail = VERDICT_FAIL,
         criteria = spec.criteria
     )
 }
 
+/// The Judge's message: the worker digest, then the check's output.
+///
+/// The digest already carries the artifact list — `worker_digest_for_judge`
+/// appends `- {name} ({path})` for each one — so nothing is appended here for
+/// them. Doing it anyway put the block in every Judge prompt twice, once with
+/// names and once without.
 fn judge_message(spec: &JudgeSpec) -> String {
     let mut message = spec.worker_digest.clone();
-    if !spec.artifact_paths.is_empty() {
-        message.push_str("\n\nArtifacts:\n");
-        for p in &spec.artifact_paths {
-            message.push_str(&format!("- {}\n", p.display()));
-        }
-    }
     // Labelled as the harness's own, because that is exactly what makes it
     // worth more than everything above it: the digest and the artifacts came
     // from the worker, this did not.
@@ -222,11 +239,7 @@ pub fn navigator_command(pi_bin: &str, spec: &NavigatorSpec) -> Command {
 /// The choices a Navigator may name: the stuck state's neighbors, plus the
 /// always-available [`ESCALATE`] sentinel.
 pub fn navigator_choices(spec: &NavigatorSpec) -> Vec<String> {
-    let mut choices: Vec<String> = spec.reachable.clone();
-    if !choices.iter().any(|c| c == ESCALATE) {
-        choices.push(ESCALATE.to_string());
-    }
-    choices
+    crate::core::dedup(spec.reachable.iter().cloned().chain([ESCALATE.to_string()]))
 }
 
 /// The Navigator's system prompt: the reply contract, then the graph.
@@ -240,28 +253,21 @@ pub fn navigator_prompt(spec: &NavigatorSpec) -> String {
     let mut out = String::from(
         "A worker could not route itself out of its stage. Pick where the run goes \
          next, from the list below, and write a short note telling that stage how to \
-         get back on track.\n\n\
-         Reply in exactly this shape:\n\n\
-         ```\n\
-         <state>\n\
-         <a few sentences: what went wrong, and what to do differently>\n\
-         ```\n\n\
-         The first line must be one of these names, alone, with nothing else on it:\n\n",
+         get back on track.\n\n",
     );
-    for choice in &choices {
-        if choice == ESCALATE {
-            out.push_str(&format!(
-                "- `{choice}` — no reachable state fits; hand this to a human\n"
-            ));
-        } else {
-            out.push_str(&format!("- `{choice}`\n"));
-        }
-    }
-    out.push_str(
-        "\nA first line naming anything else escalates the run, so pick from the list \
-         or pick `escalate` deliberately. Everything after the first line becomes the \
-         next stage's note; keep it concrete.\n\n",
-    );
+    // Rendered from the same list `parse_choice` validates against, so the
+    // prompt cannot offer a name the parser would reject.
+    out.push_str(&reply::first_line_contract(
+        &choices,
+        "<state>",
+        "<a few sentences: what went wrong, and what to do differently>",
+        &format!(
+            "`{ESCALATE}` means no reachable state fits and this wants a human. A first \
+             line naming anything else escalates the run anyway, so pick from the list \
+             or pick `{ESCALATE}` deliberately. Everything after the first line becomes \
+             the next stage's note; keep it concrete."
+        ),
+    ));
     out.push_str(&spec.graph_summary);
     out
 }
@@ -284,7 +290,7 @@ fn navigator_message(spec: &NavigatorSpec) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::{ArtifactClaim, ModelSpec, Proposal, Thinking};
+    use crate::core::{Artifact, ModelSpec, Proposal, Thinking};
     use std::path::PathBuf;
 
     fn args_of(cmd: &Command) -> Vec<String> {
@@ -316,7 +322,6 @@ mod tests {
             ],
             system_prompt_path: PathBuf::from("/tmp/stage-prompt.md"),
             entry_message: "Entering implement, cycle 1".into(),
-            mcp: vec!["linear".into()],
             handoff_path: PathBuf::from("/tmp/render/implement-1-1-handoff.json"),
             cwd: PathBuf::from("/tmp/project"),
             session_id: Some("PROJ-1487-implement-1".into()),
@@ -406,8 +411,15 @@ mod tests {
     fn judge_spec() -> JudgeSpec {
         JudgeSpec {
             criteria: "All three checklist items must be present.".into(),
-            worker_digest: "Added churn_score column; build green.".into(),
-            artifact_paths: vec![PathBuf::from(".loop/artifacts/implement-1-diff.patch")],
+            // Built by the one function that builds it in the run, so the
+            // artifact block this asserts on is the block a Judge is sent.
+            worker_digest: crate::core::worker_digest_for_judge(
+                "Added churn_score column; build green.",
+                &[Artifact {
+                    name: "diff".into(),
+                    path: ".loop/artifacts/implement-1-diff.patch".into(),
+                }],
+            ),
             check_output: None,
             model: ModelSpec {
                 provider: "anthropic".into(),
@@ -493,13 +505,23 @@ mod tests {
         assert!(!message.contains("harness's own check"), "got: {message}");
     }
 
+    /// The artifact list reaches the Judge exactly once. `JudgeSpec` used to
+    /// carry it in two fields and this message appended both, so every Judge
+    /// prompt named the same files twice in two different spellings.
     #[test]
-    fn judge_command_message_includes_digest_and_artifacts() {
+    fn judge_command_message_includes_digest_and_artifacts_once() {
         let cmd = judge_command("pi", &judge_spec());
         let args = args_of(&cmd);
         let message = args.last().unwrap();
         assert!(message.contains("Added churn_score column"));
-        assert!(message.contains(".loop/artifacts/implement-1-diff.patch"));
+        assert_eq!(
+            message
+                .matches(".loop/artifacts/implement-1-diff.patch")
+                .count(),
+            1,
+            "got: {message}"
+        );
+        assert_eq!(message.matches("Artifacts:").count(), 1, "got: {message}");
     }
 
     fn navigator_spec() -> NavigatorSpec {
@@ -511,7 +533,7 @@ mod tests {
                 to: None,
                 blocked: true,
                 rationale: "no reachable state fits".into(),
-                artifacts: vec![ArtifactClaim {
+                artifacts: vec![Artifact {
                     name: "diff".into(),
                     path: "diff.patch".into(),
                 }],

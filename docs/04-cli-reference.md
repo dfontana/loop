@@ -37,14 +37,14 @@ One scaffold phase, into `<project>/.loop/`. Every file is written with a _write
 
 **Without `--from`**, the bundled templates are written out of the binary — no fetch, no network, nothing read from outside the project:
 
-| Path                                    | From                              |
-| --------------------------------------- | --------------------------------- |
-| `machine.fnl`                            | the bundled `standard-ticket`     |
-| `stage-prompts/implement.md`                 | bundled                           |
-| `stage-prompts/review.md`                    | bundled                           |
-| `stage-prompts/qa.md`                        | bundled                           |
-| `stage-prompts/open-pr.md`                   | bundled                           |
-| `stage-prompts/debug-transient.md`           | bundled                           |
+| Path                               | From                          |
+| ---------------------------------- | ----------------------------- |
+| `machine.fnl`                      | the bundled `standard-ticket` |
+| `stage-prompts/implement.md`       | bundled                       |
+| `stage-prompts/review.md`          | bundled                       |
+| `stage-prompts/qa.md`              | bundled                       |
+| `stage-prompts/open-pr.md`         | bundled                       |
+| `stage-prompts/debug-transient.md` | bundled                       |
 
 **With `--from <DIR>`**, the whole tree under `<DIR>` is copied in instead, recursively, never overwriting. A leading `~/` is expanded. Two failures are specific to this path:
 
@@ -55,13 +55,13 @@ One scaffold phase, into `<project>/.loop/`. Every file is written with a _write
 
 Either way, `init` then writes:
 
-| Path          | Note                                     |
-| ------------- | ---------------------------------------- |
-| `task.md`     | the bundled task template, if absent     |
-| `plan.md`     | the bundled plan template, if absent     |
-| `stage-prompts/`  | created empty if `--from` supplied none  |
-| `skills/`     | created empty                            |
-| `.gitignore`  | one line, `run/`, if absent              |
+| Path             | Note                                    |
+| ---------------- | --------------------------------------- |
+| `task.md`        | the bundled task template, if absent    |
+| `plan.md`        | the bundled plan template, if absent    |
+| `stage-prompts/` | created empty if `--from` supplied none |
+| `skills/`        | created empty                           |
+| `.gitignore`     | one line, `run/`, if absent             |
 
 Each file actually created prints `  created <path>`.
 
@@ -265,10 +265,10 @@ Printed to stdout after a blank line, for every outcome including failures:
 
 ```
 
-{Status} — {terminal} after {n} transitions, ${cost}, {duration}
+{Status} — {terminal} after {n} transition(s), ${cost}, {t} token(s), {duration}
 ```
 
-`{Status}` is `Done`, `Failed`, or `Aborted`. `{terminal}` falls back to `(no terminal)`. Cost is two decimal places. Duration formatting:
+`{Status}` is `Done`, `Failed`, or `Aborted`. `{terminal}` falls back to `(no terminal)`. Cost is two decimal places, and `{t}` is every token every role burned — Worker, Judge, and Navigator together, the same figure the `:usd` budget is charged against. This line, `loop status`'s totals, and the digest's `totals:` all render through one function, so the four fields and their order are the same in all three. Duration formatting:
 
 | Seconds   | Format     | Example |
 | --------- | ---------- | ------- |
@@ -366,15 +366,15 @@ On a ledger with zero events the same five keys come out with nulls and zeroes �
 ### Human mode
 
 ```
-running — at `review`
-  5 transitions, $1.23, 12m3s
+unfinished — last at `review`
+  5 transition(s), $1.23, 38104 token(s), 12m3s
   cycles: implement#2, qa#1
 
 recent:
   <ts>  <summary>
 ```
 
-Header is one of `not started`, ``running — at `{state}` ``, or `finished — {Status}`. The `cycles:` line appears only when the machine loaded and at least one cycle was counted. `recent:` lists the last 12 ledger events, oldest-first within that window. Per-event summary forms:
+Header is one of `not started`, ``unfinished — last at `{state}` ``, or ``finished — {Status} at `{state}` `` — the identical string `loop recap` prints as its `outcome:`, since both render it through one function. "Unfinished" rather than "running": this command folds a ledger, so it cannot tell a live run from one whose process died. The `cycles:` line appears only when the machine loaded and at least one cycle was counted. `recent:` lists the last 12 ledger events, oldest-first within that window. Per-event summary forms:
 
 | Event | Summary |
 | --- | --- |
@@ -562,12 +562,12 @@ Resolves the attempt, prints one line naming it, and executes `pi --session <id>
 
 ### Selection
 
-| Invocation | Behavior |
-| --- | --- |
-| `loop session <ID>` | the attempt with exactly that session id |
-| `loop session --latest` | the last candidate in ledger order |
-| `loop session --latest <STATE>` | the last candidate at that exact state |
-| `loop session` | error — see below |
+| Invocation                      | Behavior                                 |
+| ------------------------------- | ---------------------------------------- |
+| `loop session <ID>`             | the attempt with exactly that session id |
+| `loop session --latest`         | the last candidate in ledger order       |
+| `loop session --latest <STATE>` | the last candidate at that exact state   |
+| `loop session`                  | error — see below                        |
 
 An id is matched exactly and searched from the newest end, so a ledger that records the same id twice (a resume re-enters the same state, cycle and attempt, and the id is derived from exactly those four) opens the later episode — the one that describes the session as it now stands.
 
@@ -581,7 +581,7 @@ An id is matched exactly and searched from the newest end, so a ledger that reco
 error: `loop session` no longer opens a picker — run `loop sessions` to list every recorded attempt, then `loop session <ID>` with an id from that listing. `loop session --latest [STATE]` still opens the newest attempt without naming one.
 ```
 
-The old positional was a *state*, so `loop session implement` is the likeliest stale invocation. It fails with the two commands that do work:
+The old positional was a _state_, so `loop session implement` is the likeliest stale invocation. It fails with the two commands that do work:
 
 ```
 error: no attempt in /proj/.loop/ledger.jsonl has session id `implement` — `loop sessions` lists every recorded id
@@ -611,7 +611,7 @@ Then, with stdin/stdout/stderr inherited unchanged and the cwd set to the projec
 <pi_bin> --session <id>
 ```
 
-`--session`, not `--session-id`. This command exists to read history, so a session pi no longer has must fail loudly; `--session-id` would create an empty replacement under the same id, which is indistinguishable from a Worker that did nothing. `pi_bin` comes from `Config::defaults`, so `LOOP_PI_BIN` is the only thing that can change it.
+`--session`, not `--session-id`. This command exists to read history, so a session pi no longer has must fail loudly; `--session-id` would create an empty replacement under the same id, which is indistinguishable from a Worker that did nothing. The pi binary comes from `core::pi_bin()`, so `LOOP_PI_BIN` is the only thing that can change it.
 
 loop never reads, parses, writes, or deletes a pi session file, and never copies a transcript into `.loop/`. For the session format and pi's own navigation controls, see pi's upstream session documentation.
 

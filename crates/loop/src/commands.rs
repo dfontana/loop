@@ -5,16 +5,17 @@ use std::path::Path;
 
 use anyhow::{Context as _, Result, anyhow, bail};
 
-use crate::core::{Config, LedgerSink, Machine, Paths};
+use crate::core::text::brief;
+use crate::core::{Floor, Machine, Paths};
 use crate::engine::{Diagnostic, Engine, Severity};
 use crate::fennel::FennelVm;
-use crate::ledger::{ArtifactStore, Ledger};
-use crate::output::{summarize, truncate};
-use crate::report::{self, fmt_duration};
+use crate::ledger::{self, ArtifactStore, Ledger};
+use crate::output::{fmt_status, fmt_totals, summarize};
+use crate::report;
 use crate::runner::PiRunner;
 use crate::sessions::{self, Candidate};
 use crate::stage::{CliStage, Resolver};
-use crate::toolbox::Toolbox;
+use crate::toolbox;
 
 // Templates shipped in the binary, so a fresh install needs no fetch.
 const STANDARD_TICKET: &str = include_str!("../templates/machines/standard-ticket.fnl");
@@ -50,54 +51,84 @@ const SKILLS: &[(&str, &str)] = &[(
     include_str!("../templates/skills/debug-transient.md"),
 )];
 
-/// Write `content` to `path` unless it already exists. Returns whether it wrote.
-fn write_if_absent(path: &Path, content: &str) -> Result<bool> {
-    if path.exists() {
-        return Ok(false);
-    }
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("creating {}", parent.display()))?;
-    }
-    std::fs::write(path, content).with_context(|| format!("writing {}", path.display()))?;
-    Ok(true)
-}
-
-/// Copy one directory tree into another, never overwriting. Returns what it
-/// wrote, for `init` to print.
-fn copy_tree(from: &Path, to: &Path, created: &mut Vec<String>) -> Result<()> {
-    for entry in std::fs::read_dir(from)
-        .with_context(|| format!("reading template directory {}", from.display()))?
-    {
-        let entry = entry?;
-        let src = entry.path();
-        let dst = to.join(entry.file_name());
-        if src.is_dir() {
-            std::fs::create_dir_all(&dst)?;
-            copy_tree(&src, &dst, created)?;
-        } else if !dst.exists() {
-            if let Some(parent) = dst.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            std::fs::copy(&src, &dst)
-                .with_context(|| format!("copying {} to {}", src.display(), dst.display()))?;
-            created.push(dst.display().to_string());
-        }
-    }
-    Ok(())
-}
-
-/// Keep the derived `run/` directory out of version control.
+/// What `loop init` has written, so it can print it.
 ///
-/// `.loop/` is meant to be committed — it is the record of what drove the
-/// ticket — but the rendered prompts and handoff files under `run/` are
-/// regenerated every stage and would be pure churn in a diff.
-fn ignore_run_dir(paths: &Paths, created: &mut Vec<String>) -> Result<()> {
-    let gitignore = paths.loop_dir().join(".gitignore");
-    if write_if_absent(&gitignore, "run/\n")? {
-        created.push(gitignore.display().to_string());
+/// `claim` is the whole of scaffolding: **never overwrite**, create parents,
+/// and record what actually landed. Every file `init` writes goes through it,
+/// whether it is rendered from a template ([`Scaffold::place`]) or copied off
+/// disk ([`Scaffold::place_copy`]) — [`Scaffold::copy_tree`] used to carry its
+/// own don't-overwrite rule and its own `create_dir_all`, so the module had two
+/// implementations of one invariant and five call sites of the other. What
+/// differs between the two writers is only *how the bytes arrive*, which is why
+/// that is the closure and everything else is here.
+#[derive(Default)]
+struct Scaffold {
+    created: Vec<String>,
+}
+
+impl Scaffold {
+    /// The invariant every writer shares: never overwrite, create parents,
+    /// record what landed. `write` runs only once the path is known to be
+    /// free, and only its success puts the path in [`Scaffold::created`].
+    fn claim(&mut self, path: &Path, write: impl FnOnce(&Path) -> Result<()>) -> Result<()> {
+        if path.exists() {
+            return Ok(());
+        }
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("creating {}", parent.display()))?;
+        }
+        write(path)?;
+        self.created.push(path.display().to_string());
+        Ok(())
     }
-    Ok(())
+
+    /// Write `content` to `path` unless something is already there.
+    fn place(&mut self, path: &Path, content: impl AsRef<[u8]>) -> Result<()> {
+        self.claim(path, |p| {
+            std::fs::write(p, content).with_context(|| format!("writing {}", p.display()))
+        })
+    }
+
+    /// Copy `src` onto `path` unless something is already there.
+    ///
+    /// `std::fs::copy` rather than read-then-[`Scaffold::place`], because it
+    /// carries the mode across: a copied `skills/` tree ships `.sh` files that
+    /// stages and `:check` commands invoke directly, and a 755 script that
+    /// lands as 644 fails with `EACCES` at the first stage that runs it. It
+    /// also streams, so `--from` on a ticket with a large ledger or artifact
+    /// doesn't hold the biggest file in memory.
+    fn place_copy(&mut self, src: &Path, path: &Path) -> Result<()> {
+        self.claim(path, |p| {
+            std::fs::copy(src, p)
+                .map(|_| ())
+                .with_context(|| format!("copying {} to {}", src.display(), p.display()))
+        })
+    }
+
+    /// The same, with `$TICKET` substituted — a plain text replacement, not the
+    /// `$VAR` render engine a run uses.
+    fn place_for(&mut self, path: &Path, content: &str, ticket: &str) -> Result<()> {
+        self.place(path, content.replace("$TICKET", ticket))
+    }
+
+    /// Copy one directory tree into another, never overwriting.
+    fn copy_tree(&mut self, from: &Path, to: &Path) -> Result<()> {
+        for entry in std::fs::read_dir(from)
+            .with_context(|| format!("reading template directory {}", from.display()))?
+        {
+            let entry = entry?;
+            let src = entry.path();
+            let dst = to.join(entry.file_name());
+            if src.is_dir() {
+                std::fs::create_dir_all(&dst)?;
+                self.copy_tree(&src, &dst)?;
+            } else {
+                self.place_copy(&src, &dst)?;
+            }
+        }
+        Ok(())
+    }
 }
 
 pub fn init(paths: Paths, ticket: &str, from: Option<&Path>) -> Result<()> {
@@ -111,7 +142,7 @@ pub fn init(paths: Paths, ticket: &str, from: Option<&Path>) -> Result<()> {
 
     let loop_dir = paths.loop_dir();
     std::fs::create_dir_all(&loop_dir)?;
-    let mut created = Vec::new();
+    let mut sc = Scaffold::default();
 
     match from {
         // Reuse is a copy, not a resolution path. What you started from is
@@ -122,7 +153,7 @@ pub fn init(paths: Paths, ticket: &str, from: Option<&Path>) -> Result<()> {
             if !src.is_dir() {
                 bail!("--from {} is not a directory", src.display());
             }
-            copy_tree(&src, &loop_dir, &mut created)?;
+            sc.copy_tree(&src, &loop_dir)?;
             if !machine_file.exists() {
                 bail!(
                     "{} has no machine.fnl — --from wants a directory shaped like .loop/",
@@ -134,35 +165,29 @@ pub fn init(paths: Paths, ticket: &str, from: Option<&Path>) -> Result<()> {
             std::fs::write(&machine_file, body.replace("$TICKET", ticket))?;
         }
         None => {
-            if write_if_absent(&machine_file, &STANDARD_TICKET.replace("$TICKET", ticket))? {
-                created.push(machine_file.display().to_string());
-            }
-            for (name, body) in STAGE_PROMPTS {
-                let p = paths.stage_prompts().join(name);
-                if write_if_absent(&p, body)? {
-                    created.push(p.display().to_string());
-                }
-            }
-            for (name, body) in SKILLS {
-                let p = paths.skills().join(name);
-                if write_if_absent(&p, body)? {
-                    created.push(p.display().to_string());
+            sc.place_for(&machine_file, STANDARD_TICKET, ticket)?;
+            for (dir, files) in [
+                (paths.stage_prompts(), STAGE_PROMPTS),
+                (paths.skills(), SKILLS),
+            ] {
+                for (name, body) in files {
+                    sc.place(&dir.join(name), body)?;
                 }
             }
         }
     }
 
     for (name, body) in [("task.md", TASK_MD), ("plan.md", PLAN_MD)] {
-        let p = loop_dir.join(name);
-        if write_if_absent(&p, &body.replace("$TICKET", ticket))? {
-            created.push(p.display().to_string());
-        }
+        sc.place_for(&loop_dir.join(name), body, ticket)?;
     }
     std::fs::create_dir_all(paths.stage_prompts())?;
     std::fs::create_dir_all(paths.skills())?;
-    ignore_run_dir(&paths, &mut created)?;
+    // `.loop/` is meant to be committed — it is the record of what drove the
+    // ticket — but the rendered prompts and handoff files under `run/` are
+    // regenerated every stage and would be pure churn in a diff.
+    sc.place(&loop_dir.join(".gitignore"), "run/\n")?;
 
-    for c in &created {
+    for c in &sc.created {
         println!("  created {c}");
     }
     println!("\ninitialized {} for {ticket}", loop_dir.display());
@@ -173,10 +198,12 @@ pub fn init(paths: Paths, ticket: &str, from: Option<&Path>) -> Result<()> {
     Ok(())
 }
 
-/// Load config + machine. Shared by every command that needs the graph.
-fn load(paths: Paths) -> Result<(FennelVm, Config, Machine)> {
+/// Load the machine. Shared by every command that needs the graph.
+///
+/// The VM comes back with it: a caller that only wants the IR can drop it, but
+/// it has to outlive the load itself.
+fn load(paths: &Paths) -> Result<(FennelVm, Machine)> {
     let vm = FennelVm::new()?;
-    let config = Config::defaults(paths.clone());
     let machine_file = paths.machine_file();
     if !machine_file.exists() {
         bail!(
@@ -184,36 +211,88 @@ fn load(paths: Paths) -> Result<(FennelVm, Config, Machine)> {
             machine_file.display()
         );
     }
-    let machine = vm.load_machine(&machine_file, &config)?;
-    Ok((vm, config, machine))
+    let machine = vm.load_machine(&machine_file, &Floor::default())?;
+    Ok((vm, machine))
+}
+
+/// [`load`], for a caller holding the bytes already — see
+/// [`crate::fennel::FennelVm::load_machine_source`].
+fn load_source(paths: &Paths, source: &str) -> Result<(FennelVm, Machine)> {
+    let vm = FennelVm::new()?;
+    let machine = vm.load_machine_source(&paths.machine_file(), source, &Floor::default())?;
+    Ok((vm, machine))
+}
+
+/// Fold a ledger against the machine's real loop heads when the machine loads,
+/// and machine-agnostically when it does not.
+///
+/// `status` and `recap` both need this and both used to spell it out: the bare
+/// `fold` treats every state as a loop head, which turns a `done#1` into a
+/// reported cycle beside a genuine `implement#2`. Both commands also have to
+/// keep working when the machine is missing or mid-edit — often exactly when
+/// they are wanted — so a load failure costs the distinction, not the command.
+fn fold_against(machine: Option<&Machine>, events: &[crate::core::Event]) -> crate::core::RunState {
+    match machine {
+        Some(m) => m.fold(events),
+        None => crate::core::fold(events),
+    }
 }
 
 /// Lint a loaded machine against the ticket directory. `validate` and
 /// `preview` share it, so preview reports exactly the problems `validate`
 /// would — there is no weaker preview-only linter.
-fn diagnose(config: &Config, machine: &Machine) -> Vec<Diagnostic> {
-    let toolbox = Toolbox::new(config);
+fn diagnose(machine: &Machine) -> Vec<Diagnostic> {
     crate::engine::validate(
         machine,
-        &|r| toolbox.resolve_stage_prompt(r, &machine.dir).is_ok(),
-        &|name| toolbox.resolve_skill(name, &machine.dir).is_ok(),
+        &|r| toolbox::resolve_stage_prompt(r, &machine.dir).is_ok(),
+        &|name| toolbox::resolve_skill(name, &machine.dir).is_ok(),
     )
 }
 
-fn error_count(diagnostics: &[Diagnostic]) -> usize {
-    diagnostics
+/// What a read-only command says about a ticket nothing has run in yet. One
+/// spelling, because `status` and `logs` are the same answer to the same
+/// question and a second wording would read as a different condition.
+const NO_RUN: &str = "no run yet — `loop run` starts one";
+
+/// How many events `status` shows under `recent:`. A screenful — `loop logs
+/// -n` is the knob, and `loop recap` is the whole history.
+const STATUS_RECENT: usize = 12;
+
+/// The last `n` events, oldest-first, in the one line `status` and `logs` both
+/// print. Only the indent differs between them, so only the indent is the
+/// caller's: the tail walk itself was written out twice.
+fn recent(events: &[crate::core::Event], n: usize) -> Vec<String> {
+    let mut lines: Vec<String> = events
+        .iter()
+        .rev()
+        .take(n)
+        .map(|e| format!("{}  {}", e.ts, summarize(e)))
+        .collect();
+    lines.reverse();
+    lines
+}
+
+/// `Ok` when nothing is an error, and a bail naming the count when something
+/// is — the ending `validate` and `preview` share, since both print the
+/// diagnostics and then have to exit non-zero on the same condition. `tail` is
+/// what each adds about its own command.
+fn bail_on_errors(diagnostics: &[Diagnostic], tail: &str) -> Result<()> {
+    let errors = diagnostics
         .iter()
         .filter(|d| d.severity == Severity::Error)
-        .count()
+        .count();
+    if errors > 0 {
+        bail!("{errors} error(s){tail}");
+    }
+    Ok(())
 }
 
 pub fn validate(paths: Paths) -> Result<()> {
-    let (_vm, config, machine) = load(paths)?;
-    let diagnostics = diagnose(&config, &machine);
+    let (_vm, machine) = load(&paths)?;
+    let diagnostics = diagnose(&machine);
 
-    let errors = error_count(&diagnostics);
     for d in &diagnostics {
-        println!("{}  {}: {}", report::tag(d.severity), d.where_, d.message);
+        println!("{d}");
     }
     if diagnostics.is_empty() {
         println!(
@@ -223,10 +302,7 @@ pub fn validate(paths: Paths) -> Result<()> {
             machine.transitions.len()
         );
     }
-    if errors > 0 {
-        bail!("{errors} error(s)");
-    }
-    Ok(())
+    bail_on_errors(&diagnostics, "")
 }
 
 /// Print the machine as mermaid. Bare — no fences, no prose — so it pipes:
@@ -234,7 +310,7 @@ pub fn validate(paths: Paths) -> Result<()> {
 /// toolbox, since drawing the graph needs nothing off the filesystem beyond
 /// the machine file itself; a machine with a dangling stage prompt still draws.
 pub fn diagram(paths: Paths) -> Result<()> {
-    let (_vm, _config, machine) = load(paths)?;
+    let (_vm, machine) = load(&paths)?;
     print!("{}", crate::engine::mermaid(&machine));
     Ok(())
 }
@@ -248,7 +324,7 @@ pub fn diagram(paths: Paths) -> Result<()> {
 /// created, and nothing lands in `.loop/run/` —
 /// the render a state preview shows is built in memory and printed.
 pub fn preview(paths: Paths, state: Option<String>) -> Result<()> {
-    let (_vm, config, machine) = load(paths)?;
+    let (_vm, machine) = load(&paths)?;
 
     // An unknown state is the operator's typo, not the machine's problem: fail
     // on it before printing a report about something they did not ask for.
@@ -267,7 +343,7 @@ pub fn preview(paths: Paths, state: Option<String>) -> Result<()> {
         );
     }
 
-    let resolver = Resolver::new(&machine, &config);
+    let resolver = Resolver::new(&machine, &paths);
     print!(
         "{}",
         match &state {
@@ -279,13 +355,9 @@ pub fn preview(paths: Paths, state: Option<String>) -> Result<()> {
     // Diagnostics come last so the report reads top-down and the problems are
     // the final thing on screen — the same reason `run`'s summary precedes its
     // error.
-    let diagnostics = diagnose(&config, &machine);
+    let diagnostics = diagnose(&machine);
     print!("{}", report::validation(&diagnostics));
-    let errors = error_count(&diagnostics);
-    if errors > 0 {
-        bail!("{errors} error(s) — this machine will not run as previewed");
-    }
-    Ok(())
+    bail_on_errors(&diagnostics, " — this machine will not run as previewed")
 }
 
 pub fn run(
@@ -297,7 +369,7 @@ pub fn run(
     // The VM is only needed to *load* the machine. It used to have to outlive
     // the run because it held the `when` guard closures; the IR is plain data
     // now, so it can be dropped here.
-    let (_vm, config, mut machine) = load(paths.clone())?;
+    let (_vm, mut machine) = load(&paths)?;
     if let Some(max) = max_transitions {
         machine.budgets = machine.budgets.tighten(crate::core::Budgets {
             usd: None,
@@ -325,13 +397,8 @@ pub fn run(
     // already burned rather than at zero.
     let elapsed_offset_s = ledger.elapsed_offset_s();
     let artifacts = ArtifactStore::new(paths.artifacts_dir(), &paths.project_dir);
-    let runner = PiRunner::new(&config).verbose(verbose);
-    let stage = CliStage {
-        machine: &machine,
-        config: &config,
-        toolbox: Toolbox::new(&config),
-        ledger_path: ledger_path.clone(),
-    };
+    let runner = PiRunner::new().verbose(verbose);
+    let stage = CliStage::new(&machine, &paths, ledger_path.clone());
 
     let mut engine = Engine {
         machine: &machine,
@@ -346,12 +413,10 @@ pub fn run(
     let outcome = engine.run()?;
 
     println!(
-        "\n{:?} — {} after {} transitions, ${:.2}, {}",
+        "\n{:?} — {} after {}",
         outcome.status,
         outcome.terminal_state.as_deref().unwrap_or("(no terminal)"),
-        outcome.totals.transitions,
-        outcome.totals.cost_usd,
-        fmt_duration(outcome.totals.wallclock_s),
+        fmt_totals(&outcome.totals),
     );
 
     // A run that escalated or blew a budget must not report success: this exit
@@ -368,98 +433,76 @@ pub fn run(
     }
 }
 
+/// The five keys `loop status --json` emits, from a folded run.
+///
+/// One definition. The empty-ledger branch below used to hand-write the same
+/// five keys with nulls and zeroes beside it — which is exactly
+/// `RunState::default()`, so the copy was a second answer to a question the
+/// fold already answers, fifteen lines from the first.
+fn status_json(rs: &crate::core::RunState) -> serde_json::Value {
+    serde_json::json!({
+        "current": rs.current,
+        "status": rs.status,
+        "cycles": rs.cycles,
+        "totals": rs.totals,
+        "navigator_invocations": rs.navigator_invocations,
+    })
+}
+
 pub fn status(paths: Paths, json: bool) -> Result<()> {
-    let ledger = Ledger::open(paths.ledger_file())?;
-    let events = ledger.read_all()?;
-    // An empty ledger still has to answer in the mode it was asked in: this
-    // branch used to print prose in both, so `loop status --json` on a fresh
-    // project handed a parser a sentence.
+    let events = ledger::events(paths.ledger_file())?;
+    // An empty ledger still has to answer in the mode it was asked in — this
+    // used to print prose in both, so `loop status --json` on a fresh project
+    // handed a parser a sentence. It returns early rather than falling
+    // through: the path below loads the machine, and spinning up a Lua VM and
+    // a 288 KB Fennel compile to fold nothing is not free.
     if events.is_empty() {
-        if json {
-            println!(
+        match json {
+            true => println!(
                 "{}",
-                serde_json::to_string_pretty(&serde_json::json!({
-                    "current": null,
-                    "status": null,
-                    "cycles": {},
-                    "totals": crate::core::Totals::default(),
-                    "navigator_invocations": 0,
-                }))?
-            );
-        } else {
-            println!("no run yet — `loop run` starts one");
+                serde_json::to_string_pretty(&status_json(&Default::default()))?
+            ),
+            false => println!("{NO_RUN}"),
         }
         return Ok(());
     }
-    // Fold against the machine's real loop heads when the machine still loads,
-    // so "cycles" means cycles. The bare `fold` treats every state as a head,
-    // which would list `done#1` alongside a genuine `implement#2`. Status has
-    // to keep working when the machine is missing or mid-edit, though — that is
-    // often exactly when you want it — so a load failure just costs the line.
-    let machine = load(paths.clone()).ok().map(|(_vm, _cfg, m)| m);
-    let folded = match &machine {
-        Some(m) => crate::core::fold_with_loop_heads(&events, &|s| m.loop_with_head(s).is_some()),
-        None => crate::core::fold(&events),
-    };
+    let machine = load(&paths).ok().map(|(_vm, m)| m);
+    let folded = fold_against(machine.as_ref(), &events);
 
     if json {
-        let out = serde_json::json!({
-            "current": folded.current,
-            "status": folded.status,
-            "cycles": folded.cycles,
-            "totals": folded.totals,
-            "navigator_invocations": folded.navigator_invocations,
-        });
-        println!("{}", serde_json::to_string_pretty(&out)?);
+        println!("{}", serde_json::to_string_pretty(&status_json(&folded))?);
         return Ok(());
     }
 
-    match folded.fold_status() {
-        crate::core::FoldStatus::NotStarted => println!("not started"),
-        crate::core::FoldStatus::Running => println!(
-            "running — at `{}`",
-            folded.current.as_deref().unwrap_or("?")
-        ),
-        crate::core::FoldStatus::Finished(s) => println!("finished — {s:?}"),
-    }
-    println!(
-        "  {} transitions, ${:.2}, {}",
-        folded.totals.transitions,
-        folded.totals.cost_usd,
-        fmt_duration(folded.totals.wallclock_s)
-    );
+    println!("{}", fmt_status(&folded));
+    println!("  {}", fmt_totals(&folded.totals));
     if machine.is_some() && !folded.cycles.is_empty() {
         println!("  cycles: {}", report::fmt_cycles(&folded));
     }
     println!("\nrecent:");
-    for e in events
-        .iter()
-        .rev()
-        .take(12)
-        .collect::<Vec<_>>()
-        .iter()
-        .rev()
-    {
-        println!("  {}  {}", e.ts, summarize(e));
+    for line in recent(&events, STATUS_RECENT) {
+        println!("  {line}");
     }
     Ok(())
 }
 
 pub fn logs(paths: Paths, n: usize, raw: bool) -> Result<()> {
-    let ledger = Ledger::open(paths.ledger_file())?;
+    // `--raw` hands back the bytes on disk, which is the one thing a decoded
+    // event list cannot reproduce — so it wants the handle, not the events.
     if raw {
+        let ledger = Ledger::open(paths.ledger_file())?;
         std::io::stdout().write_all(&ledger.read_raw()?)?;
         return Ok(());
     }
 
-    let events = ledger.read_all()?;
+    let events = ledger::events(paths.ledger_file())?;
     if events.is_empty() {
-        println!("no run yet — `loop run` starts one");
+        println!("{NO_RUN}");
         return Ok(());
     }
 
-    for event in events.iter().rev().take(n).collect::<Vec<_>>().iter().rev() {
-        println!("{}  {}", event.ts, summarize(event));
+    for line in recent(&events, n) {
+        println!("{line}");
     }
     Ok(())
 }
@@ -479,7 +522,7 @@ pub fn logs(paths: Paths, n: usize, raw: bool) -> Result<()> {
 /// somebody wrote afterwards.
 pub fn recap(paths: Paths) -> Result<()> {
     let ledger_path = paths.ledger_file();
-    let events = Ledger::open(&ledger_path)?.read_all()?;
+    let events = ledger::events(&ledger_path)?;
     // An empty ledger has no run to report on. Unlike `status` and `logs`,
     // which are asked "where is it?" and can truthfully answer "nowhere", a
     // recap of nothing is a request that cannot be served — and a report file
@@ -491,10 +534,7 @@ pub fn recap(paths: Paths) -> Result<()> {
         );
     }
 
-    let recorded_hash = events.iter().find_map(|e| match &e.payload {
-        crate::core::EventPayload::RunStarted { machine_hash, .. } => Some(machine_hash.as_str()),
-        _ => None,
-    });
+    let recorded_hash = crate::core::run_started(&events).map(|s| s.machine_hash);
     // Hash what is on disk *before* deciding to load it. The hash is the whole
     // question — a mismatch reports the recorded run and discards the machine
     // anyway — and a mismatch is the common case, since editing the machine
@@ -502,60 +542,47 @@ pub fn recap(paths: Paths) -> Result<()> {
     // and a 288 KB Fennel compile; hashing costs a read.
     //
     // No recorded hash means nothing on disk could ever be proven to be the
-    // machine that ran, so the VM is never started for one either.
-    let on_disk_hash = recorded_hash.and_then(|_| {
-        std::fs::read_to_string(paths.machine_file())
-            .ok()
-            .map(|src| hex::encode(<sha2::Sha256 as sha2::Digest>::digest(src.as_bytes())))
-    });
-    let loaded = match (recorded_hash, &on_disk_hash) {
-        (Some(recorded), Some(on_disk)) if recorded == on_disk => {
-            load(paths.clone()).ok().map(|(_vm, _cfg, m)| m)
-        }
-        _ => None,
-    };
+    // machine that ran, so the VM is never started for one either. The source
+    // is kept, not just its hash: on a match it is exactly what the load
+    // needs, and re-reading the same file to hand it the same bytes was the
+    // one cost this early-hash was supposed to avoid.
+    let on_disk = recorded_hash
+        .and_then(|_| std::fs::read_to_string(paths.machine_file()).ok())
+        .map(|src| (crate::core::machine_hash(&src), src));
 
-    let machine = match (recorded_hash, &loaded) {
-        (Some(recorded), Some(m)) if recorded == m.source_hash => report::Provenance::Matches(m),
-        (Some(recorded), Some(m)) => {
+    // The two hashes settle it, so this is one match producing the answer —
+    // not a match to decide whether to load, then a second match over the same
+    // two hashes *and* the result to say what the load meant. (Which in turn
+    // replaced a four-arm match wrapping a three-arm one, with the same
+    // `eprintln!` written out twice inside it.)
+    let machine = match (recorded_hash, &on_disk) {
+        (Some(recorded), Some((on_disk, source))) if recorded == on_disk => {
+            match load_source(&paths, source).ok().map(|(_vm, m)| m) {
+                // Provably the machine that ran.
+                Some(m) => report::Provenance::Matches(Box::new(m)),
+                // It hashes right but will not load — a machine mid-edit in a
+                // way that changes nothing the hash sees is impossible, so this
+                // is a broken toolbox rather than a changed machine.
+                None => report::Provenance::NotLoaded,
+            }
+        }
+        (Some(recorded), Some((on_disk, _))) => {
             // stderr, so `loop recap > run-recap.md` still produces a clean
             // file. The report repeats the mismatch in its own summary, so the
             // warning is a nudge rather than the only place it appears.
             eprintln!(
                 "warning: {} has changed since this run started (ledger {recorded}, on disk \
-                 {}) — the recap reports only what the ledger recorded",
+                 {on_disk}) — the recap reports only what the ledger recorded",
                 paths.machine_file().display(),
-                m.source_hash,
             );
             report::Provenance::Changed {
-                current: m.source_hash.clone(),
+                current: on_disk.clone(),
             }
         }
-        // Hashes differed, so nothing was loaded — the on-disk hash is enough
-        // to report the change, and is exactly what the load would have
-        // recomputed.
-        (Some(recorded), None) => match &on_disk_hash {
-            Some(on_disk) => {
-                eprintln!(
-                    "warning: {} has changed since this run started (ledger {recorded}, on disk \
-                     {on_disk}) — the recap reports only what the ledger recorded",
-                    paths.machine_file().display(),
-                );
-                report::Provenance::Changed {
-                    current: on_disk.clone(),
-                }
-            }
-            None => report::Provenance::NotLoaded,
-        },
         _ => report::Provenance::NotLoaded,
     };
 
-    let folded = match &machine {
-        report::Provenance::Matches(m) => {
-            crate::core::fold_with_loop_heads(&events, &|s| m.loop_with_head(s).is_some())
-        }
-        _ => crate::core::fold(&events),
-    };
+    let folded = fold_against(machine.machine(), &events);
 
     print!(
         "{}",
@@ -599,7 +626,7 @@ pub fn sessions(paths: Paths, state: Option<String>) -> Result<()> {
     let ledger_path = paths.ledger_file();
     // Opening repairs a torn trailing line, so an attempt interrupted mid-write
     // is still listed rather than making the whole ledger unreadable.
-    let events = Ledger::open(&ledger_path)?.read_all()?;
+    let events = ledger::events(&ledger_path)?;
     let candidates = sessions::candidates(&events);
     let listed = sessions::filter_state(&candidates, state.as_deref());
     if listed.is_empty() {
@@ -640,11 +667,10 @@ fn unknown_id(ledger_path: &Path, id: &str, candidates: &[Candidate]) -> anyhow:
 /// project directory are the whole input, and a mid-edit `machine.fnl` is
 /// exactly when you want to read what the last Worker did.
 pub fn session(paths: Paths, id: Option<String>, latest: bool) -> Result<()> {
-    let config = Config::defaults(paths.clone());
     let ledger_path = paths.ledger_file();
-    let events = Ledger::open(&ledger_path)?.read_all()?;
+    let events = ledger::events(&ledger_path)?;
     let candidates = sessions::candidates(&events);
-    let ticket = sessions::ticket(&events);
+    let ticket = crate::core::run_started(&events).map(|s| s.ticket);
 
     let chosen: &Candidate = match (id.as_deref(), latest) {
         // The deterministic path scripts and CI use: last candidate in ledger
@@ -673,7 +699,7 @@ pub fn session(paths: Paths, id: Option<String>, latest: bool) -> Result<()> {
     }
     line.push_str(&chosen.headline());
     if let Some(detail) = chosen.detail() {
-        line.push_str(&format!(" — {}", truncate(&detail, 72)));
+        line.push_str(&format!(" — {}", brief(&detail, 72)));
     }
     println!("{line}");
 
@@ -683,36 +709,29 @@ pub fn session(paths: Paths, id: Option<String>, latest: bool) -> Result<()> {
              spawn crashed"
         );
         if let Some(err) = chosen.errors.first() {
-            eprintln!("warning: the ledger recorded: {}", truncate(err, 120));
+            eprintln!("warning: the ledger recorded: {}", brief(err, 120));
         }
     }
 
-    launch_pi_session(&config, &chosen.session_id)
+    launch_pi_session(&paths, chosen.session_id)
 }
 
 /// Hand the terminal to pi with the recorded session id, in the project
 /// directory, with stdin/stdout/stderr inherited untouched.
 ///
-/// `--session` rather than `--session-id`: this command exists to *read*
-/// history, so a session pi no longer has must fail loudly instead of silently
-/// creating a fresh empty one under the same id and looking like the work
-/// vanished.
-fn launch_pi_session(config: &Config, session_id: &str) -> Result<()> {
-    let mut cmd = std::process::Command::new(&config.pi_bin);
-    cmd.arg("--session")
-        .arg(session_id)
-        .current_dir(&config.paths.project_dir);
+/// The argv itself is [`crate::runner::command::session_command`]'s, beside the
+/// three role builders — this used to assemble its own, which quietly made the
+/// claim that all pi-specific code is one function untrue by a factor of four.
+fn launch_pi_session(paths: &Paths, session_id: &str) -> Result<()> {
+    let pi = crate::core::pi_bin();
+    let mut cmd = crate::runner::command::session_command(&pi, session_id, &paths.project_dir);
 
     let status = cmd.status().with_context(|| {
-        format!(
-            "launching `{} --session {session_id}` — install pi, or set LOOP_PI_BIN",
-            config.pi_bin
-        )
+        format!("launching `{pi} --session {session_id}` — install pi, or set LOOP_PI_BIN")
     })?;
     if !status.success() {
         bail!(
-            "`{} --session {session_id}` exited {}",
-            config.pi_bin,
+            "`{pi} --session {session_id}` exited {}",
             status
                 .code()
                 .map(|c| c.to_string())
@@ -733,11 +752,10 @@ pub fn doctor(paths: Paths) -> Result<()> {
         }
     };
 
-    let config = Config::defaults(paths.clone());
-    let pi_found = which(&config.pi_bin).is_some();
+    let pi = crate::core::pi_bin();
     check(
-        pi_found,
-        &format!("`{}` on PATH", config.pi_bin),
+        on_path(&pi),
+        &format!("`{pi}` on PATH"),
         "install pi, or set LOOP_PI_BIN",
     );
     // Every label names the path actually tested. Printing one path while
@@ -756,14 +774,76 @@ pub fn doctor(paths: Paths) -> Result<()> {
     Ok(())
 }
 
-fn which(bin: &str) -> Option<std::path::PathBuf> {
+/// Whether `bin` names something runnable — an explicit path that exists, or a
+/// bare name found on `$PATH`.
+fn on_path(bin: &str) -> bool {
     if bin.contains('/') {
-        let p = std::path::PathBuf::from(bin);
-        return p.exists().then_some(p);
+        return Path::new(bin).exists();
     }
-    std::env::var_os("PATH").and_then(|paths| {
-        std::env::split_paths(&paths)
-            .map(|dir| dir.join(bin))
-            .find(|p| p.is_file())
-    })
+    std::env::var_os("PATH")
+        .is_some_and(|paths| std::env::split_paths(&paths).any(|dir| dir.join(bin).is_file()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `--from` copies a whole `.loop/` tree, and the interesting thing in one
+    /// is `skills/`: the bundled examples ship `.sh` files that stages and
+    /// `:check` commands invoke directly, so a 755 script arriving as 644 fails
+    /// with `EACCES` at the first stage that runs it — a broken ticket, with
+    /// nothing in the ledger explaining why. Copying through a read-then-write
+    /// loses the bit silently, which is why this is asserted rather than left
+    /// to `std::fs::copy`'s documentation.
+    #[cfg(unix)]
+    #[test]
+    fn copy_tree_keeps_the_executable_bit() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let (src, dst) = (dir.path().join("src"), dir.path().join("dst"));
+        std::fs::create_dir_all(src.join("skills/build")).unwrap();
+        let script = src.join("skills/build/build.sh");
+        std::fs::write(&script, "#!/bin/sh\necho hi\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(src.join("machine.fnl"), "{}").unwrap();
+
+        let mut sc = Scaffold::default();
+        sc.copy_tree(&src, &dst).unwrap();
+
+        let copied = dst.join("skills/build/build.sh");
+        assert_eq!(
+            std::fs::read_to_string(&copied).unwrap(),
+            "#!/bin/sh\necho hi\n"
+        );
+        assert!(
+            copied.metadata().unwrap().permissions().mode() & 0o111 != 0,
+            "a copied script has to stay runnable"
+        );
+        assert_eq!(sc.created.len(), 2, "both files recorded: {:?}", sc.created);
+    }
+
+    /// The invariant `claim` centralizes, exercised through the copying half:
+    /// `--from` must never clobber something already in the destination.
+    #[test]
+    fn copy_tree_never_overwrites() {
+        let dir = tempfile::tempdir().unwrap();
+        let (src, dst) = (dir.path().join("src"), dir.path().join("dst"));
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&dst).unwrap();
+        std::fs::write(src.join("task.md"), "from the template").unwrap();
+        std::fs::write(dst.join("task.md"), "mine, already here").unwrap();
+
+        let mut sc = Scaffold::default();
+        sc.copy_tree(&src, &dst).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(dst.join("task.md")).unwrap(),
+            "mine, already here"
+        );
+        assert!(
+            sc.created.is_empty(),
+            "nothing landed, so nothing is claimed"
+        );
+    }
 }

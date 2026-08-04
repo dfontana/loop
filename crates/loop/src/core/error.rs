@@ -25,10 +25,6 @@ pub enum CoreError {
         searched: Vec<PathBuf>,
     },
 
-    /// A guardrail tripped: budget, wallclock, transition count, cycle cap.
-    #[error("budget exceeded: {0}")]
-    BudgetExceeded(String),
-
     #[error("{context}: {source}")]
     Io {
         context: String,

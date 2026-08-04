@@ -12,9 +12,7 @@ use std::fs;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
-use crate::core::{
-    ArtifactClaim, ArtifactRef, ArtifactSink, CoreError, IoContext, Result, sanitize_component,
-};
+use crate::core::{Artifact, ArtifactSink, CoreError, IoContext, Result, sanitize_component};
 
 pub struct ArtifactStore {
     root: PathBuf,
@@ -29,13 +27,6 @@ impl ArtifactStore {
             root: root.as_ref().to_path_buf(),
             project_root: project_root.as_ref().to_path_buf(),
         }
-    }
-
-    /// Read only by this module's tests, which check what the store actually
-    /// left on disk. Kept for the same reason as `Ledger::path`.
-    #[allow(dead_code)]
-    pub fn root(&self) -> &Path {
-        &self.root
     }
 
     /// Resolve a worker's claimed source path against the project root and
@@ -70,7 +61,7 @@ impl ArtifactStore {
 
 impl ArtifactSink for ArtifactStore {
     /// Copy a worker-claimed file into the store as `<state>-<cycle>-<name>`.
-    fn capture(&self, state: &str, cycle: u32, claim: &ArtifactClaim) -> Result<ArtifactRef> {
+    fn capture(&self, state: &str, cycle: u32, claim: &Artifact) -> Result<Artifact> {
         let source = self.resolve_claimed_source(&claim.path)?;
         let bytes =
             fs::read(&source).io_ctx(format!("reading artifact source {}", source.display()))?;
@@ -88,7 +79,7 @@ impl ArtifactSink for ArtifactStore {
         let dest_path = self.root.join(&dest_name);
         write_atomic(&self.root, &dest_path, &bytes)?;
 
-        Ok(ArtifactRef {
+        Ok(Artifact {
             name: claim.name.clone(),
             path: relativize(&self.project_root, &dest_path),
         })
@@ -96,7 +87,7 @@ impl ArtifactSink for ArtifactStore {
 }
 
 /// Best-effort project-relative rendering of a captured path, for
-/// `ArtifactRef.path` (docs/02-how-it-works.md: "Project-relative, e.g.
+/// `Artifact.path` (docs/02-how-it-works.md: "Project-relative, e.g.
 /// `.loop/artifacts/implement-1-diff.patch`"). Falls back to the path as-is
 /// when it isn't actually under `project_root` (e.g. an absolute artifacts
 /// root configured outside the project in a test).
@@ -142,7 +133,7 @@ mod tests {
         fs::write(&src, b"some diff content").unwrap();
 
         let store = store_in(project.path());
-        let claim = ArtifactClaim {
+        let claim = Artifact {
             name: "diff".into(),
             path: "work/diff.patch".into(),
         };
@@ -165,7 +156,7 @@ mod tests {
         fs::write(&src, b"cycle one").unwrap();
 
         let store = store_in(project.path());
-        let claim = ArtifactClaim {
+        let claim = Artifact {
             name: "diff".into(),
             path: "diff.patch".into(),
         };
@@ -196,7 +187,7 @@ mod tests {
             .capture(
                 "implement",
                 1,
-                &ArtifactClaim {
+                &Artifact {
                     name: "diff".into(),
                     path: "nope/never-written.patch".into(),
                 },
@@ -212,7 +203,7 @@ mod tests {
     fn rejects_absolute_path_escaping_root() {
         let project = tempfile::tempdir().unwrap();
         let store = store_in(project.path());
-        let claim = ArtifactClaim {
+        let claim = Artifact {
             name: "passwd".into(),
             path: "/etc/passwd".into(),
         };
@@ -229,7 +220,7 @@ mod tests {
         let outside = parent.join(format!("ledger-escape-test-{}", std::process::id()));
         fs::write(&outside, b"secret").unwrap();
 
-        let claim = ArtifactClaim {
+        let claim = Artifact {
             name: "secret".into(),
             path: format!(
                 "sub/../../{}",
@@ -253,7 +244,7 @@ mod tests {
         symlink(&secret, &link).unwrap();
 
         let store = store_in(project.path());
-        let claim = ArtifactClaim {
+        let claim = Artifact {
             name: "innocuous".into(),
             path: "innocuous.txt".into(),
         };
@@ -273,7 +264,7 @@ mod tests {
             .capture(
                 "implement",
                 1,
-                &ArtifactClaim {
+                &Artifact {
                     name: "big".into(),
                     path: "big.bin".into(),
                 },
@@ -286,7 +277,7 @@ mod tests {
         // returns, assert it's the complete content, and that no stray temp
         // file (the atomic-write intermediate) was left behind.
         assert_eq!(fs::read(&dest).unwrap(), content);
-        let leftover_tmp = fs::read_dir(store.root())
+        let leftover_tmp = fs::read_dir(&store.root)
             .unwrap()
             .filter_map(|e| e.ok())
             .any(|e| e.file_name().to_string_lossy().starts_with(".tmp"));

@@ -81,26 +81,18 @@
 //!
 //! # Where `config.fnl` went
 //!
-//! There used to be a second authored file, `~/.config/loop/config.fnl`,
-//! holding `:provider`, `:worker`, `:judge`, `:navigator`, `:default-skills`,
-//! `:default-mcp`, `:pi-extensions`, `:budgets`, and `:digest-last-n`. Every
-//! one of those was a value a machine could already override, so the file was
-//! a second place to look for an answer the machine gave anyway.
-//!
-//! Those keys are machine keys now (`:default-skills`/`:default-mcp` folded
-//! into the `:defaults` a machine already had), and what a machine does not
-//! name comes from [`crate::core::Config::defaults`] — loop's built-in floor,
-//! which is not a file. Carrying preferences between tickets is `loop init
-//! --from <dir>`, which copies a `.loop/` you keep somewhere.
-//!
-//! Leftover config-only keys are rejected by name rather than by
+//! Its keys are machine keys now (`:default-skills`/`:default-mcp` folded into
+//! `:defaults`), and what a machine does not name comes from
+//! [`crate::core::Floor`], which is not a file. Carrying preferences between
+//! tickets is `loop init --from <dir>`, which copies a `.loop/` you keep
+//! somewhere. Leftover config-only keys are rejected by name rather than by
 //! `deny_unknown_fields`, so an author is told where the tier went.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::core::{
-    Check, Config, CoreError, DEFAULT_CHECK_TIMEOUT_S, Defaults, LoopSpec, Machine, ModelChoice,
+    Check, CoreError, DEFAULT_CHECK_TIMEOUT_S, Defaults, Floor, LoopSpec, Machine, ModelChoice,
     ModelSpec, OnExhausted, Result, StagePromptRef, State, StateId, Transition,
 };
 
@@ -123,8 +115,7 @@ fn from_table<T: serde::de::DeserializeOwned>(table: &mlua::Table) -> Result<T> 
         let path = e.path().to_string();
         // A failure at the document root has the path ".", which reads as
         // noise next to the message; anywhere else the path is the useful half.
-        // No "machine:" prefix here — `CoreError::machine` adds one, and this
-        // used to add a second, so every load error read `machine: machine:`.
+        // No "machine:" prefix here — `CoreError::machine` adds one.
         if path == "." {
             CoreError::machine(e.inner().to_string())
         } else {
@@ -135,14 +126,13 @@ fn from_table<T: serde::de::DeserializeOwned>(table: &mlua::Table) -> Result<T> 
 
 // ── removed and renamed keys ───────────────────────────────────────────────
 //
-// `deny_unknown_fields` would already reject each of these, but only with
-// "unknown field". A key that used to do something deserves to be told what
-// replaced it, so these run first and win.
+// `deny_unknown_fields` would reject each of these, but only with "unknown
+// field". A key that did something deserves to be told what replaced it, so
+// these run first and win.
 //
-// The rename (`:playbook`) has the strongest case of the four, not the
-// weakest: the generic error would offer `stage-prompt` and `prompt` side by
-// side with nothing to choose between them, and choosing wrong loads cleanly
-// and runs the wrong text as a stage's prompt.
+// The rename (`:playbook`) has the strongest case, not the weakest: the generic
+// error offers `stage-prompt` and `prompt` side by side with nothing to choose
+// between them, and choosing wrong loads cleanly and runs the wrong prompt.
 
 fn get_value(table: &mlua::Table, key: &str) -> Result<mlua::Value> {
     table
@@ -152,6 +142,19 @@ fn get_value(table: &mlua::Table, key: &str) -> Result<mlua::Value> {
 
 fn present(table: &mlua::Table, key: &str) -> Result<bool> {
     Ok(get_value(table, key)? != mlua::Value::Nil)
+}
+
+/// The table at `key`, when there is one there.
+///
+/// A missing or non-table value is `None` rather than an error: these are the
+/// *rejectors*, and a `:states` that isn't a table is serde's complaint to
+/// make, with a field path attached. Written once because the two rejectors
+/// that need it opened with the same eight-line `let … else { return Ok(()) }`.
+fn sub_table(table: &mlua::Table, key: &str) -> Option<mlua::Table> {
+    match table.get::<mlua::Value>(key) {
+        Ok(mlua::Value::Table(t)) => Some(t),
+        _ => None,
+    }
 }
 
 /// Keys that only ever made sense in `config.fnl`, which no longer exists.
@@ -185,14 +188,7 @@ fn reject_removed_config_key(table: &mlua::Table) -> Result<()> {
 /// `:when` was a Fennel closure gating an edge on ledger vars. Both tiers are
 /// gone; ignoring the key would silently leave the edge unguarded.
 fn reject_when(table: &mlua::Table) -> Result<()> {
-    let Some(transitions) = table
-        .get::<mlua::Value>("transitions")
-        .ok()
-        .and_then(|v| match v {
-            mlua::Value::Table(t) => Some(t),
-            _ => None,
-        })
-    else {
+    let Some(transitions) = sub_table(table, "transitions") else {
         return Ok(());
     };
     for (i, item) in transitions.sequence_values::<mlua::Value>().enumerate() {
@@ -219,14 +215,7 @@ fn reject_when(table: &mlua::Table) -> Result<()> {
 /// carries the text. It is the former, and saying so is cheaper than a wrong
 /// guess that loads and then runs the wrong prompt.
 fn reject_renamed_playbook_key(table: &mlua::Table) -> Result<()> {
-    let Some(states) = table
-        .get::<mlua::Value>("states")
-        .ok()
-        .and_then(|v| match v {
-            mlua::Value::Table(t) => Some(t),
-            _ => None,
-        })
-    else {
+    let Some(states) = sub_table(table, "states") else {
         return Ok(());
     };
     for pair in states.pairs::<mlua::Value, mlua::Value>() {
@@ -293,8 +282,7 @@ fn resolve_prose(raw: String, field: &'static str, machine_dir: &Path) -> Result
 /// Exactly one is required — a cross-field rule serde has no way to state.
 fn stage_prompt_ref(state: &wire::State, state_id: &str) -> Result<StagePromptRef> {
     match (&state.stage_prompt, &state.prompt) {
-        (Some(p), _) if p.contains('/') => Ok(StagePromptRef::Path(PathBuf::from(p))),
-        (Some(p), _) => Ok(StagePromptRef::Named(p.clone())),
+        (Some(p), _) => Ok(StagePromptRef::parse(p)),
         (None, Some(prompt)) => Ok(StagePromptRef::Inline(prompt.clone())),
         (None, None) => Err(CoreError::machine(format!(
             "state `{state_id}`: needs either `:stage-prompt` or `:prompt`"
@@ -348,7 +336,7 @@ pub fn machine_from_table(
     machine_dir: &Path,
     source_hash: String,
     source_path: &Path,
-    config: &Config,
+    floor: &Floor,
 ) -> Result<Machine> {
     reject_transition_mode(table)?;
     reject_removed_config_key(table)?;
@@ -366,7 +354,7 @@ pub fn machine_from_table(
             State {
                 id: id.clone(),
                 stage_prompt: stage_prompt_ref(st, id)?,
-                model: wire::model_choice(&st.provider, &st.model, st.thinking),
+                model: st.to_ir(),
                 skills: st.skills.clone(),
                 mcp: st.mcp.clone(),
                 description: st.description.clone(),
@@ -382,8 +370,13 @@ pub fn machine_from_table(
     let entry = resolve_entry(m.entry, &states)?;
     let terminals: BTreeSet<StateId> = m.terminals.into_iter().collect();
 
+    // `Machine::declares`, before there is a `Machine` to ask. Every reference
+    // below is checked against it rather than against a fourth and fifth
+    // hand-written `states.contains_key(..) || terminals.contains(..)`.
+    let declares = |id: &str| states.contains_key(id) || terminals.contains(id);
+
     if let Some(esc) = &m.escalation_state {
-        if !states.contains_key(esc) && !terminals.contains(esc) {
+        if !declares(esc) {
             return Err(CoreError::machine(format!(
                 "`:escalation-state` `{esc}` is not a declared state or terminal"
             )));
@@ -393,13 +386,14 @@ pub fn machine_from_table(
     let mut transitions = Vec::with_capacity(m.transitions.len());
     for (i, t) in m.transitions.iter().enumerate() {
         let ctx = format!("transitions[{i}]");
+        // A `from` must be a state: a terminal has no stage to leave.
         if !states.contains_key(&t.from) {
             return Err(CoreError::machine(format!(
                 "transition from `{}`: not a declared state",
                 t.from
             )));
         }
-        if !states.contains_key(&t.to) && !terminals.contains(&t.to) {
+        if !declares(&t.to) {
             return Err(CoreError::machine(format!(
                 "transition to `{}`: not a declared state or terminal",
                 t.to
@@ -433,7 +427,7 @@ pub fn machine_from_table(
     let defaults = m
         .defaults
         .map(|d| Defaults {
-            model: wire::model_choice(&d.provider, &d.model, d.thinking),
+            model: d.to_ir(),
             skills: d.skills,
             mcp: d.mcp,
         })
@@ -447,7 +441,7 @@ pub fn machine_from_table(
         .budgets
         .map(|b| b.to_ir())
         .unwrap_or_default()
-        .tighten(config.budgets);
+        .tighten(floor.budgets);
 
     // The top-level `:provider` is the base of all three role chains, not a
     // stored-and-ignored default: it is applied *under* each role, so a role
@@ -461,21 +455,21 @@ pub fn machine_from_table(
     };
     let worker = overlay(
         m.worker.as_ref().map(wire::ModelChoice::to_ir),
-        &with_provider(&config.worker),
+        &with_provider(&floor.worker),
     );
     let judge = overlay(
         m.judge.as_ref().map(wire::ModelChoice::to_ir),
-        &with_provider(&config.judge),
+        &with_provider(&floor.judge),
     );
     let navigator = overlay(
         m.navigator.as_ref().map(wire::Navigator::to_ir),
-        &with_provider(&config.navigator),
+        &with_provider(&floor.navigator),
     );
     let navigator_max_invocations = m
         .navigator
         .as_ref()
         .and_then(|n| n.max_invocations)
-        .unwrap_or(config.navigator_max_invocations);
+        .unwrap_or(floor.navigator_max_invocations);
 
     Ok(Machine {
         ticket: m.ticket,
@@ -497,10 +491,10 @@ pub fn machine_from_table(
         digest_last_n: m
             .digest_last_n
             .map(|n| n as usize)
-            .unwrap_or(config.digest_last_n),
+            .unwrap_or(floor.digest_last_n),
         pi_extensions: m
             .pi_extensions
-            .unwrap_or_else(|| config.pi_extensions.clone()),
+            .unwrap_or_else(|| floor.pi_extensions.clone()),
         source_hash,
         source_path: source_path.to_path_buf(),
         dir: machine_dir.to_path_buf(),
@@ -509,8 +503,5 @@ pub fn machine_from_table(
 
 /// Overlay an authored partial model choice onto a fully-specified base.
 fn overlay(choice: Option<ModelChoice>, base: &ModelSpec) -> ModelSpec {
-    match choice {
-        None => base.clone(),
-        Some(c) => c.resolve(base),
-    }
+    choice.unwrap_or_default().resolve(base)
 }

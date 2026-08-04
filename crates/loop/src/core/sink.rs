@@ -5,7 +5,7 @@
 //! control loop should be provable without a filesystem.
 
 use crate::core::error::Result;
-use crate::core::event::{ArtifactClaim, ArtifactRef, Event, EventPayload};
+use crate::core::event::{Artifact, Event, EventPayload};
 
 /// Append-only event log.
 pub trait LedgerSink {
@@ -24,5 +24,5 @@ pub trait ArtifactSink {
     /// that never existed, a typo, a file the stage deleted before it called
     /// `transition`. Every such failure is an ordinary `Err` the engine
     /// records and moves past, never a reason to take the run down.
-    fn capture(&self, state: &str, cycle: u32, claim: &ArtifactClaim) -> Result<ArtifactRef>;
+    fn capture(&self, state: &str, cycle: u32, claim: &Artifact) -> Result<Artifact>;
 }

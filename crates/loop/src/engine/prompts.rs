@@ -6,23 +6,28 @@
 //! trait is what lets the whole control loop be tested without a toolbox on
 //! disk.
 
-use crate::core::{
-    ArtifactRef, Context, JudgeSpec, NavigatorSpec, Proposal, Result, StateId, WorkerSpec,
-};
+use crate::core::{Artifact, JudgeSpec, NavigatorSpec, Proposal, Result, StateId, WorkerSpec};
 
-/// A stage's assembled inputs.
+/// A stage's assembled inputs: the spawn, plus the two name lists the spawn
+/// itself has no use for.
+///
+/// No `context` field: it carried the substitution map the builder rendered
+/// with, which the loop never reads — only the engine's fake asserted on it,
+/// and a fake can keep its own record.
 #[derive(Clone, Debug)]
 pub struct StagePlan {
     pub spec: WorkerSpec,
-    /// The substitution map the builder rendered this stage's prose with.
-    /// Returned so the caller can see what the prompt was built from — the
-    /// engine's fakes assert on it — rather than because the loop reads it.
-    #[allow(dead_code)]
-    pub context: Context,
     /// The skill *names* the stage resolved, for the ledger. `spec.skill_paths`
     /// carries the paths pi actually loads; the names are what a human reading
     /// `state_entered` recognizes.
     pub skills: Vec<String>,
+    /// The MCP server names the stage resolved, for the ledger. They reach the
+    /// agent through `spec.entry_message` as an instruction to connect them,
+    /// so — like `skills` — they are a record of what the stage was told, not
+    /// an input to the spawn. This used to sit on `WorkerSpec`, which claims
+    /// to be "everything a worker spawn needs" while `worker_command` never
+    /// read it.
+    pub mcp: Vec<String>,
 }
 
 pub trait StageBuilder {
@@ -51,7 +56,7 @@ pub trait StageBuilder {
         &self,
         criteria: &str,
         worker_summary: &str,
-        artifacts: &[ArtifactRef],
+        artifacts: &[Artifact],
         check_output: Option<&str>,
     ) -> Result<JudgeSpec>;
 

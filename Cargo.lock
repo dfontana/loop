@@ -413,6 +413,7 @@ dependencies = [
  "chrono",
  "clap",
  "hex",
+ "loop",
  "mlua",
  "serde",
  "serde_json",
@@ -485,8 +486,10 @@ dependencies = [
 name = "mock-pi"
 version = "0.1.0"
 dependencies = [
+ "loop",
  "serde",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]

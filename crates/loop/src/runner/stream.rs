@@ -30,9 +30,16 @@ use crate::core::{Result, Usage};
 use serde_json::Value;
 
 /// Everything worth keeping from one spawn's stream.
+///
+/// No `session_id`. pi opens its stream with `{"type":"session","id":…}`, and
+/// this used to parse it, hand it to [`crate::core::WorkerResult`], and stop —
+/// nothing read it. The id the ledger records is the harness's own, assigned
+/// by `stage.rs` *before* the spawn, because `state_entered` has to be durable
+/// before a process that might crash is started. A spawn's own answer arrives
+/// too late to be the one written down, so parsing it bought a field, a struct
+/// member and two test assertions, and answered no question.
 #[derive(Clone, Debug, Default)]
 pub struct StreamOutcome {
-    pub session_id: Option<String>,
     /// The last assistant text block — the stage summary, and for the Judge
     /// and Navigator the entire answer.
     pub summary: String,
@@ -65,29 +72,24 @@ pub fn parse_stream(mut reader: impl std::io::BufRead) -> Result<StreamOutcome> 
             continue;
         };
 
-        match kind {
-            "session" => {
-                if let Some(id) = event.get("id").and_then(Value::as_str) {
-                    outcome.session_id = Some(id.to_string());
-                }
-            }
-            "message_end" => {
-                let Some(message) = event.get("message") else {
-                    continue;
-                };
-                if message.get("role").and_then(Value::as_str) != Some("assistant") {
-                    continue;
-                }
-                if let Some(usage) = message.get("usage") {
-                    outcome.usage += parse_usage(usage);
-                }
-                if let Some(text) = concat_text_blocks(message) {
-                    if !text.trim().is_empty() {
-                        outcome.summary = text;
-                    }
-                }
-            }
-            _ => {}
+        // One kind of line matters. The `session` line used to be read here
+        // too, into a field nobody consulted.
+        if kind != "message_end" {
+            continue;
+        }
+        let Some(message) = event.get("message") else {
+            continue;
+        };
+        if message.get("role").and_then(Value::as_str) != Some("assistant") {
+            continue;
+        }
+        if let Some(usage) = message.get("usage") {
+            outcome.usage += parse_usage(usage);
+        }
+        if let Some(text) = concat_text_blocks(message)
+            && !text.trim().is_empty()
+        {
+            outcome.summary = text;
         }
     }
     Ok(outcome)
@@ -164,7 +166,7 @@ mod tests {
     }
 
     #[test]
-    fn full_worker_stream_parses_session_summary_and_usage() {
+    fn full_worker_stream_parses_the_summary_and_the_usage() {
         let mut stream = String::new();
         stream.push_str(&line(
             &json!({"type": "session", "version": 3, "id": "sess-1", "timestamp": "t", "cwd": "/proj"}),
@@ -191,7 +193,6 @@ mod tests {
 
         let outcome = parse_stream(Cursor::new(stream)).expect("parse ok");
 
-        assert_eq!(outcome.session_id.as_deref(), Some("sess-1"));
         assert_eq!(outcome.summary, "Build passed, moving on.");
         assert_eq!(outcome.usage.tokens, 333);
         assert!((outcome.usage.cost_usd - 0.33).abs() < 1e-9);
@@ -238,7 +239,6 @@ mod tests {
         // no trailing newline
 
         let outcome = parse_stream(Cursor::new(stream)).expect("must not panic or error");
-        assert_eq!(outcome.session_id.as_deref(), Some("sess-2"));
         assert_eq!(outcome.summary, "");
     }
 

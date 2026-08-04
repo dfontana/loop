@@ -70,14 +70,14 @@ If you are evaluating the design rather than using it, read **05** first, then *
 - **MCP servers** are named, not shipped. A state's `:mcp` list names servers in _your_ `~/.pi/agent/mcp.json`, which loop never reads or writes.
 - **Nothing is injected.** A Worker ends its stage by writing JSON to the file named in `$LOOP_HANDOFF`; the Judge and Navigator have no tools at all and answer against a fixed first-line contract. loop used to vendor three TypeScript tools for this and scrape their output back off pi's event stream — the decision still arrives as structured data, it just no longer costs a dependency on pi's extension ABI.
 
-Which means the only pi-specific code left is one function that builds an argv. Driving a different headless agent is a new `*_command` builder, not a port.
+Which means the only pi-specific code left is a handful of argv builders, all of them in one module (`runner/command.rs`): one per role, plus one to reopen a session. Driving a different headless agent is a new set of `*_command` builders, not a port.
 
 ## Glossary
 
 - **Machine** — the per-ticket definition: states, transitions, loops, budgets, and QA cases. One Fennel file (`machine.fnl`) that _references_ the task and plan prose, and names each stage's prompt and skills.
 - **State / stage** — a node in the machine, bound to exactly one stage prompt.
-- **Stage prompt** — what a stage is *told*: a markdown file in `./.loop/stage-prompts/`, rendered with the run's `$VAR`s and handed to `pi --append-system-prompt`. Always in that stage's context.
-- **Skill** — what a stage is *offered*: a `SKILL.md` plus the scripts beside it, or a bare `.md`, passed to `pi --skill`. loop never opens one; the model sees its name and description and decides whether to load it.
+- **Stage prompt** — what a stage is _told_: a markdown file in `./.loop/stage-prompts/`, rendered with the run's `$VAR`s and handed to `pi --append-system-prompt`. Always in that stage's context.
+- **Skill** — what a stage is _offered_: a `SKILL.md` plus the scripts beside it, or a bare `.md`, passed to `pi --skill`. loop never opens one; the model sees its name and description and decides whether to load it.
 - **Check** — a command the _harness_ runs itself after a stage exits; exit 0 passes the edge. The one signal a worker cannot author, because it never touches the worker's session.
 - **Criteria** — a prose standard an independent Judge evaluates against the stage's output and artifacts.
 - **Ledger** — append-only JSONL at `.loop/ledger.jsonl`. The source of truth for where a run is; all state is folded from it, never stored.

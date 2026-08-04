@@ -27,7 +27,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::core::{Config, Context, CoreError, IoContext, ModelChoice, Result, StagePromptRef};
+use crate::core::{Context, CoreError, IoContext, ModelChoice, Paths, Result, StagePromptRef};
 
 pub mod render;
 pub mod skill;
@@ -46,19 +46,15 @@ pub enum Lookup<'a> {
 
 /// The one resolver, for both kinds of authored name.
 ///
-/// There were two, one per kind, and they agreed on everything that matters:
-/// the same `/`-means-exact-path escape hatch relative to the same directory,
-/// the same first-usable-candidate-wins loop, and the same
-/// [`CoreError::Unresolved`] listing every path that was tried — which is the
-/// message that makes `loop validate` worth running. Only the candidate list
-/// and what counts as a usable hit ever differed, so those are the parameters
-/// and the rest is shared by construction rather than by two people
-/// remembering to keep it that way.
+/// Stage prompts and skills share the `/`-means-exact-path escape hatch, the
+/// first-usable-candidate-wins loop, and the [`CoreError::Unresolved`] listing
+/// every path tried — the message that makes `loop validate` worth running.
+/// Only the candidate list and what counts as a usable hit differ, so those are
+/// the parameters.
 ///
 /// `usable` applies to [`Lookup::Named`] only. An exact path is judged by
-/// `exists` alone, as both copies did: an author who wrote out a path has said
-/// what they meant, and second-guessing the shape of it there would make the
-/// escape hatch less of one.
+/// `exists` alone: an author who wrote out a path has said what they meant, and
+/// second-guessing its shape would make the escape hatch less of one.
 pub fn resolve_name(
     kind: &'static str,
     name: &str,
@@ -98,108 +94,100 @@ pub fn resolve_name(
     }
 }
 
-pub struct Toolbox<'a> {
-    config: &'a Config,
+/// Resolve a stage prompt reference against `<machine_dir>/stage-prompts/` and
+/// read it.
+///
+/// An inline prompt short-circuits — it has no path to resolve. Everything else
+/// goes through [`resolve_name`], so the escape hatch and the error are the
+/// skill resolver's, and then the file is read and parsed, which is the half
+/// only a stage prompt has: loop never opens a skill.
+///
+/// Resolution is rooted at the machine file's own directory, which the caller
+/// passes in: it follows the file that named the stage prompt. The subdirectory
+/// name is shared with [`Paths`] so `init` and resolution cannot disagree about
+/// the layout.
+pub fn resolve_stage_prompt(r: &StagePromptRef, machine_dir: &Path) -> Result<ResolvedStagePrompt> {
+    // The name an error echoes back is the *authored* value, not the file stem:
+    // an unresolved `:stage-prompt "vendor/qa.md"` reported as `qa` names a file
+    // the machine does not mention.
+    match r {
+        StagePromptRef::Inline(prompt) => stage_prompt::parse("inline", prompt, None),
+        StagePromptRef::Path(p) => {
+            let name = p
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("stage-prompt");
+            let reported = p.display().to_string();
+            let path = resolve_name(
+                "stage prompt",
+                &reported,
+                machine_dir,
+                Lookup::Exact(p),
+                |c| c.is_file(),
+            )?;
+            read_stage_prompt(name, path)
+        }
+        StagePromptRef::Named(n) => {
+            let dir = machine_dir.join(crate::core::config::STAGE_PROMPTS_DIR);
+            let candidates = stage_prompt::candidates(n, &dir);
+            let path = resolve_name(
+                "stage prompt",
+                n,
+                machine_dir,
+                Lookup::Named(&candidates),
+                |c| c.is_file(),
+            )?;
+            read_stage_prompt(n, path)
+        }
+    }
 }
 
-impl<'a> Toolbox<'a> {
-    pub fn new(config: &'a Config) -> Self {
-        Self { config }
-    }
+/// Read a resolved stage prompt off disk and parse it.
+///
+/// Separate from resolution, so a file that exists but cannot be read — a bad
+/// mode, a dangling symlink — does not report as "could not resolve" and send
+/// the author looking for a file that was right there.
+fn read_stage_prompt(name: &str, path: PathBuf) -> Result<ResolvedStagePrompt> {
+    let src = std::fs::read_to_string(&path)
+        .io_ctx(format!("reading stage prompt {}", path.display()))?;
+    stage_prompt::parse(name, &src, Some(path))
+}
 
-    /// Resolve a stage prompt reference against `<machine_dir>/stage-prompts/`
-    /// and read it.
-    ///
-    /// An inline prompt short-circuits — it has no path to resolve. Everything
-    /// else goes through [`resolve_name`], so the escape hatch and the error
-    /// are the skill resolver's, and then the file is read and parsed, which is
-    /// the half only a stage prompt has: loop never opens a skill.
-    pub fn resolve_stage_prompt(
-        &self,
-        r: &StagePromptRef,
-        machine_dir: &Path,
-    ) -> Result<ResolvedStagePrompt> {
-        // Hoisted so the `Lookup::Named` below can borrow it. Rooted at the
-        // machine file's own directory, which the caller passes in rather than
-        // reading off `config.paths`: resolution follows the file that named
-        // the stage prompt. The subdirectory name is shared with `Paths` so
-        // `init` and resolution cannot disagree about the layout.
-        let candidates = match r {
-            StagePromptRef::Named(n) => stage_prompt::candidates(
-                n,
-                &machine_dir.join(crate::core::config::STAGE_PROMPTS_DIR),
-            ),
-            _ => Vec::new(),
-        };
+/// Resolve one skill name to the path pi's `--skill` should load, in
+/// `<machine_dir>/skills/`.
+pub fn resolve_skill(name: &str, machine_dir: &Path) -> Result<PathBuf> {
+    skill::resolve(name, machine_dir)
+}
 
-        // `name` is the display name the parsed prompt carries; `reported` is
-        // what an error echoes back, and has to be the authored value rather
-        // than the file stem — an unresolved `:stage-prompt "vendor/qa.md"`
-        // reported as `qa` names a file the machine does not mention.
-        let (name, reported, lookup) = match r {
-            StagePromptRef::Inline(prompt) => return stage_prompt::parse("inline", prompt, None),
-            StagePromptRef::Path(p) => (
-                p.file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("stage-prompt")
-                    .to_string(),
-                p.display().to_string(),
-                Lookup::Exact(p),
-            ),
-            StagePromptRef::Named(n) => (n.clone(), n.clone(), Lookup::Named(&candidates)),
-        };
+/// Resolve every skill a stage names, in order.
+pub fn resolve_skills(names: &[String], machine_dir: &Path) -> Result<Vec<PathBuf>> {
+    names
+        .iter()
+        .map(|n| resolve_skill(n, machine_dir))
+        .collect()
+}
 
-        let path = resolve_name("stage prompt", &reported, machine_dir, lookup, |p| {
-            p.is_file()
-        })?;
+/// Write an already-rendered prompt to
+/// `.loop/run/<state>-<cycle>-<attempt>-<suffix>.md`, returning the path for
+/// `--append-system-prompt <path>`.
+///
+/// Substitution is the caller's job, deliberately: a second pass here would
+/// re-expand any `$NAME` that appeared *inside* a substituted value, and a
+/// prompt assembled from harness-owned text (the handoff protocol) must reach
+/// the file without passing through the template engine at all.
+pub fn write_rendered(
+    paths: &Paths,
+    ctx: &Context,
+    rendered: &str,
+    suffix: &str,
+) -> Result<PathBuf> {
+    let dir = paths.run_dir();
+    std::fs::create_dir_all(&dir).io_ctx(format!("creating run dir {}", dir.display()))?;
 
-        // Separate from resolution on purpose. The old code folded the two
-        // together with `read_to_string`, so a file that exists but cannot be
-        // read — a bad mode, a dangling symlink — reported as "could not
-        // resolve", sending the author to look for a missing file that was
-        // right there.
-        let src = std::fs::read_to_string(&path)
-            .io_ctx(format!("reading stage prompt {}", path.display()))?;
-        stage_prompt::parse(&name, &src, Some(path))
-    }
+    let path = paths.render_file(&ctx.state, ctx.cycle, ctx.attempt, suffix);
+    std::fs::write(&path, rendered).io_ctx(format!("writing {}", path.display()))?;
 
-    /// Resolve one skill name to the path pi's `--skill` should load, in
-    /// `<machine_dir>/skills/`.
-    pub fn resolve_skill(&self, name: &str, machine_dir: &Path) -> Result<PathBuf> {
-        skill::resolve(name, machine_dir)
-    }
-
-    /// Resolve every skill a stage names, in order.
-    pub fn resolve_skills(&self, names: &[String], machine_dir: &Path) -> Result<Vec<PathBuf>> {
-        names
-            .iter()
-            .map(|n| self.resolve_skill(n, machine_dir))
-            .collect()
-    }
-
-    /// Write an already-rendered prompt to
-    /// `.loop/run/<state>-<cycle>-<attempt>-<suffix>.md`, returning the path
-    /// for `--append-system-prompt <path>`.
-    ///
-    /// Substitution is the caller's job, and deliberately so: this used to run
-    /// [`render::substitute`] itself on a body the caller had *already*
-    /// substituted, so any `$NAME` that appeared in a substituted value got
-    /// expanded a second time. Nothing depended on the second pass, and a
-    /// prompt assembled from harness-owned text (the handoff protocol) must be
-    /// able to reach the file without passing through the template engine at
-    /// all.
-    pub fn write_rendered(&self, ctx: &Context, rendered: &str, suffix: &str) -> Result<PathBuf> {
-        let dir = self.config.paths.run_dir();
-        std::fs::create_dir_all(&dir).io_ctx(format!("creating run dir {}", dir.display()))?;
-
-        let path = self
-            .config
-            .paths
-            .render_file(&ctx.state, ctx.cycle, ctx.attempt, suffix);
-        std::fs::write(&path, rendered).io_ctx(format!("writing {}", path.display()))?;
-
-        Ok(path)
-    }
+    Ok(path)
 }
 
 /// The model/thinking a stage prompt's frontmatter declares — the layer between a
@@ -215,21 +203,11 @@ pub fn frontmatter_model(pb: &ResolvedStagePrompt) -> ModelChoice {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::Paths;
     use tempfile::tempdir;
-
-    fn test_config(project_dir: &Path) -> Config {
-        Config::defaults(Paths {
-            project_dir: project_dir.to_path_buf(),
-        })
-    }
 
     #[test]
     fn resolve_stage_prompt_by_name() {
         let project_dir = tempdir().unwrap();
-        let config = test_config(project_dir.path());
-        let tb = Toolbox::new(&config);
-
         let machine_dir = project_dir.path().join(".loop");
         let stage_prompts = machine_dir.join("stage-prompts");
         std::fs::create_dir_all(&stage_prompts).unwrap();
@@ -239,9 +217,8 @@ mod tests {
         )
         .unwrap();
 
-        let resolved = tb
-            .resolve_stage_prompt(&StagePromptRef::Named("qa".into()), &machine_dir)
-            .unwrap();
+        let resolved =
+            resolve_stage_prompt(&StagePromptRef::Named("qa".into()), &machine_dir).unwrap();
         assert_eq!(resolved.body, "the qa prompt\n");
         assert_eq!(resolved.path, Some(stage_prompts.join("qa.md")));
     }
@@ -249,9 +226,6 @@ mod tests {
     #[test]
     fn resolve_stage_prompt_exact_path() {
         let project_dir = tempdir().unwrap();
-        let config = test_config(project_dir.path());
-        let tb = Toolbox::new(&config);
-
         let machine_dir = project_dir.path().join(".loop");
         std::fs::create_dir_all(&machine_dir).unwrap();
         std::fs::write(
@@ -260,27 +234,22 @@ mod tests {
         )
         .unwrap();
 
-        let resolved = tb
-            .resolve_stage_prompt(
-                &StagePromptRef::Path(PathBuf::from("validate-contract.md")),
-                &machine_dir,
-            )
-            .unwrap();
+        let resolved = resolve_stage_prompt(
+            &StagePromptRef::Path(PathBuf::from("validate-contract.md")),
+            &machine_dir,
+        )
+        .unwrap();
         assert_eq!(resolved.body, "bespoke prompt\n");
     }
 
     #[test]
     fn resolve_stage_prompt_inline() {
         let project_dir = tempdir().unwrap();
-        let config = test_config(project_dir.path());
-        let tb = Toolbox::new(&config);
-
-        let resolved = tb
-            .resolve_stage_prompt(
-                &StagePromptRef::Inline("do the one-off thing".into()),
-                &project_dir.path().join(".loop"),
-            )
-            .unwrap();
+        let resolved = resolve_stage_prompt(
+            &StagePromptRef::Inline("do the one-off thing".into()),
+            &project_dir.path().join(".loop"),
+        )
+        .unwrap();
         assert_eq!(resolved.body, "do the one-off thing");
         assert!(resolved.path.is_none());
     }
@@ -288,14 +257,10 @@ mod tests {
     #[test]
     fn resolve_stage_prompt_miss_lists_every_searched_path() {
         let project_dir = tempdir().unwrap();
-        let config = test_config(project_dir.path());
-        let tb = Toolbox::new(&config);
-
         let machine_dir = project_dir.path().join(".loop");
         std::fs::create_dir_all(&machine_dir).unwrap();
 
-        let err = tb
-            .resolve_stage_prompt(&StagePromptRef::Named("missing".into()), &machine_dir)
+        let err = resolve_stage_prompt(&StagePromptRef::Named("missing".into()), &machine_dir)
             .unwrap_err();
         match err {
             CoreError::Unresolved {
@@ -314,9 +279,7 @@ mod tests {
     #[test]
     fn write_rendered_puts_files_in_the_run_dir() {
         let project_dir = tempdir().unwrap();
-        let config = test_config(project_dir.path());
-        let tb = Toolbox::new(&config);
-
+        let paths = Paths::new(project_dir.path());
         let ctx = Context {
             ticket_id: "PROJ-1".into(),
             state: "implement".into(),
@@ -327,11 +290,9 @@ mod tests {
         // Written verbatim: the `$TICKET_ID` here survives, because rendering
         // happened before this call and a second pass would re-expand values
         // that merely *contain* a `$NAME`.
-        let path = tb
-            .write_rendered(&ctx, "hello PROJ-1 and $TICKET_ID", "system")
-            .unwrap();
+        let path = write_rendered(&paths, &ctx, "hello PROJ-1 and $TICKET_ID", "system").unwrap();
 
-        assert!(path.starts_with(config.paths.run_dir()), "got {path:?}");
+        assert!(path.starts_with(paths.run_dir()), "got {path:?}");
         let contents = std::fs::read_to_string(&path).unwrap();
         assert_eq!(contents, "hello PROJ-1 and $TICKET_ID");
     }

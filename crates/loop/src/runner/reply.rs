@@ -18,6 +18,7 @@
 //! isolation is the point of them), so their answers are prose against a fixed
 //! first-line contract, stated in the system prompts `command.rs` builds.
 
+use std::fmt::Write as _;
 use std::path::Path;
 
 use crate::core::{Proposal, Result, StateId};
@@ -128,30 +129,91 @@ pub fn clear_handoff(path: &Path) -> Result<()> {
 pub const VERDICT_PASS: &str = "PASS";
 pub const VERDICT_FAIL: &str = "FAIL";
 
-/// Parse a Judge's reply: [`VERDICT_PASS`] or [`VERDICT_FAIL`] alone on the
-/// first non-empty line, rationale on the rest.
+/// The one parser both tool-less roles answer to: the first non-empty line
+/// must be exactly one of `options`, and everything after it is the body.
 ///
-/// `None` means the reply did not follow the contract, and the caller must
-/// treat that as a failure — never as a pass. An unavailable or confused
-/// grader waving work through is the exact hole the Judge exists to close, so
-/// this returns nothing rather than guessing.
+/// The Judge and the Navigator have identical contracts — a bare token on line
+/// one, prose underneath — differing only in the token set, so they run the
+/// same three steps here instead of spelling them out twice. Returns the
+/// *option* that matched rather than what the model typed, so a caller gets
+/// back its own canonical spelling and never the model's casing.
+///
+/// `None` means the reply did not follow the contract. Both callers must fail
+/// toward a human on that — the Judge fails closed, the Navigator escalates —
+/// which is why this returns nothing rather than guessing.
 ///
 /// Tolerances are deliberately narrow but not hostile: leading blank lines,
 /// surrounding whitespace, markdown emphasis or backticks around the token,
 /// and a trailing colon are all stripped, because those are formatting habits
-/// rather than ambiguity about the verdict. Anything else — a preamble
-/// sentence, "PASS with reservations", a bare rationale — is not a verdict.
+/// rather than ambiguity. Anything else — a preamble sentence, "PASS with
+/// reservations", a near-miss on a state name — is not an answer. No prefix
+/// matching and no fuzzy fallback: guessing which option was meant is how a
+/// run ends up somewhere nobody chose.
+fn parse_first_line<'o, S: AsRef<str>>(reply: &str, options: &'o [S]) -> Option<(&'o str, String)> {
+    let mut lines = reply.lines().skip_while(|l| l.trim().is_empty());
+    // Case-folded through `to_lowercase` rather than `eq_ignore_ascii_case`:
+    // a state id is whatever the machine author wrote, and matching a
+    // non-ASCII one case-insensitively is the behaviour that was already here.
+    let token = lines.next()?.trim().trim_matches(DECORATION).to_lowercase();
+    let chosen = options
+        .iter()
+        .find(|o| o.as_ref().to_lowercase() == token)?;
+    let body = lines.collect::<Vec<_>>().join("\n").trim().to_string();
+    Some((chosen.as_ref(), body))
+}
+
+/// The decoration a model might wrap a bare token in — backticks, emphasis,
+/// quotes, a trailing colon or period, a markdown bullet or heading marker.
+///
+/// The space belongs in the set, not in a preceding `trim`: decoration and
+/// whitespace interleave (`## PASS`, `* debug`, `**  done  **`), so stripping
+/// them in two passes stops at the first space and leaves the token unmatched.
+/// An unmatched first line fails closed — the Judge returns no verdict and the
+/// Navigator escalates — so this is the one character whose absence turns a
+/// formatting habit into a blocked run.
+const DECORATION: [char; 9] = ['`', '*', '_', '"', '\'', ':', '.', '#', ' '];
+
+/// The contract [`parse_first_line`] enforces, stated to the model.
+///
+/// Built from the same `options` the parser is handed, so the prompt cannot
+/// offer a token the parser rejects. The Judge and Navigator prompts each used
+/// to word this paragraph themselves, next to two parsers that turned out to
+/// be one function — and a reworded prompt drifting from the parser is silent
+/// in the worst possible way, since an unrecognized first line reads as a
+/// failing verdict rather than as a broken contract.
+///
+/// `example` stands in for the first line inside the fenced shape, `body` for
+/// the second; `on_miss` says what becomes of a reply that ignores all this.
+/// Those three differ per role and none is derivable, so they are the
+/// parameters — the option list is rendered here, from the same slice the
+/// parser gets, and is not.
+pub fn first_line_contract<S: AsRef<str>>(
+    options: &[S],
+    example: &str,
+    body: &str,
+    on_miss: &str,
+) -> String {
+    let mut out = String::new();
+    let _ = write!(
+        out,
+        "Reply in exactly this shape:\n\n```\n{example}\n{body}\n```\n\n\
+         The first line must be one of these, alone, with nothing else on it:\n\n"
+    );
+    for option in options {
+        let _ = writeln!(out, "- `{}`", option.as_ref());
+    }
+    let _ = write!(out, "\n{on_miss}\n\n");
+    out
+}
+
+/// Parse a Judge's reply: [`VERDICT_PASS`] or [`VERDICT_FAIL`] alone on the
+/// first non-empty line, rationale on the rest.
+///
+/// `None` is **not** a pass. An unavailable or confused grader waving work
+/// through is the exact hole the Judge exists to close.
 pub fn parse_verdict(reply: &str) -> Option<(bool, String)> {
-    let (first, rest) = split_first_line(reply)?;
-    let token = normalize_token(first);
-    let pass = if token == VERDICT_PASS.to_lowercase() {
-        true
-    } else if token == VERDICT_FAIL.to_lowercase() {
-        false
-    } else {
-        return None;
-    };
-    Some((pass, rest))
+    let (token, rationale) = parse_first_line(reply, &[VERDICT_PASS, VERDICT_FAIL])?;
+    Some((token == VERDICT_PASS, rationale))
 }
 
 /// Parse a Navigator's reply: a state name alone on the first non-empty line,
@@ -161,34 +223,9 @@ pub fn parse_verdict(reply: &str) -> Option<(bool, String)> {
 /// Navigator cannot name a state that isn't there — the same guarantee the
 /// `choose` tool's enum used to give, enforced at the boundary instead of in
 /// the schema. `None` means no choice matched, and the caller escalates.
-///
-/// Matching is case-insensitive and ignores decoration for the same reason
-/// [`parse_verdict`] does. It is otherwise exact: no prefix matching, no fuzzy
-/// fallback. A near-miss on a state name is a Navigator that did not follow
-/// the contract, and guessing which state it meant is how a run ends up
-/// somewhere nobody chose.
 pub fn parse_choice(reply: &str, choices: &[String]) -> Option<(StateId, Option<String>)> {
-    let (first, rest) = split_first_line(reply)?;
-    let token = normalize_token(first);
-    let chosen = choices.iter().find(|c| c.to_lowercase() == token)?;
-    let note = if rest.is_empty() { None } else { Some(rest) };
-    Some((chosen.clone(), note))
-}
-
-/// Split a reply into its first non-empty line and the trimmed remainder.
-fn split_first_line(reply: &str) -> Option<(&str, String)> {
-    let mut lines = reply.lines().skip_while(|l| l.trim().is_empty());
-    let first = lines.next()?;
-    let rest = lines.collect::<Vec<_>>().join("\n").trim().to_string();
-    Some((first, rest))
-}
-
-/// Lowercase a first-line token with the decoration a model might wrap it in
-/// stripped — backticks, asterisks, quotes, and a trailing colon or period.
-fn normalize_token(line: &str) -> String {
-    line.trim()
-        .trim_matches(|c: char| matches!(c, '`' | '*' | '_' | '"' | '\'' | ':' | '.' | '#' | ' '))
-        .to_lowercase()
+    let (chosen, note) = parse_first_line(reply, choices)?;
+    Some((chosen.to_string(), Some(note).filter(|n| !n.is_empty())))
 }
 
 #[cfg(test)]
@@ -286,6 +323,46 @@ mod tests {
 
     // ── judge verdict ────────────────────────────────────────────────────
 
+    // ── the shared contract ──────────────────────────────────────────────
+
+    /// The seam this contract exists to close: the prompt's option list and
+    /// the parser's are the same slice, so anything the model is offered is
+    /// something the parser will accept. Drift here is silent in the worst way
+    /// — an unrecognized first line reads as a failing verdict, or as a
+    /// Navigator escalation, rather than as a broken prompt.
+    #[test]
+    fn every_option_the_contract_offers_is_one_the_parser_accepts() {
+        let sets: [Vec<String>; 3] = [
+            vec![VERDICT_PASS.into(), VERDICT_FAIL.into()],
+            vec!["debug".into(), "implement".into(), "escalate".into()],
+            vec!["only-one".into()],
+        ];
+        for options in &sets {
+            let contract = first_line_contract(options, "<x>", "<why>", "or else");
+            for option in options {
+                assert!(
+                    contract.contains(&format!("- `{option}`")),
+                    "`{option}` is not offered by:\n{contract}"
+                );
+                let (chosen, body) = parse_first_line(&format!("{option}\nthe note"), options)
+                    .unwrap_or_else(|| panic!("the parser rejected the offered `{option}`"));
+                assert_eq!(chosen, option);
+                assert_eq!(body, "the note");
+            }
+        }
+    }
+
+    /// Both roles get the identical skeleton — the Judge's contract used to be
+    /// a separately worded paragraph saying the same thing.
+    #[test]
+    fn both_roles_share_the_contract_skeleton() {
+        let judge = first_line_contract(&[VERDICT_PASS, VERDICT_FAIL], "PASS", "<why>", "x");
+        let nav = first_line_contract(&["debug"], "<state>", "<note>", "y");
+        let skeleton = "The first line must be one of these, alone, with nothing else on it:";
+        assert!(judge.contains(skeleton), "{judge}");
+        assert!(nav.contains(skeleton), "{nav}");
+    }
+
     #[test]
     fn verdict_reads_pass_and_fail_with_rationale() {
         let (pass, why) = parse_verdict("PASS\nEvery plan item is in the diff.").unwrap();
@@ -348,6 +425,35 @@ mod tests {
             parse_choice("  IMPLEMENT  ", &choices()).unwrap().0,
             "implement"
         );
+    }
+
+    /// Decoration and whitespace interleave in real replies, and both roles
+    /// fail *toward a human* on a first line they cannot match — the Judge
+    /// blocks a transition it actually approved, the Navigator escalates a run
+    /// it actually routed. So a markdown bullet or heading, which is the most
+    /// ordinary thing a model can do to a bare token, must not cost that.
+    #[test]
+    fn a_token_behind_a_bullet_or_a_heading_still_matches() {
+        assert!(parse_verdict("## PASS\nlooks right").unwrap().0);
+        assert!(!parse_verdict("**  FAIL  **\nmissing a test").unwrap().0);
+
+        assert_eq!(parse_choice("* debug\nn", &choices()).unwrap().0, "debug");
+        assert_eq!(
+            parse_choice("# escalate", &choices()).unwrap().0,
+            "escalate"
+        );
+
+        // `-` is deliberately *not* decoration: it is a legal character in a
+        // state id, and a set that strips it would be reshaping the name it is
+        // supposed to be matching. A `- debug` bullet is the one markdown
+        // habit this does not absorb, exactly as before.
+        assert!(parse_choice("- debug", &choices()).is_none());
+
+        // Nor is any of this a licence to bury the token in prose: the
+        // tolerance is for formatting around a bare token, not for a sentence
+        // that contains one.
+        assert!(parse_verdict("## Verdict: PASS").is_none());
+        assert!(parse_choice("* go to debug", &choices()).is_none());
     }
 
     /// The guarantee the `choose` tool's enum used to give: a state that isn't
