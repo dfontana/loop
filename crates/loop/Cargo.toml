@@ -1,0 +1,36 @@
+[package]
+name = "loop"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+# `loop` is a Rust keyword, so anything importing this library — the binary
+# below, and the integration tests under `tests/` — spells it `r#loop`. Worth
+# the friction to keep one name for the crate, the library, and the binary.
+[lib]
+name = "loop"
+path = "src/lib.rs"
+
+[[bin]]
+name = "loop"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+chrono.workspace = true
+clap.workspace = true
+hex.workspace = true
+mlua.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_path_to_error = "0.1.20"
+serde_yaml_ng.workspace = true
+sha2.workspace = true
+# Not a dev-dependency: `ledger` and `toolbox` use tempdirs at runtime, for
+# atomic writes.
+tempfile.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

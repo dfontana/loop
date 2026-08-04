@@ -4,8 +4,8 @@
 //! Point the harness at it with `LOOP_PI_BIN=/path/to/mock-pi`. It accepts
 //! (and entirely ignores) every CLI argument pi would take — `--print`,
 //! `--mode json`, `--model`, `-e`, all of it — and instead reads its
-//! invocation context from environment variables `loop-runner`'s command
-//! builders always set (`crates/loop-runner/src/command.rs`), alongside pi's
+//! invocation context from environment variables the harness's command
+//! builders always set (`crates/loop/src/runner/command.rs`), alongside pi's
 //! real flags:
 //!
 //! - `LOOP_MOCK_SCRIPT` (required) — path to the script JSON file (below).
@@ -17,7 +17,7 @@
 //!   in for the file a real agent writes to end its stage.
 //!
 //! These are diagnostic-only: the real pi ignores environment variables it
-//! doesn't recognize, so `loop-runner` sets them unconditionally regardless
+//! doesn't recognize, so the harness sets them unconditionally regardless
 //! of which binary `LOOP_PI_BIN` actually points at.
 //!
 //! # The script
@@ -299,7 +299,7 @@ impl<W: Write> Emitter<W> {
 
 fn now_iso() -> String {
     // No chrono dependency here; a fixed-format placeholder is fine since
-    // nothing in loop-runner parses this field's contents, only its presence.
+    // nothing in the harness parses this field's contents, only its presence.
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -376,7 +376,7 @@ fn final_text(role: &str, step: &Step) -> String {
 /// Write the Worker's handoff file, the way a real agent would during its turn.
 ///
 /// Silently does nothing when `LOOP_HANDOFF` is unset, so a spawn built by
-/// something other than `loop-runner` still runs.
+/// something other than the harness still runs.
 fn write_handoff(step: &Step) {
     let Some(t) = &step.transition else { return };
     let Some(path) = std::env::var_os("LOOP_HANDOFF") else {
@@ -685,8 +685,8 @@ mod tests {
     }
 
     /// The tool-less roles answer in their final message, so their scripted
-    /// verdict/choice has to land there in the shape `loop_runner::reply`
-    /// parses — this is the seam between the two crates.
+    /// verdict/choice has to land there in the shape the harness's
+    /// `runner::reply` parses — this is the seam between the two crates.
     #[test]
     fn tool_less_roles_answer_in_the_final_message() {
         let judge: Step =

@@ -1,15 +1,6 @@
 [workspace]
 resolver = "3"
-members = [
-    "crates/loop-core",
-    "crates/loop-ledger",
-    "crates/loop-fennel",
-    "crates/loop-toolbox",
-    "crates/loop-runner",
-    "crates/loop-engine",
-    "crates/loop-cli",
-    "crates/mock-pi",
-]
+members = ["crates/loop", "crates/mock-pi"]
 
 [workspace.package]
 version = "0.1.0"
@@ -18,13 +9,6 @@ rust-version = "1.85"
 license = "MIT"
 
 [workspace.dependencies]
-loop-core = { path = "crates/loop-core" }
-loop-ledger = { path = "crates/loop-ledger" }
-loop-fennel = { path = "crates/loop-fennel" }
-loop-toolbox = { path = "crates/loop-toolbox" }
-loop-runner = { path = "crates/loop-runner" }
-loop-engine = { path = "crates/loop-engine" }
-
 anyhow = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "std"] }
 clap = { version = "4", features = ["derive", "env"] }

@@ -9,7 +9,7 @@ The per-ticket machine is meant to be hacked together fast and thrown away. The 
 ## Quickstart
 
 ```sh
-cargo build --release -p loop-cli     # binary lands at target/release/loop
+cargo build --release -p loop         # binary lands at target/release/loop
 loop doctor                           # pi on PATH? toolbox staged?
 
 loop init PROJ-1487                   # scaffolds ./.loop/ and ~/.config/loop/
@@ -88,6 +88,6 @@ Which means the only pi-specific code left is one function that builds an argv. 
 
 ## Status
 
-Working, and under active development. The Rust workspace in `crates/` drives `pi`; machines are authored in Fennel and evaluated in an embedded Lua VM. The toolbox lives in `~/.config/loop/`; generated renders go to `~/.local/state/loop/`.
+Working, and under active development. The `loop` crate in `crates/` drives `pi` (`crates/mock-pi` is its offline stand-in, for the tests); machines are authored in Fennel and evaluated in an embedded Lua VM. The toolbox lives in `~/.config/loop/`; generated renders go to `~/.local/state/loop/`.
 
 The limits that come with the design — stage-level recovery, budgets sampled between stages, skills that scope instructions rather than capability — are written down in [design notes](docs/05-design-notes.md#limits-we-accept) rather than left for you to discover.

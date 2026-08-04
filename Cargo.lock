@@ -406,87 +406,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0ceec5bc11778974d1bcb055b18002eba7f4b3518b6a0081b3af5f21666da9ad"
 
 [[package]]
-name = "loop-cli"
+name = "loop"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "chrono",
  "clap",
- "loop-core",
- "loop-engine",
- "loop-fennel",
- "loop-ledger",
- "loop-runner",
- "loop-toolbox",
- "serde",
- "serde_json",
- "tempfile",
-]
-
-[[package]]
-name = "loop-core"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "serde",
- "serde_json",
- "thiserror",
-]
-
-[[package]]
-name = "loop-engine"
-version = "0.1.0"
-dependencies = [
- "loop-core",
- "serde",
- "serde_json",
- "tempfile",
-]
-
-[[package]]
-name = "loop-fennel"
-version = "0.1.0"
-dependencies = [
  "hex",
- "loop-core",
  "mlua",
  "serde",
  "serde_json",
  "serde_path_to_error",
+ "serde_yaml_ng",
  "sha2",
  "tempfile",
-]
-
-[[package]]
-name = "loop-ledger"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "loop-core",
- "serde",
- "serde_json",
- "tempfile",
-]
-
-[[package]]
-name = "loop-runner"
-version = "0.1.0"
-dependencies = [
- "loop-core",
- "serde",
- "serde_json",
- "tempfile",
-]
-
-[[package]]
-name = "loop-toolbox"
-version = "0.1.0"
-dependencies = [
- "loop-core",
- "serde",
- "serde_json",
- "serde_yaml_ng",
- "tempfile",
+ "thiserror",
 ]
 
 [[package]]

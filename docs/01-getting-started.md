@@ -16,10 +16,10 @@ Nothing else. There is no daemon, no server, no database — the whole run lives
 
 ## Install
 
-Build the CLI from the workspace root. The crate is `loop-cli`; the binary it produces is called `loop`.
+Build the CLI from the workspace root. The crate is `loop`, and so is the binary it produces.
 
 ```
-cargo build --release -p loop-cli
+cargo build --release -p loop
 ```
 
 That leaves the binary at `target/release/loop`. Put it on your `PATH` however you normally do — a symlink into `~/.local/bin` is enough.

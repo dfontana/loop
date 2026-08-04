@@ -1,7 +1,7 @@
 ;; examples/local/machine.fnl  →  ./.loop/machine.fnl
 ;;
 ;; The per-ticket machine for PROJ-1487, in the v1 plain-table Fennel schema
-;; (docs/05-design-notes.md; the schema reference is crates/loop-fennel/src/convert.rs).
+;; (docs/05-design-notes.md; the schema reference is crates/loop/src/fennel/convert.rs).
 ;;
 ;; The ticket's unique files are just this machine + its prose (task.md,
 ;; plan.md) + any bespoke local playbook (playbooks/validate-contract.md) + the

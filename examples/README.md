@@ -22,9 +22,9 @@ cp -R examples/local/. "$fixture/project/.loop/"
 cp -R examples/toolbox/. "$fixture/config/loop/"
 
 LOOP_CONFIG_DIR="$fixture/config/loop" LOOP_STATE_DIR="$fixture/state" \
-  cargo run --quiet -p loop-cli -- --dir "$fixture/project" validate
+  cargo run --quiet -p loop -- --dir "$fixture/project" validate
 LOOP_CONFIG_DIR="$fixture/config/loop" LOOP_STATE_DIR="$fixture/state" \
-  cargo run --quiet -p loop-cli -- --dir "$fixture/project" status --json
+  cargo run --quiet -p loop -- --dir "$fixture/project" status --json
 
 rm -rf "$fixture"
 ```
