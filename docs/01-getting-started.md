@@ -30,12 +30,11 @@ Then check the environment:
 loop doctor
 ```
 
-`doctor` runs exactly four checks and says nothing about your machine's contents:
+`doctor` runs exactly three checks and says nothing about your machine's contents:
 
 ```
   ok    `pi` on PATH
   ok    ~/.config/loop/config.fnl
-  ok    vendored ext materialized
   ok    .loop/machine.fnl
 
 all good
@@ -46,11 +45,10 @@ On a fresh install you will see failures for everything after the first check, b
 ```
   ok    `pi` on PATH
   FAIL  ~/.config/loop/config.fnl — run `loop init <TICKET>` to scaffold the toolbox
-  FAIL  vendored ext materialized — run `loop init` to write them
   FAIL  .loop/machine.fnl — run `loop init <TICKET>` in this project
 ```
 
-and `doctor` exits non-zero with `error: 3 problem(s)`. That is expected. Fix the first line if it failed — install `pi`, or set `LOOP_PI_BIN` — and let `loop init` fix the rest.
+and `doctor` exits non-zero with `error: 2 problem(s)`. That is expected. Fix the first line if it failed — install `pi`, or set `LOOP_PI_BIN` — and let `loop init` fix the rest.
 
 ## Scaffold a ticket
 
@@ -74,7 +72,7 @@ The first is your **toolbox** at `~/.config/loop/`. It is global, written once, 
   created /home/you/.config/loop/playbooks/debug-transient.md
 ```
 
-It also creates an empty `~/.config/loop/skills/` and writes three vendored TypeScript tools into `~/.config/loop/ext/`. Those are the tools `loop` injects into the agents it spawns; leave them alone, since `loop` restores them whenever their contents drift from what the binary carries.
+It also creates an empty `~/.config/loop/skills/`. Everything in this tree is yours to edit — `loop` writes a file only when it is absent, and never rewrites one you have changed.
 
 The second tree is **this ticket**, at `./.loop/`: `machine.fnl` copied from the `standard-ticket` template with `$TICKET` replaced by `PROJ-1487`, a `task.md` and `plan.md` stub, and an empty `playbooks/` directory for prompts that are specific to this ticket.
 
@@ -201,7 +199,7 @@ Run `validate` after every edit to the machine. It is cheap and it costs no toke
 loop run
 ```
 
-Each state in the machine is one agent stage. `loop` renders that stage's prompt, spawns `pi` with it, and waits. The agent does the work — reads files, edits, runs commands — and ends its turn by calling an injected `transition` tool that declares where the run should go next, with a rationale and any artifacts it wants later stages to see.
+Each state in the machine is one agent stage. `loop` renders that stage's prompt, spawns `pi` with it, and waits. The agent does the work — reads files, edits, runs commands — and ends its turn by writing a small JSON handoff to the file named in `$LOOP_HANDOFF`, declaring where the run should go next, with a rationale and any artifacts it wants later stages to see. The harness reads that file once the process exits; nothing the agent says in prose moves the run.
 
 The agent proposes; **the harness disposes.** `loop` takes that proposal and decides for itself whether to allow it: the edge has to exist in the machine, the edge's `:check` command has to exit zero, and the edge's `:criteria` has to satisfy a separate Judge model that never sees the working agent's session. Only then does the transition commit and the next stage start. If the agent says it is blocked, or names somewhere it cannot go, a third cheap model — the Navigator — picks a legal next state instead.
 

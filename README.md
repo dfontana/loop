@@ -63,7 +63,9 @@ If you are evaluating the design rather than using it, read **05** first, then *
 
 - **Skills** are pi's own. loop resolves a name to a path and passes `--skill <path>`; it never parses the format.
 - **MCP servers** are named, not shipped. A state's `:mcp` list names servers in _your_ `~/.pi/agent/mcp.json`, which loop never reads or writes.
-- **Three tools are loop's own** — `transition`, `verdict`, and `choose` — vendored in the binary and injected per spawn. They are how a decision reaches the harness as structured data instead of prose it would have to parse.
+- **Nothing is injected.** A Worker ends its stage by writing JSON to the file named in `$LOOP_HANDOFF`; the Judge and Navigator have no tools at all and answer against a fixed first-line contract. loop used to vendor three TypeScript tools for this and scrape their output back off pi's event stream — the decision still arrives as structured data, it just no longer costs a dependency on pi's extension ABI.
+
+Which means the only pi-specific code left is one function that builds an argv. Driving a different headless agent is a new `*_command` builder, not a port.
 
 ## Glossary
 

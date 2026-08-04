@@ -7,7 +7,7 @@ thinking: high
 
 # Implement — ticket $TICKET_ID, cycle $CYCLE
 
-You are implementing a planned change. Do exactly what the plan calls for; resist scope creep. You finish by calling the `transition` tool — never just stop.
+You are implementing a planned change. Do exactly what the plan calls for; resist scope creep. You finish by writing your handoff file — never just stop.
 
 ## Task
 

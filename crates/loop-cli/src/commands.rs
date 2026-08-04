@@ -75,7 +75,6 @@ fn ensure_toolbox(config: &Config) -> Result<Vec<String>> {
         }
     }
     std::fs::create_dir_all(paths.toolbox_skills())?;
-    Toolbox::new(config).materialize_ext()?;
     Ok(created)
 }
 
@@ -253,9 +252,6 @@ pub fn run(
         });
     }
 
-    let toolbox = Toolbox::new(&config);
-    let ext = toolbox.materialize_ext()?;
-
     let ledger_path = paths.ledger_file();
     let started = Ledger::open(&ledger_path)?.started();
     match (started, resuming) {
@@ -278,7 +274,6 @@ pub fn run(
         machine: &machine,
         config: &config,
         toolbox: Toolbox::new(&config),
-        ext,
         ledger_path: ledger_path.clone(),
     };
 
@@ -656,12 +651,6 @@ pub fn doctor(paths: Paths) -> Result<()> {
         paths.config_file().exists(),
         &paths.config_file().display().to_string(),
         "run `loop init <TICKET>` to scaffold the toolbox",
-    );
-    let transition_tool = paths.ext_dir().join("transition-tool.ts");
-    check(
-        transition_tool.exists(),
-        &transition_tool.display().to_string(),
-        "run `loop init` to write the vendored ext",
     );
     check(
         paths.machine_file().exists(),

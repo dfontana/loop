@@ -24,7 +24,7 @@ pub use event::{
 pub use fold::{FoldStatus, ResumePoint, RunState, fold, fold_with_loop_heads};
 pub use machine::{
     Budgets, Check, DEFAULT_CHECK_TIMEOUT_S, Defaults, LoopSpec, Machine, ModelChoice, ModelSpec,
-    OnExhausted, OnFail, PlaybookRef, QaCase, State, StateId, Thinking, Transition, TransitionMode,
+    OnExhausted, OnFail, PlaybookRef, QaCase, State, StateId, Thinking, Transition,
 };
 pub use runner::{
     AgentRunner, CheckOutcome, CheckRunner, Choice, JudgeSpec, NavigatorSpec, Proposal, Verdict,
@@ -32,11 +32,9 @@ pub use runner::{
 };
 pub use sink::{ArtifactSink, LedgerSink};
 
-/// The marker the injected `transition` tool returns, carrying the proposal.
-pub const LOOP_TRANSITION_MARKER: &str = "LOOP_TRANSITION";
-
-/// The marker the Judge's `verdict` tool returns.
-pub const LOOP_VERDICT_MARKER: &str = "LOOP_VERDICT";
-
-/// The marker the Navigator's `choose` tool returns.
-pub const LOOP_CHOICE_MARKER: &str = "LOOP_CHOICE";
+/// The environment variable naming the file a Worker writes its proposal to.
+///
+/// The whole agent-side contract for ending a stage: write JSON here, stop.
+/// The harness reads the file after the spawn exits, so the decision arrives
+/// as structured data without loop having to own a tool inside the agent.
+pub const HANDOFF_ENV: &str = "LOOP_HANDOFF";

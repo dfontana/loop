@@ -43,9 +43,4 @@
  ;; How many recent committed transitions the rolling digest lists. That
  ;; digest is the whole continuity channel between stages, and it only
  ;; reaches an agent where a playbook interpolates $LEDGER_DIGEST.
- :digest-last-n 8
-
- ;; "constrained" — the transition tool's `to` is an enum of the current
- ;; state's neighbors, so a worker cannot name an invalid edge.
- ;; "open" — `to` is a free string and unknown targets go to the Navigator.
- :transition-mode "constrained"}
+ :digest-last-n 8}

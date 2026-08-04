@@ -30,7 +30,7 @@ $ENTRY_ADDENDUM
    - `fail`, transient — an infrastructure flake (executor lost, timeout, cluster hiccup). The right move is a retry, not a debugging cycle.
    - `fail`, real — the change itself is wrong (bad output, schema mismatch, contract violation).
    - can't tell — say so plainly rather than guessing.
-4. Finish with `transition`, naming the state your classification implies, and attach the evidence artifacts.
+4. Finish by writing your handoff, naming the state your classification implies, and attach the evidence artifacts.
 
 ## Integrity
 

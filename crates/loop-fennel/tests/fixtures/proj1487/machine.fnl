@@ -18,7 +18,6 @@
  :entry "implement"
  :terminals ["done" "blocked"]
  :escalation-state "blocked"
- :transition-mode "constrained"
 
  :states
  {:implement {:playbook "implement" :thinking "high"

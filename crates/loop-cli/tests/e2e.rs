@@ -252,6 +252,94 @@ fn full_run_of_the_shipped_template_reaches_done() {
     );
 }
 
+/// The handoff protocol, end to end through the real CLI.
+///
+/// The Worker's decision reaches the harness through a file it writes, so the
+/// prompt has to name that file and its valid targets — a protocol block that
+/// silently stopped being appended would leave every stage unable to end
+/// itself, and every run would limp forward on synthesized blocked proposals.
+/// This asserts on the prompt actually handed to pi, not on an intermediate.
+#[test]
+fn the_rendered_prompt_carries_the_handoff_protocol() {
+    let fx = Fixture::new(
+        r#"{"steps":[
+          {"match":{"role":"worker"},"repeat":true,"summary":"did the work",
+           "usage":{"tokens":10,"cost_usd":0.01},
+           "transition":{"to":"done","rationale":"done"}},
+          {"match":{"role":"judge"},"repeat":true,"verdict":{"pass":true,"rationale":"done"}}
+        ]}"#,
+    );
+    fx.run(&["init", "TINY-1"]);
+    fx.machine(TINY_MACHINE);
+
+    let run = fx.run(&["run"]);
+    assert!(run.status.success(), "run failed: {}", combined(&run));
+
+    let render_dir = fx.state.join("render/TINY-1");
+    let prompt_path = render_dir.join("implement-1-1-system.md");
+    let prompt = std::fs::read_to_string(&prompt_path)
+        .unwrap_or_else(|e| panic!("reading {}: {e}", prompt_path.display()));
+
+    // The path it must write, and the targets it may name.
+    let handoff = render_dir.join("implement-1-1-handoff.json");
+    assert!(
+        prompt.contains(&handoff.display().to_string()),
+        "prompt must name the handoff file:\n{prompt}"
+    );
+    assert!(prompt.contains("Ending this stage"), "{prompt}");
+    assert!(prompt.contains("`done`"), "{prompt}");
+    assert!(prompt.contains("\"blocked\""), "{prompt}");
+
+    // And the worker really did write it — the proposal on the ledger came
+    // out of that file, not out of anything scraped off the event stream.
+    let written: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&handoff).unwrap()).unwrap();
+    assert_eq!(written["to"], "done");
+
+    let events = fx.ledger();
+    let proposed = events
+        .iter()
+        .find(|e| e["type"] == "transition_proposed")
+        .expect("a proposal");
+    assert_eq!(proposed["to"], "done");
+    assert_eq!(proposed["rationale"], "done");
+
+    // Nothing was vendored into the toolbox: loop no longer ships extensions.
+    assert!(!fx.config.join("ext").exists());
+}
+
+/// A worker that leaves no handoff is a *blocked* worker, not a crashed one.
+/// This is the path that used to be "ended its turn without calling
+/// transition", and it has to keep behaving identically — synthesize a blocked
+/// proposal and let the Navigator route it, rather than failing the run.
+#[test]
+fn a_worker_that_writes_no_handoff_is_treated_as_blocked() {
+    let fx = Fixture::new(
+        r#"{"steps":[
+          {"match":{"role":"worker"},"summary":"I did some work but never handed off"},
+          {"match":{"role":"navigator"},"choice":{"to":"done","entry_prompt":"wrap it up"}},
+          {"match":{"role":"judge"},"repeat":true,"verdict":{"pass":true,"rationale":"done"}}
+        ]}"#,
+    );
+    fx.run(&["init", "TINY-1"]);
+    fx.machine(TINY_MACHINE);
+
+    let run = fx.run(&["run"]);
+    assert!(run.status.success(), "run failed: {}", combined(&run));
+
+    let events = fx.ledger();
+    let proposed = events
+        .iter()
+        .find(|e| e["type"] == "transition_proposed")
+        .expect("a synthesized proposal");
+    assert_eq!(proposed["blocked"], true);
+    assert!(proposed["to"].is_null());
+
+    // Blocked means the Navigator ran; the run still reached its terminal.
+    assert!(kinds(&events).contains(&"navigator_invoked"));
+    assert_eq!(events.last().unwrap()["status"], "done");
+}
+
 /// A stage whose process dies is retried, not escalated — and the retry is
 /// invisible in the outcome: the run still reaches `done`.
 #[test]
@@ -476,7 +564,7 @@ fn logs_default_tail_and_n_override_are_oldest_first() {
     assert!(default.status.success(), "{}", combined(&default));
     let default_stdout = stdout(&default);
     let lines: Vec<_> = default_stdout.lines().collect();
-    assert_eq!(lines.len(), 20, "{}", default_stdout);
+    assert_eq!(lines.len(), 20, "{default_stdout}");
     assert!(lines[0].contains("note: event 5"), "{}", lines[0]);
     assert!(lines[19].contains("note: event 24"), "{}", lines[19]);
     assert!(!default_stdout.contains("recent:"));
@@ -1088,7 +1176,6 @@ fn preview_reports_the_stage_a_run_would_actually_build() {
         "entry             implement",
         "terminals         blocked, done",
         "escalation        blocked",
-        "transition mode   constrained",
         // Tightened by the machine, not the config's $15 / 7200s / 60.
         "budgets           $3.00, 1m30s, 7 transition(s)",
         "navigator         anthropic/claude-haiku-4-5:low (max 5 invocation(s))",
@@ -1154,7 +1241,6 @@ fn preview_of_one_state_shows_the_worker_inputs_and_a_labelled_render() {
         "description       Local override.",
         "model flag        --model frontmatter-model:max",
         "provider          anthropic",
-        "transition mode   constrained",
         "reachable         verify",
         "env               TICKET_ID, STATE, CYCLE, ATTEMPT",
         "session id        PREV-1-implement-1-1",
@@ -1245,14 +1331,11 @@ fn preview_rejects_an_unknown_state_and_lists_the_real_ones() {
 }
 
 /// Both forms are pure reads: identical output run twice, and not one byte
-/// written to the ledger, the artifact store, the vendored ext, or the render
-/// directory under `LOOP_STATE_DIR`.
+/// written to the ledger, the artifact store, or the render directory under
+/// `LOOP_STATE_DIR`.
 #[test]
 fn preview_is_deterministic_and_creates_no_run_or_render_files() {
     let fx = preview_fixture();
-
-    // Delete the ext `init` vendored: preview must not put it back.
-    std::fs::remove_dir_all(fx.config.join("ext")).unwrap();
 
     let first = fx.run(&["preview"]);
     let second = fx.run(&["preview"]);

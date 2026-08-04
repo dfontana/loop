@@ -5,13 +5,13 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::machine::{Budgets, ModelSpec, TransitionMode};
+use crate::machine::{Budgets, ModelSpec};
 
 /// The XDG paths loop reads and writes. Split so nothing generated is ever
 /// written into the directory a human hand-edits.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Paths {
-    /// `~/.config/loop` — authored: config.fnl, playbooks/, skills/, machines/, ext/.
+    /// `~/.config/loop` — authored: config.fnl, playbooks/, skills/, machines/.
     pub config_dir: PathBuf,
     /// `~/.local/state/loop` — generated and disposable.
     pub state_dir: PathBuf,
@@ -51,14 +51,21 @@ impl Paths {
     pub fn toolbox_machines(&self) -> PathBuf {
         self.config_dir.join("machines")
     }
-    pub fn ext_dir(&self) -> PathBuf {
-        self.config_dir.join("ext")
-    }
 
     // ── generated ─────────────────────────────────────────────────────────
     /// Rendered playbooks and entry messages for one ticket's spawns.
     pub fn render_dir(&self, ticket: &str) -> PathBuf {
         self.state_dir.join("render").join(sanitize(ticket))
+    }
+
+    /// Where a Worker spawn writes its handoff JSON. One file per attempt, so
+    /// a retry can never read the previous attempt's proposal — and the
+    /// harness deletes it before spawning anyway, belt and braces.
+    pub fn handoff_file(&self, ticket: &str, state: &str, cycle: u32, attempt: u32) -> PathBuf {
+        self.render_dir(ticket).join(format!(
+            "{}-{cycle}-{attempt}-handoff.json",
+            sanitize(state)
+        ))
     }
 
     // ── per-ticket, in the project ────────────────────────────────────────
@@ -155,7 +162,6 @@ pub struct Config {
     pub budgets: Budgets,
     /// How many recent transitions the digest includes verbatim.
     pub digest_last_n: usize,
-    pub transition_mode: TransitionMode,
 
     /// The pi executable. `LOOP_PI_BIN` overrides it — that is how the
     /// integration tests point the whole harness at `mock-pi`.
@@ -194,7 +200,6 @@ impl Config {
                 max_transitions: Some(60),
             },
             digest_last_n: 8,
-            transition_mode: TransitionMode::Constrained,
             pi_bin: std::env::var("LOOP_PI_BIN").unwrap_or_else(|_| "pi".into()),
             paths,
         }

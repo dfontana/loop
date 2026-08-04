@@ -43,7 +43,6 @@
  :entry "implement"
  :terminals ["done" "blocked"]
  :escalation-state "blocked"
- :transition-mode "constrained"
 
  ;; ── States ────────────────────────────────────────────────────────────────
  ;; Every stage's prompt IS its :playbook — a markdown file resolved

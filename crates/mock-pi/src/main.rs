@@ -13,6 +13,8 @@
 //! - `LOOP_MOCK_STATE`, `LOOP_MOCK_CYCLE`, `LOOP_MOCK_ATTEMPT` — set for
 //!   worker (and `LOOP_MOCK_STATE` for navigator, from `NavigatorSpec::from`);
 //!   absent for the judge, which has no notion of state/cycle.
+//! - `LOOP_HANDOFF` — where a worker step's `transition` is written, standing
+//!   in for the file a real agent writes to end its stage.
 //!
 //! These are diagnostic-only: the real pi ignores environment variables it
 //! doesn't recognize, so `loop-runner` sets them unconditionally regardless
@@ -24,7 +26,7 @@
 //!
 //! ```json
 //! {
-//!   "default": { "summary": "did the thing", "transition": {"to": "review", "rationale": "…"} },
+//!   "default": { "summary": "did the thing", "transition": {"to": "review", "rationale": "..."} },
 //!   "steps": [
 //!     { "match": {"role": "worker", "state": "implement", "cycle": 1},
 //!       "summary": "implemented",
@@ -64,17 +66,22 @@
 //! - `usage`: `{"tokens": u64, "cost_usd": f64}`, emitted as one assistant
 //!   `message_end`'s usage.
 //! - `transition`: `{"to": string|null, "blocked": bool, "rationale": string,
-//!   "artifacts": [{"name","path"}]}` — worker only. Emits a
-//!   `transition` tool call whose result is `LOOP_TRANSITION <json>`. Omit it
-//!   to simulate a worker that ends its turn without transitioning.
-//! - `verdict`: `{"pass": bool, "rationale": string}` — judge only. Emits
-//!   `LOOP_VERDICT <json>`.
+//!   "artifacts": [{"name","path"}]}` — worker only. **Written as JSON to
+//!   `$LOOP_HANDOFF`**, exactly as a real worker would. Omit it to simulate a
+//!   worker that ends its turn without handing off.
+//! - `verdict`: `{"pass": bool, "rationale": string}` — judge only. Rendered
+//!   into the final assistant message as `PASS|FAIL\n<rationale>`.
 //! - `choice`: `{"to": string, "entry_prompt": string}` — navigator only.
-//!   Emits `LOOP_CHOICE <json>`.
+//!   Rendered into the final assistant message as `<to>\n<entry_prompt>`.
+//!
+//! Because the tool-less roles answer in prose, scripting `summary` *without*
+//! `verdict`/`choice` is how a test drives an off-contract reply and asserts
+//! that the harness fails closed.
+//!
 //! - `exit`: `"ok"` (default) | `"crash"`. `"crash"` emits the session header
 //!   and `agent_start`/`turn_start`, then a deliberately truncated, invalid
 //!   final line with **no trailing newline** (simulating a process killed
-//!   mid-write) and exits 1. No `message_end`, no markers, no `agent_end`.
+//!   mid-write) and exits 1. No `message_end`, no handoff, no `agent_end`.
 //!
 //! If `LOOP_MOCK_SCRIPT` is unset, or the file can't be read/parsed, mock-pi
 //! prints an error to stderr and exits 1 (emitting no stdout at all) — that
@@ -338,41 +345,56 @@ fn assistant_message(summary: &str, usage: &UsageSpec) -> Value {
     })
 }
 
-/// Emits a `tool_execution_start`/`tool_execution_end` pair whose result text
-/// is exactly `text` — mirroring the shape `crates/loop-toolbox/ext/*.ts`
-/// extensions actually return (`{content:[{type:"text",text}]}`), and
-/// appends the corresponding `ToolResultMessage`-shaped entry to
-/// `tool_results` for the eventual `turn_end`.
-fn emit_tool_call<W: Write>(
-    em: &mut Emitter<W>,
-    tool_results: &mut Vec<Value>,
-    call_id: &str,
-    tool_name: &str,
-    args: Value,
-    text: &str,
-) {
-    em.line(&json!({
-        "type": "tool_execution_start",
-        "toolCallId": call_id,
-        "toolName": tool_name,
-        "args": args,
-    }));
-    let result = json!({"content": [{"type": "text", "text": text}]});
-    em.line(&json!({
-        "type": "tool_execution_end",
-        "toolCallId": call_id,
-        "toolName": tool_name,
-        "result": result,
-        "isError": false,
-    }));
-    tool_results.push(json!({
-        "role": "toolResult",
-        "toolCallId": call_id,
-        "toolName": tool_name,
-        "content": [{"type": "text", "text": text}],
-        "isError": false,
-        "timestamp": now_ms(),
-    }));
+/// What the spawn says in its final assistant message.
+///
+/// For a Worker this is just the scripted summary — its decision travels in
+/// the handoff file, not in prose. For the two tool-less roles the final
+/// message *is* the answer, so this renders the scripted verdict/choice into
+/// the first-line contract `loop_runner::reply` parses. A step that scripts
+/// neither falls back to `summary`, which is how a test exercises an
+/// off-contract reply.
+fn final_text(role: &str, step: &Step) -> String {
+    let summary = step.summary.clone().unwrap_or_default();
+    match role {
+        "judge" => match &step.verdict {
+            Some(v) => {
+                let token = if v.pass { "PASS" } else { "FAIL" };
+                format!("{token}\n{}", v.rationale).trim_end().to_string()
+            }
+            None => summary,
+        },
+        "navigator" => match &step.choice {
+            Some(c) => format!("{}\n{}", c.to, c.entry_prompt)
+                .trim_end()
+                .to_string(),
+            None => summary,
+        },
+        _ => summary,
+    }
+}
+
+/// Write the Worker's handoff file, the way a real agent would during its turn.
+///
+/// Silently does nothing when `LOOP_HANDOFF` is unset, so a spawn built by
+/// something other than `loop-runner` still runs.
+fn write_handoff(step: &Step) {
+    let Some(t) = &step.transition else { return };
+    let Some(path) = std::env::var_os("LOOP_HANDOFF") else {
+        return;
+    };
+    let payload = json!({
+        "to": t.to,
+        "blocked": t.blocked,
+        "rationale": t.rationale,
+        "artifacts": t.artifacts,
+    });
+    let path = PathBuf::from(path);
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Err(e) = std::fs::write(&path, payload.to_string()) {
+        eprintln!("mock-pi: failed writing handoff {}: {e}", path.display());
+    }
 }
 
 fn run_stream<W: Write>(out: W, role: &str, inv: &Invocation, step: &Step) -> ExitCode {
@@ -397,80 +419,26 @@ fn run_stream<W: Write>(out: W, role: &str, inv: &Invocation, step: &Step) -> Ex
 
     if step.exit.as_deref() == Some("crash") {
         // Simulate a process killed mid-write: a syntactically broken final
-        // line, with no trailing newline at all.
+        // line, with no trailing newline at all. No handoff is written — a
+        // stage that died never decided anything.
         em.raw(r#"{"type":"message_start","message":{"role":"assistant","con"#);
         em.flush();
         return ExitCode::from(1);
     }
 
+    if role == "worker" {
+        write_handoff(step);
+    }
+
     let usage = step.usage.clone().unwrap_or_default();
-    let summary = step.summary.clone().unwrap_or_default();
-    let assistant = assistant_message(&summary, &usage);
+    let assistant = assistant_message(&final_text(role, step), &usage);
     em.line(&json!({"type": "message_start", "message": assistant}));
     em.line(&json!({"type": "message_end", "message": assistant}));
-
-    let mut tool_results = Vec::new();
-    let mut next_call_id = 0usize;
-    let mut call_id = || {
-        next_call_id += 1;
-        format!("call_{next_call_id}")
-    };
-
-    match role {
-        "worker" => {
-            if let Some(t) = &step.transition {
-                let payload = json!({
-                    "to": t.to,
-                    "blocked": t.blocked,
-                    "rationale": t.rationale,
-                    "artifacts": t.artifacts,
-                });
-                let text = format!("LOOP_TRANSITION {payload}");
-                emit_tool_call(
-                    &mut em,
-                    &mut tool_results,
-                    &call_id(),
-                    "transition",
-                    json!({"to": t.to, "blocked": t.blocked, "rationale": t.rationale}),
-                    &text,
-                );
-            }
-        }
-        "judge" => {
-            if let Some(v) = &step.verdict {
-                let payload = json!({"pass": v.pass, "rationale": v.rationale});
-                let text = format!("LOOP_VERDICT {payload}");
-                emit_tool_call(
-                    &mut em,
-                    &mut tool_results,
-                    &call_id(),
-                    "verdict",
-                    json!({"pass": v.pass, "rationale": v.rationale}),
-                    &text,
-                );
-            }
-        }
-        "navigator" => {
-            if let Some(c) = &step.choice {
-                let payload = json!({"to": c.to, "entry_prompt": c.entry_prompt});
-                let text = format!("LOOP_CHOICE {payload}");
-                emit_tool_call(
-                    &mut em,
-                    &mut tool_results,
-                    &call_id(),
-                    "choose",
-                    json!({"to": c.to, "entry_prompt": c.entry_prompt}),
-                    &text,
-                );
-            }
-        }
-        _ => {}
-    }
 
     em.line(&json!({
         "type": "turn_end",
         "message": assistant,
-        "toolResults": tool_results,
+        "toolResults": [],
     }));
     em.line(&json!({"type": "agent_end", "messages": [assistant]}));
     em.flush();
@@ -676,34 +644,93 @@ mod tests {
         let _ = std::fs::remove_file(&sidecar);
     }
 
-    #[test]
-    fn run_stream_worker_emits_valid_ndjson_with_transition() {
-        let step: Step = serde_json::from_str(
-            r#"{"summary":"done","transition":{"to":"review","rationale":"ok"}}"#,
-        )
-        .unwrap();
-        let inv = Invocation {
+    fn worker_inv() -> Invocation {
+        Invocation {
             role: "worker".into(),
             state: Some("implement".into()),
             cycle: Some(1),
             attempt: Some(1),
-        };
+        }
+    }
+
+    #[test]
+    fn run_stream_worker_emits_valid_ndjson_and_writes_the_handoff() {
+        let step: Step = serde_json::from_str(
+            r#"{"summary":"done","transition":{"to":"review","rationale":"ok"}}"#,
+        )
+        .unwrap();
+
+        let dir = std::env::temp_dir().join(format!("mock-pi-handoff-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let handoff = dir.join("h.json");
+        // SAFETY: single-threaded test; `run_stream` reads this synchronously.
+        unsafe { std::env::set_var("LOOP_HANDOFF", &handoff) };
+
         let mut buf = Vec::new();
-        let code = run_stream(&mut buf, "worker", &inv, &step);
+        let code = run_stream(&mut buf, "worker", &worker_inv(), &step);
         assert_eq!(code, ExitCode::SUCCESS);
 
         let text = String::from_utf8(buf).unwrap();
-        let mut saw_transition = false;
         for line in text.lines() {
-            let v: Value = serde_json::from_str(line).expect("every mock-pi line is valid JSON");
-            if v.get("type").and_then(Value::as_str) == Some("tool_execution_end") {
-                let result_text = v["result"]["content"][0]["text"].as_str().unwrap_or("");
-                if result_text.starts_with("LOOP_TRANSITION ") {
-                    saw_transition = true;
-                }
-            }
+            serde_json::from_str::<Value>(line).expect("every mock-pi line is valid JSON");
         }
-        assert!(saw_transition);
+
+        let written: Value =
+            serde_json::from_str(&std::fs::read_to_string(&handoff).unwrap()).unwrap();
+        assert_eq!(written["to"], "review");
+        assert_eq!(written["rationale"], "ok");
+
+        unsafe { std::env::remove_var("LOOP_HANDOFF") };
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The tool-less roles answer in their final message, so their scripted
+    /// verdict/choice has to land there in the shape `loop_runner::reply`
+    /// parses — this is the seam between the two crates.
+    #[test]
+    fn tool_less_roles_answer_in_the_final_message() {
+        let judge: Step =
+            serde_json::from_str(r#"{"verdict":{"pass":false,"rationale":"not run"}}"#).unwrap();
+        assert_eq!(final_text("judge", &judge), "FAIL\nnot run");
+
+        let judge_pass: Step =
+            serde_json::from_str(r#"{"verdict":{"pass":true,"rationale":"green"}}"#).unwrap();
+        assert_eq!(final_text("judge", &judge_pass), "PASS\ngreen");
+
+        let nav: Step =
+            serde_json::from_str(r#"{"choice":{"to":"debug","entry_prompt":"isolate it"}}"#)
+                .unwrap();
+        assert_eq!(final_text("navigator", &nav), "debug\nisolate it");
+
+        // No scripted answer: the raw summary goes out, which is how a test
+        // drives an off-contract reply.
+        let off: Step = serde_json::from_str(r#"{"summary":"I'm not sure"}"#).unwrap();
+        assert_eq!(final_text("judge", &off), "I'm not sure");
+    }
+
+    /// A crashed stage never decided anything, so it must leave no handoff for
+    /// the next attempt to pick up.
+    #[test]
+    fn a_crashed_worker_writes_no_handoff() {
+        let step: Step = serde_json::from_str(
+            r#"{"exit":"crash","transition":{"to":"review","rationale":"ok"}}"#,
+        )
+        .unwrap();
+
+        let dir = std::env::temp_dir().join(format!("mock-pi-crash-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let handoff = dir.join("h.json");
+        unsafe { std::env::set_var("LOOP_HANDOFF", &handoff) };
+
+        let mut buf = Vec::new();
+        assert_eq!(
+            run_stream(&mut buf, "worker", &worker_inv(), &step),
+            ExitCode::from(1)
+        );
+        assert!(!handoff.exists());
+
+        unsafe { std::env::remove_var("LOOP_HANDOFF") };
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// `--session` and `--session-id` differ by four characters and mean

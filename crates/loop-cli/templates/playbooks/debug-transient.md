@@ -9,7 +9,7 @@ thinking: medium
   A playbook used as a TOOL, not bound to a state. `debug` gets it via its
   `:skills` list, which becomes `pi --skill <this file>`; it returns this
   guidance for the worker to apply in-context. It is deliberately a checklist, not
-  a task with its own `transition` — the caller stays in control of its own stage.
+  a task with its own handoff — the caller stays in control of its own stage.
   See docs/03-customizing.md ("Playbooks-as-tools").
 -->
 

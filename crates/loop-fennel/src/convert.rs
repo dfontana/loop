@@ -19,7 +19,6 @@
 //!  :entry "implement"
 //!  :terminals ["done" "blocked"]
 //!  :escalation-state "blocked"
-//!  :transition-mode "constrained"   ; or "open"
 //!
 //!  :states
 //!  {:implement  {:playbook "implement" :thinking "high"
@@ -72,7 +71,7 @@
 //!  :pi-extensions ["mcp" "review-model-selector"]
 //!  :budgets {:usd 15 :wallclock-s 7200 :max-transitions 60}
 //!  :digest-last-n 8
-//!  :transition-mode "constrained"}
+//!  }
 //! ```
 //!
 //! `:provider` is the base every role falls back to: a role table that names
@@ -88,7 +87,7 @@ use std::path::{Path, PathBuf};
 use loop_core::{
     Budgets, Check, Config, CoreError, DEFAULT_CHECK_TIMEOUT_S, Defaults, LoopSpec, Machine,
     ModelChoice, ModelSpec, OnExhausted, OnFail, PlaybookRef, QaCase, Result, State, StateId,
-    Thinking, Transition, TransitionMode,
+    Thinking, Transition,
 };
 
 // ── small Lua table readers ────────────────────────────────────────────────
@@ -214,17 +213,22 @@ fn model_spec_overlay(table: &mlua::Table, key: &str, base: &ModelSpec) -> Resul
     }
 }
 
-fn parse_transition_mode(value: Option<String>, default: TransitionMode) -> Result<TransitionMode> {
-    match value {
-        None => Ok(default),
-        Some(s) => match s.as_str() {
-            "constrained" => Ok(TransitionMode::Constrained),
-            "open" => Ok(TransitionMode::Open),
-            other => Err(CoreError::machine(format!(
-                "unknown `:transition-mode` value `{other}`"
-            ))),
-        },
+/// `:transition-mode` chose between two schemas for the injected `transition`
+/// tool's `to` parameter. There is no injected tool any more — a Worker writes
+/// a handoff file — so the key selects between nothing and nothing.
+///
+/// Erroring rather than ignoring it follows `:when` and `:context`: a key that
+/// silently stops meaning anything is worse than one that says so.
+fn reject_transition_mode(table: &mlua::Table, ctx: &str) -> Result<()> {
+    if get_value(table, "transition-mode")? != mlua::Value::Nil {
+        return Err(CoreError::machine(format!(
+            "{ctx}: `:transition-mode` was removed — a worker now ends its stage by writing \
+             its proposal to `$LOOP_HANDOFF`, and the harness checks the target against the \
+             graph either way. An off-graph target routes to the Navigator, which is what \
+             `open` used to mean and is now the only behaviour"
+        )));
     }
+    Ok(())
 }
 
 fn parse_on_exhausted(s: &str, ctx: &str) -> Result<OnExhausted> {
@@ -599,8 +603,7 @@ pub fn machine_from_table(
     let navigator = model_spec_overlay(table, "navigator", &config.navigator)?;
     let navigator_max_invocations =
         parse_navigator_max_invocations(table, config.navigator_max_invocations)?;
-    let transition_mode =
-        parse_transition_mode(get_str(table, "transition-mode")?, config.transition_mode)?;
+    reject_transition_mode(table, "machine")?;
 
     Ok(Machine {
         ticket,
@@ -618,7 +621,6 @@ pub fn machine_from_table(
         judge,
         navigator,
         navigator_max_invocations,
-        transition_mode,
         source_hash,
         source_path: source_path.to_path_buf(),
         dir: machine_dir.to_path_buf(),
@@ -668,8 +670,7 @@ pub fn config_from_table(table: &mlua::Table, base: Config) -> Result<Config> {
     let digest_last_n = get_u32(table, "digest-last-n")?
         .map(|n| n as usize)
         .unwrap_or(base.digest_last_n);
-    let transition_mode =
-        parse_transition_mode(get_str(table, "transition-mode")?, base.transition_mode)?;
+    reject_transition_mode(table, "config")?;
 
     Ok(Config {
         provider,
@@ -682,7 +683,6 @@ pub fn config_from_table(table: &mlua::Table, base: Config) -> Result<Config> {
         pi_extensions,
         budgets,
         digest_last_n,
-        transition_mode,
         pi_bin: base.pi_bin,
         paths: base.paths,
     })

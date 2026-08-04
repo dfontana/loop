@@ -277,18 +277,6 @@ pub struct QaCase {
     pub desc: String,
 }
 
-/// How the injected `transition` tool declares its `to` parameter.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum TransitionMode {
-    /// `to` is an enum of the current state's neighbors — the worker cannot
-    /// name an invalid edge. The Navigator fires only on explicit `blocked`.
-    #[default]
-    Constrained,
-    /// `to` is a free string; unknown targets route to the Navigator.
-    Open,
-}
-
 /// One ticket's fully-resolved state machine.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Machine {
@@ -314,7 +302,6 @@ pub struct Machine {
     pub judge: ModelSpec,
     pub navigator: ModelSpec,
     pub navigator_max_invocations: u32,
-    pub transition_mode: TransitionMode,
 
     /// sha256 of the machine source, recorded in `run_started`.
     pub source_hash: String,

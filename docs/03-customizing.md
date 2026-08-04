@@ -18,10 +18,9 @@ playbooks/<name>.md        stage prompts, referenced by bare name
 skills/<name>/SKILL.md     a skill as a directory
 skills/<name>.md           a skill as a single file
 machines/<name>.fnl        machine templates for `loop init --template`
-ext/                       transition-tool.ts, verdict-tool.ts, choose-tool.ts
 ```
 
-`ext/` is written for you. The three `.ts` files are compiled into the `loop` binary and materialized on `loop init`; loop rewrites any of them whose on-disk sha256 does not match the vendored content, so a hand-edited copy gets reverted.
+Everything here is authored. loop writes starting copies on first `init` and then never touches a file you have edited — there is nothing generated in this directory to be surprised by.
 
 **The ticket — `<project>/.loop/`.** Created by `loop init`, thrown away when the ticket is done.
 
@@ -70,7 +69,6 @@ Playbooks and skills are named, not pathed, and a name resolves **local first**:
 | `:pi-extensions` | `[string]` | `["mcp" "review-model-selector"]` | A declaration of what you have installed. Drives one `loop validate` diagnostic — see below. |
 | `:budgets` | `{:usd :wallclock-s :max-transitions}` | `15.0` / `7200` / `60` | Hard stops the harness enforces between stages. |
 | `:digest-last-n` | int | `8` | How many recent committed transitions the digest lists. |
-| `:transition-mode` | `"constrained"` \| `"open"` | `"constrained"` | The schema of the injected `transition` tool's `to` parameter. |
 
 `:navigator {:max-invocations N}` is a cap that applies **both** run-wide and per source state; hitting either escalates instead of spawning. See [the Navigator](02-how-it-works.md#navigator).
 
@@ -104,9 +102,7 @@ A realistic file:
  ;; Hard stops. Not suggestions to the agent.
  :budgets {:usd 15 :wallclock-s 7200 :max-transitions 60}
 
- :digest-last-n 8
-
- :transition-mode "constrained"}
+ :digest-last-n 8}
 ```
 
 ### `:pi-extensions` is a declaration, not a switch
@@ -138,7 +134,6 @@ What the key does is let the linter catch a mismatch. If a state names `:mcp` se
 | `:entry` | conditional | string | Must name a declared state. See below. |
 | `:terminals` | yes | `[string]` | Terminal names. These are **not** states — they have no playbook and never spawn an agent. |
 | `:escalation-state` | no | string | Must name a declared state or terminal. |
-| `:transition-mode` | no | `"constrained"` \| `"open"` | Overrides the config's. |
 | `:states` | yes | table | At least one entry. |
 | `:transitions` | no | list | Absent means no edges, which `loop validate` will reject as unreachable/terminal-less. |
 | `:loops` | no | list | Cycle counting and caps. |
@@ -238,7 +233,6 @@ The cap is enforced prospectively at commit time, and only when the target is a 
  :entry "implement"
  :terminals ["done" "blocked"]
  :escalation-state "blocked"
- :transition-mode "constrained"
 
  :states
  {:implement {:playbook "implement"          ; toolbox
@@ -487,7 +481,7 @@ config.fnl :default-mcp  +  machine :defaults :mcp  +  state :mcp
 >
 > - `mcp({connect: "warehouse"})`
 >
-> If one fails to connect, say so in your `transition` rationale rather than working around it.
+> If one fails to connect, say so in your handoff rationale rather than working around it.
 
 One bullet per named server, then the ordinary `You are entering **X**, cycle N.` line. When a stage names no servers, the entry message says nothing about MCP at all.
 

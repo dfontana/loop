@@ -8,7 +8,7 @@ For the config and machine keys mentioned here, see [customizing](03-customizing
 
 A run is one ticket, one state machine, driven to a terminal.
 
-The states of that machine are **agent stages**. Entering a state means rendering a prompt and spawning a coding agent (`pi`) as a subprocess in your project directory. The agent works, then ends its stage by calling an injected `transition` tool naming where it thinks the run should go next.
+The states of that machine are **agent stages**. Entering a state means rendering a prompt and spawning a coding agent (`pi`) as a subprocess in your project directory. The agent works, then ends its stage by writing a handoff file naming where it thinks the run should go next.
 
 That call is a **proposal**, not a move. The harness decides whether to honour it. Between the proposal and the commit sit the guards: a deterministic shell command you wrote, and an independent cheap model that reads the evidence. Only after those pass does the harness write `transition_committed` and enter the next state.
 
@@ -53,7 +53,7 @@ The engine's outer loop reads the whole ledger, folds it into a run state, and d
 6. **Append `state_entered`** — state, cycle, attempt, model, thinking, the resolved skill names, the MCP server names.
 7. **Spawn the Worker** and stream-parse its stdout.
 8. **If the process itself failed** (non-zero exit, spawn error), append a transient `error` and return; the fold will re-enter the state. After `MAX_CRASH_ATTEMPTS = 3` consecutive crashes the engine appends a `note` and escalates. The `error` carries the tail of pi's stderr, so a spawn failure leaves a diagnosis rather than just an exit code.
-9. **Capture artifacts** claimed in the `transition` call — copy into the store. This happens _before_ the output event is written. A claim that cannot be resolved is recorded as an `error` and dropped; the rest proceed.
+9. **Capture artifacts** claimed in the handoff — copy into the store. This happens _before_ the output event is written. A claim that cannot be resolved is recorded as an `error` and dropped; the rest proceed.
 10. **Append `worker_output`** — the last non-empty assistant message as the summary, the captured artifact refs, and token/cost usage.
 11. **If no proposal was emitted**, synthesize one: `{to: null, blocked: true, rationale: "worker ended its turn without calling transition"}`.
 12. **Append `transition_proposed`.**
@@ -91,14 +91,13 @@ Its model comes from the resolution chain documented in [customizing](03-customi
 --provider <p> --model <model>:<thinking>
 --no-skills
 --skill <path>            (repeated, one per resolved skill)
--e <ext>                  (transition-tool.ts only)
 --append-system-prompt <path-to-rendered-playbook>
 <entry message>           (positional, last)
 ```
 
-Environment it receives: `LOOP_REACHABLE` (the comma-joined list of declared neighbors), `LOOP_TRANSITION_MODE`, and the four scalars `TICKET_ID`, `STATE`, `CYCLE`, `ATTEMPT`. `PI_AGENT_DIR` is deliberately _not_ set, so pi's `mcp` extension reads your own `~/.pi/agent/mcp.json`.
+Environment it receives: `LOOP_HANDOFF` (the absolute path this spawn writes its proposal to) and the four scalars `TICKET_ID`, `STATE`, `CYCLE`, `ATTEMPT`. `PI_AGENT_DIR` is deliberately _not_ set, so pi's `mcp` extension reads your own `~/.pi/agent/mcp.json`.
 
-Note what is **absent** from that flag list: no `--no-builtin-tools`, no `--no-extensions`. The Worker keeps bash, file editing, and pi's ambient extension discovery. Only skills are pinned shut, via `--no-skills` plus an explicit `--skill` per resolved skill.
+Note what is **absent** from that flag list: no `--no-builtin-tools`, no `--no-extensions`, and no `-e`. The Worker keeps bash, file editing, and pi's ambient extension discovery. Only skills are pinned shut, via `--no-skills` plus an explicit `--skill` per resolved skill.
 
 > Withholding a skill bounds **instructions, not capability**. A stage that isn't given the `deploy` skill has no idea how you deploy — but it still has bash. Skills shape what an agent knows to do, not what it is able to do.
 
@@ -110,14 +109,13 @@ The Judge evaluates one edge's `:criteria` against the evidence the harness hand
 --print --mode json --no-session
 --provider <p> --model <m>:<t>
 --no-builtin-tools --no-extensions --no-skills
--e verdict-tool.ts
---append-system-prompt <the criteria TEXT, not a path>
+--append-system-prompt <the reply contract + the criteria, as TEXT>
 <judge message>
 ```
 
-The only environment variable it gets is `LOOP_MOCK_ROLE`. No `LOOP_REACHABLE`, no `TICKET_ID`.
+The only environment variable it gets is `LOOP_MOCK_ROLE`. No `LOOP_HANDOFF`, no `TICKET_ID`.
 
-`--no-builtin-tools --no-extensions --no-skills` is the whole point. The Judge has exactly one tool — `verdict` — and no others. It cannot read a file, run bash, or reach an MCP server. **It judges only what it is handed**, which is:
+`--no-builtin-tools --no-extensions --no-skills` is the whole point, and there is no `-e` adding one back. The Judge has **no tools at all**. It cannot read a file, run bash, or reach an MCP server — which is also why its answer is prose rather than a file it writes. **It judges only what it is handed**, which is:
 
 - the Worker's summary, trimmed
 - each artifact as `- <name> (<absolute path>)`
@@ -129,7 +127,7 @@ That block is the one piece of evidence on the line the Worker did not author.
 
 The Navigator is the recovery path. It fires only when the Worker's proposal is unusable, reads the ledger digest, and picks a target from the declared neighbors — or escalates. Same cheap default as the Judge: `claude-haiku-4-5` at `low`.
 
-Same isolation flags as the Judge, with `-e choose-tool.ts` instead. Its `--append-system-prompt` receives the **graph summary** as text, built to this grammar:
+Same isolation flags as the Judge, and equally tool-less. Its `--append-system-prompt` receives the reply contract followed by the **graph summary**, built to this grammar:
 
 ```
 ## States
@@ -144,67 +142,73 @@ Each edge shows only the **first line** of its check and criteria. This is why w
 
 Its positional message is the ledger digest plus, when available, `Worker rationale: …`, ` (worker reported blocked)`, and ` (worker proposed: <to>)`.
 
-`LOOP_REACHABLE` for the Navigator is exactly `machine.neighbors(from)`. The literal `"escalate"` option is appended by `choose-tool.ts` itself, not by the harness.
+The states it may name are exactly `machine.neighbors(from)` plus the literal `escalate`, listed in the prompt and enforced by the parser.
 
-## The three injected tools
+## The handoff protocol
 
-Each role gets exactly one tool injected via `-e`. The three `.ts` files are compiled into the `loop` binary and written to `<config_dir>/ext/` on `loop init`. **`materialize_ext` overwrites them whenever the on-disk sha256 differs** — hand-editing one gets it reverted on the next `init`.
+No tools are injected into any spawn. Each role answers in the narrowest shape that role is capable of producing, and the harness reads it back after the process exits.
 
-Each tool returns a marker line: a name, a space, then a JSON payload. The stream parser scans every `tool_execution_end` result for those prefixes after `trim_start()`. Surrounding prose is tolerated, and the **last** payload for a given name wins.
+| Role | How its answer arrives | Read by |
+| --- | --- | --- |
+| Worker | JSON written to `$LOOP_HANDOFF` | `serde_json`, as a `Proposal` |
+| Judge | `PASS`/`FAIL` on the first line of its final message | exact token match |
+| Navigator | a state name on the first line of its final message | exact match against the offered states |
 
-### `transition`
+The Worker gets a file because it has a `write` tool and a summary worth keeping separate from its decision. The other two have **no tools at all** — that isolation is the point of them — so they answer in prose, against a contract stated at the top of their system prompt.
 
-The Worker's only injected tool. Calling it ends the stage.
+Nothing is scraped off tool results. The stream parser reads only the session id, the usage totals, and the final assistant text.
 
-| Parameter   | Type             | Required  |
-| ----------- | ---------------- | --------- |
-| `to`        | state id         | optional* |
-| `blocked`   | bool             | optional* |
-| `rationale` | string           | **yes**   |
-| `artifacts` | `[{name, path}]` | optional  |
+### The Worker's handoff
 
-\* The tool throws if neither `to` nor `blocked` is given.
+The harness appends an **Ending this stage** section to every rendered Worker prompt, naming the file and listing the valid targets. The same path is exported as `$LOOP_HANDOFF`, so a skill's script can write the handoff on the agent's behalf.
 
-Returns the text `LOOP_TRANSITION {json}`. Calling it causes: the artifacts to be captured, `worker_output` and `transition_proposed` to be appended, and the routing pass to begin.
+```json
+{
+  "to": "<next state>",
+  "blocked": false,
+  "rationale": "why this is the right next step",
+  "artifacts": [{"name": "diff", "path": "relative/path.patch"}]
+}
+```
 
-**Constrained vs. open.** The schema of `to` depends on `LOOP_TRANSITION_MODE`, set from `:transition-mode` (machine key wins over config; default `"constrained"`):
+| Field | Type | Required |
+| --- | --- | --- |
+| `to` | state id, or `null` | optional* |
+| `blocked` | bool, default `false` | optional* |
+| `rationale` | string | **yes** |
+| `artifacts` | `[{name, path}]`, default `[]` | optional |
 
-- **`constrained`** — when `LOOP_REACHABLE` is non-empty, `to` is a union of string literals, one per reachable neighbor. The model _cannot_ name an invalid edge; the tool schema rejects it before the harness ever sees it.
-- **`open`** — `to` is a free string. Unknown targets are legal to emit and get routed to the Navigator, which decides what the Worker actually meant.
+\* A handoff with neither `to` nor `blocked: true` parses, and is routed exactly as a proposal naming an unknown target is: to the Navigator.
 
-Constrained mode is the reason the Navigator rarely fires in a healthy run: the only way to produce an unusable proposal is to be genuinely blocked, or to end the turn without calling the tool at all.
+The file lives at `<state_dir>/render/<ticket>/<state>-<cycle>-<attempt>-handoff.json` — one per attempt, and **deleted before the spawn starts**. Both together are what stop a previous attempt's decision from being read as this one's. Writing it more than once is harmless; the last write is what the harness reads.
 
-### `verdict`
+A readable handoff causes: the artifacts to be captured, `worker_output` and `transition_proposed` to be appended, and the routing pass to begin. `to` is checked against the current state's declared neighbors — naming something else does not create an edge, it routes to the Navigator.
 
-The Judge's only tool.
+### The Judge's verdict
 
-| Parameter   | Type                                                        |
-| ----------- | ----------------------------------------------------------- |
-| `pass`      | bool                                                        |
-| `rationale` | string — the schema asks it to "cite the specific evidence" |
+First non-empty line is `PASS` or `FAIL`, alone. Everything after it is the rationale, stored on the `guard_checked` event as `judge_rationale`.
 
-Returns `LOOP_VERDICT {json}`. `pass` becomes the `criteria` tier's outcome; `rationale` is stored on the `guard_checked` event as `judge_rationale`.
+Blank leading lines, surrounding whitespace, backticks, `**bold**`, and a trailing colon are stripped before matching. A preamble sentence is **not** tolerated: `Let me assess this.\nPASS` is not a verdict, and fails closed.
 
-### `choose`
+### The Navigator's choice
 
-The Navigator's only tool.
+First non-empty line is one of the states it was offered — `machine.neighbors(from)` plus the literal `escalate` — matched case-insensitively through the same decoration. Everything after it becomes `$ENTRY_ADDENDUM` in the next stage's prompt.
 
-| Parameter      | Type                                                   |
-| -------------- | ------------------------------------------------------ |
-| `to`           | enum of `LOOP_REACHABLE` plus the literal `"escalate"` |
-| `entry_prompt` | string — a get-back-on-track note for the next stage   |
+Matching is otherwise exact: no prefix matching, no fuzzy fallback. A first line naming anything else escalates.
 
-Returns `LOOP_CHOICE {json}`. `entry_prompt` becomes `$ENTRY_ADDENDUM` in the next stage's prompt: the harness finds it by scanning back from the commit through the events of that one routing decision, so it survives the `guard_checked` a guarded route puts in between. The scan stops at the previous commit or state entry, which is what keeps a note from an earlier cycle out of a later stage's prompt.
+The addendum reaches the next stage by the harness scanning back from the commit through the events of that one routing decision, so it survives the `guard_checked` a guarded route puts in between. The scan stops at the previous commit or state entry, which is what keeps a note from an earlier cycle out of a later stage's prompt.
 
-**Fail-closed on a missing marker.** If a role's process finishes without emitting a usable marker, the harness does not guess:
+**Fail-closed on a missing answer.** If a role's process finishes without producing a usable answer, the harness does not guess:
 
-| Role | Missing marker becomes |
+| Role | Missing or off-contract answer becomes |
 | --- | --- |
 | Worker | no proposal → the engine synthesizes `blocked: true` → the Navigator fires |
-| Judge | `{pass: false, rationale: "judge returned no usable verdict"}`, plus the stderr tail |
-| Navigator | `{to: "escalate"}` |
+| Judge | `{pass: false, rationale: "judge returned no usable verdict"}`, plus what it actually said and the stderr tail |
+| Navigator | `{to: "escalate"}`, same |
 
-A **non-zero exit invalidates a Judge or Navigator marker even if one was present**. The Worker's non-zero exit is handled by the crash path instead (step 8 above).
+A **non-zero exit invalidates a Judge's or Navigator's answer even if one was present**. The Worker's non-zero exit is handled by the crash path instead (step 8 above), and a crashed stage's handoff is ignored along with the rest of it.
+
+The Judge's and Navigator's fallbacks quote the reply, truncated to 400 characters. Without that, a run that stalls because a cheap model drifted off-format records only "no usable verdict" and gives you nothing to fix.
 
 ## Guards
 
@@ -290,7 +294,7 @@ It fires on:
 | A loop exhausted `:max-cycles` with `:on-exhausted "escalate"` | commit      |
 | 3 consecutive Worker process crashes                           | stage entry |
 
-The Navigator's cap (`:max-invocations`, default 5) applies **both run-wide and per source state**. Hitting either limit means no Navigator spawn at all — the run escalates immediately. A Navigator spawn that returns no usable `LOOP_CHOICE` is coerced to `{to: "escalate"}`, with the spawn's stderr tail as the addendum so the escalation says why.
+The Navigator's cap (`:max-invocations`, default 5) applies **both run-wide and per source state**. Hitting either limit means no Navigator spawn at all — the run escalates immediately. A Navigator spawn whose first line names nothing on the list is coerced to `{to: "escalate"}`, with what it said and the spawn's stderr tail as the addendum so the escalation says why.
 
 **Landing on the escalation state reports `Failed`, not `Done`** — even though it is a terminal like any other. That is the whole reason it is declared separately: it lets a machine have a "give up here" terminal that a script can distinguish from success by exit code alone.
 
@@ -623,7 +627,7 @@ That total covers the Workers only. `guard_checked` carries the Judge's `usage` 
 
 ### Artifacts
 
-A Worker declares artifacts in its `transition` call as `[{name, path}]`. The harness captures them **before** `worker_output` is appended.
+A Worker declares artifacts in its handoff as `[{name, path}]`. The harness captures them **before** `worker_output` is appended.
 
 1. A relative path joins the project root; an absolute one is used as-is. Both the root and the source are canonicalized, and the source must start with the root. That single comparison rejects absolute escapes, `..` walks, and out-of-tree symlinks.
 2. The destination is `<project>/.loop/artifacts/<state>-<cycle>-<name>`, with every component sanitized (non-`[A-Za-z0-9._-]` → `-`).

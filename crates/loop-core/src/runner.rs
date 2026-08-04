@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::Result;
 use crate::event::{ArtifactClaim, Usage};
-use crate::machine::{ModelSpec, StateId, TransitionMode};
+use crate::machine::{ModelSpec, StateId};
 
 /// Everything a worker spawn needs. Assembled deterministically by the engine
 /// from the state's config plus the rendered prompt files.
@@ -35,17 +35,19 @@ pub struct WorkerSpec {
     pub system_prompt_path: PathBuf,
     /// The short positional kickoff message.
     pub entry_message: String,
-    /// Neighbors of the current state — the `transition` tool's `to` enum.
+    /// Neighbors of the current state — the targets the handoff protocol
+    /// block lists as valid. Advisory rather than enforced: the harness
+    /// re-checks the proposed target against the graph either way, and an
+    /// off-graph target routes to the Navigator.
     pub reachable: Vec<StateId>,
-    pub transition_mode: TransitionMode,
-    /// `-e` paths: loop's own vendored ext (`transition-tool.ts`).
+    /// Where this spawn is told to write its proposal, exported as
+    /// [`crate::HANDOFF_ENV`]. The harness reads it once the process exits.
     ///
-    /// There is no companion list of *installed* pi-extensions to enable: pi
-    /// has no flag for that. A worker spawn simply omits `--no-extensions` and
-    /// gets pi's ambient discovery, which is why `config.fnl`'s
-    /// `:pi-extensions` is a declaration the linter reads rather than a switch
-    /// this struct could carry.
-    pub ext_paths: Vec<PathBuf>,
+    /// There is no list of pi-extensions to enable beside it: pi has no flag
+    /// for that. A worker spawn simply omits `--no-extensions` and gets pi's
+    /// ambient discovery, which is why `config.fnl`'s `:pi-extensions` is a
+    /// declaration the linter reads rather than a switch this struct carries.
+    pub handoff_path: PathBuf,
     /// Where pi runs — the project root.
     pub cwd: PathBuf,
     /// Deterministic id, so a crashed stage's transcript is findable.
@@ -55,7 +57,7 @@ pub struct WorkerSpec {
     pub env: Vec<(String, String)>,
 }
 
-/// The worker's `transition` tool call, as parsed off the event stream.
+/// The worker's proposal, as read back out of its handoff file.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Proposal {
     pub to: Option<StateId>,
@@ -70,7 +72,8 @@ pub struct Proposal {
 pub struct WorkerResult {
     /// The final assistant text, trimmed — what goes in `worker_output.summary`.
     pub summary: String,
-    /// `None` when the worker ended its turn without calling `transition`.
+    /// `None` when the worker left no handoff file, or wrote one that isn't a
+    /// usable [`Proposal`].
     pub proposal: Option<Proposal>,
     pub usage: Usage,
     pub session_id: Option<String>,
@@ -94,7 +97,6 @@ pub struct JudgeSpec {
     /// other field here, the worker had no hand in producing it.
     pub check_output: Option<String>,
     pub model: ModelSpec,
-    pub ext_path: PathBuf,
     pub cwd: PathBuf,
 }
 
@@ -141,10 +143,10 @@ pub struct NavigatorSpec {
     pub ledger_digest: String,
     pub from: StateId,
     pub proposal: Option<Proposal>,
-    /// The enum the `choose` tool is constrained to. Includes the escalation state.
+    /// The states it may pick from. Includes the escalation state; a reply
+    /// naming anything else escalates.
     pub reachable: Vec<StateId>,
     pub model: ModelSpec,
-    pub ext_path: PathBuf,
     pub cwd: PathBuf,
 }
 

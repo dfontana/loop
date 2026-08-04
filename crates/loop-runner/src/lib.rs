@@ -1,10 +1,15 @@
 //! Spawning `pi` and reading its JSON event stream.
 //!
 //! See docs/02-how-it-works.md. Three roles, three cost profiles: the Worker
-//! does the stage's work and ends with `transition`; the Judge independently
-//! grades a `criteria`; the Navigator reroutes a blocked worker. All three are
-//! `pi --print --mode json` subprocesses whose newline-delimited events this
-//! crate parses.
+//! does the stage's work and ends by writing a handoff file; the Judge
+//! independently grades a `criteria`; the Navigator reroutes a blocked worker.
+//! All three are `pi --print --mode json` subprocesses whose newline-delimited
+//! events this crate parses.
+//!
+//! Nothing here is pi-specific beyond `command.rs`. The roles communicate
+//! through a written file and two first-line text contracts, so porting to
+//! another headless agent CLI means writing another `*_command` builder and
+//! nothing else.
 //!
 //! TASK T4 implements this crate (and `mock-pi`, which lets everything else be
 //! tested without an API key).
@@ -14,15 +19,17 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 use loop_core::{
-    AgentRunner, Choice, Config, CoreError, JudgeSpec, LOOP_CHOICE_MARKER, LOOP_VERDICT_MARKER,
-    NavigatorSpec, Result, Verdict, WorkerResult, WorkerSpec,
+    AgentRunner, Choice, Config, CoreError, JudgeSpec, NavigatorSpec, Result, Verdict,
+    WorkerResult, WorkerSpec,
 };
 
 pub mod check;
 pub mod command;
+pub mod reply;
 pub mod stream;
 
 pub use check::exec_check;
+pub use reply::{clear_handoff, parse_choice, parse_verdict, read_handoff};
 pub use stream::{StreamOutcome, parse_stream};
 
 /// How many trailing stderr lines to keep from a spawn. A pi crash puts its
@@ -135,31 +142,58 @@ fn with_stderr(message: &str, stderr_tail: &str) -> String {
     format!("{message}; pi stderr tail:\n{stderr_tail}")
 }
 
+/// How many characters of an off-contract reply to keep in the ledger.
+const OFF_CONTRACT_REPLY_CHARS: usize = 400;
+
+/// Attach what the spawn actually said to a "no usable answer" message.
+///
+/// A judge that fails closed and a navigator that escalates both end a run's
+/// forward progress, and "returned no usable verdict" alone tells whoever
+/// reads the ledger nothing about whether the model refused, rambled, or
+/// answered fine in the wrong format. Bounded, because a reply can be long and
+/// this lands in an event.
+fn off_contract(message: &str, reply: &str) -> String {
+    let reply = reply.trim();
+    if reply.is_empty() {
+        return format!("{message} (the spawn produced no text at all)");
+    }
+    let mut shown: String = reply.chars().take(OFF_CONTRACT_REPLY_CHARS).collect();
+    if reply.chars().count() > OFF_CONTRACT_REPLY_CHARS {
+        shown.push('…');
+    }
+    format!("{message}; it said:\n{shown}")
+}
+
 impl AgentRunner for PiRunner {
-    /// Spawn the worker, stream-parse its output, and return the proposal.
+    /// Spawn the worker, stream-parse its output, and read back its handoff.
     ///
     /// Contract details that matter:
-    /// - The `transition` call arrives as a `tool_execution_end` event whose
-    ///   result text starts with `LOOP_TRANSITION `. We take that over the
-    ///   tool-call args: the tool validates before echoing.
+    /// - The proposal is read from the file at `spec.handoff_path`, which the
+    ///   spawn's prompt and `$LOOP_HANDOFF` both name. Any stale file there is
+    ///   removed *before* the spawn, so a proposal can only ever come from the
+    ///   attempt that just ran.
     /// - `usage` is summed off every `message_end` event for an assistant
     ///   message.
-    /// - A worker that never calls `transition` is not an error here: we
+    /// - A worker that leaves no usable handoff is not an error here: we
     ///   return `proposal: None` and let the engine decide (it re-enters or
     ///   navigates).
-    /// - `exit_ok` reflects the process exit code only; a non-zero exit
-    ///   doesn't stop us from returning whatever partial summary/usage the
-    ///   stream did contain before it was cut off.
+    /// - The handoff is read even when the process exited non-zero. A stage
+    ///   that wrote its decision and *then* died still decided, and throwing
+    ///   that away would re-run work that had finished. The engine ignores it
+    ///   on a crash anyway, but that is the engine's policy to set, not this
+    ///   layer's to pre-empt.
     /// - `stderr_tail` travels beside them, because on a non-zero exit the
     ///   engine writes an `error` event and drops the summary entirely — the
     ///   tail is the only place a spawn failure can leave a diagnosis.
     fn run_worker(&self, spec: &WorkerSpec) -> Result<WorkerResult> {
+        reply::clear_handoff(&spec.handoff_path)?;
+
         let cmd = command::worker_command(&self.pi_bin, spec);
         let out = self.spawn_and_parse(cmd, "worker")?;
-        let proposal = out.stream.proposal()?;
+
         Ok(WorkerResult {
             summary: out.stream.summary,
-            proposal,
+            proposal: reply::read_handoff(&spec.handoff_path),
             usage: out.stream.usage,
             session_id: out.stream.session_id,
             exit_ok: out.exit_ok,
@@ -167,21 +201,26 @@ impl AgentRunner for PiRunner {
         })
     }
 
-    /// `--no-session --no-builtin-tools --no-extensions -e verdict-tool.ts`.
-    /// The verdict arrives as `LOOP_VERDICT {…}`. A judge that returns
-    /// nothing — no marker, a malformed one, or the process exiting non-zero
-    /// — is a **fail**, not a pass: an unavailable grader must never wave
-    /// work through (docs/05-design-notes.md).
+    /// `--no-session --no-builtin-tools --no-extensions --no-skills`, and no
+    /// tool of its own — so the verdict is the spawn's final message, read
+    /// against the `PASS`/`FAIL` first-line contract in
+    /// [`command::judge_prompt`].
+    ///
+    /// A judge that returns nothing usable — a reply that ignores the
+    /// contract, or a process that exited non-zero — is a **fail**, not a
+    /// pass: an unavailable grader must never wave work through
+    /// (docs/05-design-notes.md).
     fn run_judge(&self, spec: &JudgeSpec) -> Result<Verdict> {
         let cmd = command::judge_command(&self.pi_bin, spec);
         let out = self.spawn_and_parse(cmd, "judge")?;
 
         if out.exit_ok {
-            if let Some(payload) = out.stream.marker(LOOP_VERDICT_MARKER) {
-                if let Ok(mut verdict) = serde_json::from_str::<Verdict>(payload) {
-                    verdict.usage = out.stream.usage;
-                    return Ok(verdict);
-                }
+            if let Some((pass, rationale)) = reply::parse_verdict(&out.stream.summary) {
+                return Ok(Verdict {
+                    pass,
+                    rationale,
+                    usage: out.stream.usage,
+                });
             }
         }
 
@@ -190,32 +229,42 @@ impl AgentRunner for PiRunner {
         // whatever the spawn managed to say before giving up.
         Ok(Verdict {
             pass: false,
-            rationale: with_stderr("judge returned no usable verdict", &out.stderr_tail),
+            rationale: with_stderr(
+                &off_contract("judge returned no usable verdict", &out.stream.summary),
+                &out.stderr_tail,
+            ),
             usage: out.stream.usage,
         })
     }
 
-    /// `--no-session --no-builtin-tools --no-extensions -e choose-tool.ts`,
-    /// with `LOOP_REACHABLE` exported so the `to` enum is constrained. A
-    /// navigator that returns nothing — no marker, a malformed one, or a
-    /// non-zero exit — escalates rather than stalling the run.
+    /// Same isolation as the Judge, and the same shape of contract: the choice
+    /// is the first line of the final message, matched against the states it
+    /// was offered (see [`command::navigator_prompt`]).
+    ///
+    /// A navigator that returns nothing usable — an unrecognized first line or
+    /// a non-zero exit — escalates rather than stalling the run.
     fn run_navigator(&self, spec: &NavigatorSpec) -> Result<Choice> {
         let cmd = command::navigator_command(&self.pi_bin, spec);
         let out = self.spawn_and_parse(cmd, "navigator")?;
+        let choices = command::navigator_choices(spec);
 
         if out.exit_ok {
-            if let Some(payload) = out.stream.marker(LOOP_CHOICE_MARKER) {
-                if let Ok(mut choice) = serde_json::from_str::<Choice>(payload) {
-                    choice.usage = out.stream.usage;
-                    return Ok(choice);
-                }
+            if let Some((to, entry_prompt)) = reply::parse_choice(&out.stream.summary, &choices) {
+                return Ok(Choice {
+                    to,
+                    entry_prompt,
+                    usage: out.stream.usage,
+                });
             }
         }
 
         Ok(Choice {
-            to: "escalate".to_string(),
+            to: command::ESCALATE.to_string(),
             entry_prompt: Some(with_stderr(
-                "the navigator spawn produced no usable choice, so the harness escalated",
+                &off_contract(
+                    "the navigator spawn produced no usable choice, so the harness escalated",
+                    &out.stream.summary,
+                ),
                 &out.stderr_tail,
             )),
             usage: out.stream.usage,

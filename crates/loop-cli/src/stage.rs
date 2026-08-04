@@ -13,7 +13,7 @@ use loop_core::{
 };
 use loop_engine::{StageBuilder, StagePlan};
 use loop_ledger::{Ledger, digest};
-use loop_toolbox::{ExtPaths, ResolvedPlaybook, Toolbox, frontmatter_model, render};
+use loop_toolbox::{ResolvedPlaybook, Toolbox, frontmatter_model, render};
 
 /// What a state resolves to before any ledger is read or any file is written:
 /// the four-layer model, the local-first playbook, and the effective skill and
@@ -114,7 +114,6 @@ pub struct CliStage<'a> {
     pub machine: &'a Machine,
     pub config: &'a Config,
     pub toolbox: Toolbox<'a>,
-    pub ext: ExtPaths,
     /// Read-only handle. The engine holds the writable one, so this opens the
     /// same file independently rather than aliasing it — every append is
     /// fsynced, so these reads are always current.
@@ -212,7 +211,18 @@ impl StageBuilder for CliStage<'_> {
 
         let context = self.context(state_id, cycle, attempt, entry_addendum, crashed)?;
         let vars = context.to_map();
-        let body = render::substitute(&resolved.playbook.body, &vars);
+        let reachable = self.machine.neighbors(state_id);
+        let handoff_path =
+            self.config
+                .paths
+                .handoff_file(&self.machine.ticket, state_id, cycle, attempt);
+
+        // The protocol block is appended *after* substitution, and is not
+        // itself a template — a playbook must not be able to interpolate its
+        // way into changing how the stage ends, and the handoff path is the
+        // harness's own value rather than one from the context namespace.
+        let mut body = render::substitute(&resolved.playbook.body, &vars);
+        body.push_str(&render::handoff_protocol(&handoff_path, &reachable));
         let system_prompt_path = self.toolbox.write_rendered(&context, &body, "system")?;
 
         let spec = WorkerSpec {
@@ -224,10 +234,9 @@ impl StageBuilder for CliStage<'_> {
             skill_paths: resolved.skill_paths,
             system_prompt_path,
             entry_message: render::entry_message(&context, &resolved.mcp),
-            reachable: self.machine.neighbors(state_id),
-            transition_mode: self.machine.transition_mode,
+            reachable,
             mcp: resolved.mcp,
-            ext_paths: vec![self.ext.transition.clone()],
+            handoff_path,
             cwd: self.config.paths.project_dir.clone(),
             session_id: Some(resolver.session_id(state_id, cycle, attempt)),
             env: Resolver::env(&context),
@@ -255,7 +264,6 @@ impl StageBuilder for CliStage<'_> {
                 .collect(),
             check_output: check_output.map(str::to_string),
             model: self.config.judge.clone(),
-            ext_path: self.ext.verdict.clone(),
             cwd: self.config.paths.project_dir.clone(),
         })
     }
@@ -273,7 +281,6 @@ impl StageBuilder for CliStage<'_> {
             proposal: proposal.cloned(),
             reachable: self.machine.neighbors(from),
             model: self.config.navigator.clone(),
-            ext_path: self.ext.choose.clone(),
             cwd: self.config.paths.project_dir.clone(),
         })
     }

@@ -645,12 +645,10 @@ dependencies = [
 name = "loop-toolbox"
 version = "0.1.0"
 dependencies = [
- "hex",
  "loop-core",
  "serde",
  "serde_json",
  "serde_yaml_ng",
- "sha2",
  "tempfile",
 ]
 

@@ -10,12 +10,10 @@ use std::path::{Path, PathBuf};
 
 use loop_core::{Config, Context, CoreError, IoContext, ModelChoice, PlaybookRef, Result};
 
-pub mod ext;
 pub mod playbook;
 pub mod render;
 pub mod skill;
 
-pub use ext::ExtPaths;
 pub use playbook::ResolvedPlaybook;
 
 pub struct Toolbox<'a> {
@@ -107,33 +105,18 @@ impl<'a> Toolbox<'a> {
             .collect()
     }
 
-    /// Write loop's three vendored pi extensions into `~/.config/loop/ext/`
-    /// if absent or stale, and return their paths. They are `include_str!`ed
-    /// into the binary, so a fresh install needs no separate fetch.
-    pub fn materialize_ext(&self) -> Result<ExtPaths> {
-        let ext_dir = self.config.paths.ext_dir();
-        std::fs::create_dir_all(&ext_dir)
-            .io_ctx(format!("creating ext dir {}", ext_dir.display()))?;
-
-        let transition =
-            write_if_stale(&ext_dir.join("transition-tool.ts"), ext::TRANSITION_TOOL_TS)?;
-        let verdict = write_if_stale(&ext_dir.join("verdict-tool.ts"), ext::VERDICT_TOOL_TS)?;
-        let choose = write_if_stale(&ext_dir.join("choose-tool.ts"), ext::CHOOSE_TOOL_TS)?;
-
-        Ok(ExtPaths {
-            transition,
-            verdict,
-            choose,
-        })
-    }
-
-    /// Render a playbook body with the context namespace and write it to
+    /// Write an already-rendered prompt to
     /// `~/.local/state/loop/render/<ticket>/<state>-<cycle>-<attempt>.md`,
-    /// returning the path for `--append-system-prompt @path`.
-    pub fn write_rendered(&self, ctx: &Context, body: &str, suffix: &str) -> Result<PathBuf> {
-        let vars = ctx.to_map();
-        let rendered = render::substitute(body, &vars);
-
+    /// returning the path for `--append-system-prompt <path>`.
+    ///
+    /// Substitution is the caller's job, and deliberately so: this used to run
+    /// [`render::substitute`] itself on a body the caller had *already*
+    /// substituted, so any `$NAME` that appeared in a substituted value got
+    /// expanded a second time. Nothing depended on the second pass, and a
+    /// prompt assembled from harness-owned text (the handoff protocol) must be
+    /// able to reach the file without passing through the template engine at
+    /// all.
+    pub fn write_rendered(&self, ctx: &Context, rendered: &str, suffix: &str) -> Result<PathBuf> {
         let dir = self.config.paths.render_dir(&ctx.ticket_id);
         std::fs::create_dir_all(&dir).io_ctx(format!("creating render dir {}", dir.display()))?;
 
@@ -147,28 +130,6 @@ impl<'a> Toolbox<'a> {
     pub fn config(&self) -> &Config {
         self.config
     }
-}
-
-/// Write `content` to `path` only if the file is absent or its content hash
-/// differs from `content`'s — never touching a file that's already current.
-fn write_if_stale(path: &Path, content: &str) -> Result<PathBuf> {
-    let write_needed = match std::fs::read(path) {
-        Ok(existing) => sha256_hex(&existing) != sha256_hex(content.as_bytes()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
-        Err(e) => return Err(CoreError::io(format!("reading {}", path.display()), e)),
-    };
-    if write_needed {
-        std::fs::write(path, content).io_ctx(format!("writing {}", path.display()))?;
-    }
-    Ok(path.to_path_buf())
-}
-
-/// Hex sha256 of a byte slice, used by `materialize_ext`'s staleness check.
-pub(crate) fn sha256_hex(data: &[u8]) -> String {
-    use sha2::{Digest, Sha256};
-    let mut hasher = Sha256::new();
-    hasher.update(data);
-    hex::encode(hasher.finalize())
 }
 
 /// The model/thinking a playbook's frontmatter declares — the layer between a
@@ -331,42 +292,6 @@ mod tests {
     }
 
     #[test]
-    fn materialize_ext_writes_rewrites_and_noops() {
-        let config_dir = tempdir().unwrap();
-        let state_dir = tempdir().unwrap();
-        let project_dir = tempdir().unwrap();
-        let config = test_config(config_dir.path(), state_dir.path(), project_dir.path());
-        let tb = Toolbox::new(&config);
-
-        // Absent -> written.
-        let paths = tb.materialize_ext().unwrap();
-        let written = std::fs::read_to_string(&paths.transition).unwrap();
-        assert_eq!(written, ext::TRANSITION_TOOL_TS);
-        let mtime_after_write = std::fs::metadata(&paths.transition)
-            .unwrap()
-            .modified()
-            .unwrap();
-
-        // Current -> no-op: re-running with unchanged content must not touch
-        // the file at all, verified by mtime staying bit-identical (content
-        // equality alone wouldn't prove a write didn't happen).
-        tb.materialize_ext().unwrap();
-        let mtime_after_noop = std::fs::metadata(&paths.transition)
-            .unwrap()
-            .modified()
-            .unwrap();
-        assert_eq!(mtime_after_write, mtime_after_noop);
-        let unchanged = std::fs::read_to_string(&paths.transition).unwrap();
-        assert_eq!(unchanged, ext::TRANSITION_TOOL_TS);
-
-        // Stale -> rewritten back to the vendored content.
-        std::fs::write(&paths.transition, "stale-content").unwrap();
-        tb.materialize_ext().unwrap();
-        let rewritten = std::fs::read_to_string(&paths.transition).unwrap();
-        assert_eq!(rewritten, ext::TRANSITION_TOOL_TS);
-    }
-
-    #[test]
     fn write_rendered_puts_files_under_state_dir_not_config_dir() {
         let config_dir = tempdir().unwrap();
         let state_dir = tempdir().unwrap();
@@ -381,14 +306,17 @@ mod tests {
             attempt: 1,
             ..Default::default()
         };
+        // Written verbatim: the `$TICKET_ID` here survives, because rendering
+        // happened before this call and a second pass would re-expand values
+        // that merely *contain* a `$NAME`.
         let path = tb
-            .write_rendered(&ctx, "hello $TICKET_ID", "system")
+            .write_rendered(&ctx, "hello PROJ-1 and $TICKET_ID", "system")
             .unwrap();
 
         assert!(path.starts_with(state_dir.path()));
         assert!(!path.starts_with(config_dir.path()));
         let contents = std::fs::read_to_string(&path).unwrap();
-        assert_eq!(contents, "hello PROJ-1");
+        assert_eq!(contents, "hello PROJ-1 and $TICKET_ID");
     }
 
     /// Smoke test against the real `examples/toolbox` fixtures: every shipped

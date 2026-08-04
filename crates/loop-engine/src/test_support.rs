@@ -10,8 +10,8 @@ use loop_core::{
     AgentRunner, ArtifactClaim, ArtifactRef, ArtifactSink, Budgets, Check, CheckOutcome,
     CheckRunner, Choice, Context, CoreError, Defaults, Event, EventPayload, JudgeSpec, LoopSpec,
     Machine, ModelChoice, ModelSpec, NavigatorSpec, OnExhausted, OnFail, PlaybookRef, Proposal,
-    QaCase, Result, State, StateId, Thinking, Totals, Transition, TransitionMode, Usage, Verdict,
-    WorkerResult, WorkerSpec,
+    QaCase, Result, State, StateId, Thinking, Totals, Transition, Usage, Verdict, WorkerResult,
+    WorkerSpec,
 };
 
 use crate::prompts::{StageBuilder, StagePlan};
@@ -45,7 +45,6 @@ pub fn base_machine() -> Machine {
         judge: model_spec(),
         navigator: model_spec(),
         navigator_max_invocations: 5,
-        transition_mode: TransitionMode::Constrained,
         source_hash: "sha256:test".into(),
         source_path: PathBuf::from("machine.fnl"),
         dir: PathBuf::from("."),
@@ -338,9 +337,8 @@ impl<'m> StageBuilder for FakeStageBuilder<'m> {
             system_prompt_path: PathBuf::from("/dev/null"),
             entry_message: format!("enter {state} cycle {cycle} attempt {attempt}"),
             reachable: self.machine.neighbors(state),
-            transition_mode: self.machine.transition_mode,
             mcp,
-            ext_paths: Vec::new(),
+            handoff_path: PathBuf::from("/tmp/handoff.json"),
             cwd: PathBuf::new(),
             session_id: None,
             env: Vec::new(),
@@ -375,7 +373,6 @@ impl<'m> StageBuilder for FakeStageBuilder<'m> {
             worker_digest: worker_summary.into(),
             artifact_paths: artifacts.iter().map(|a| PathBuf::from(&a.path)).collect(),
             model: self.machine.judge.clone(),
-            ext_path: PathBuf::new(),
             cwd: PathBuf::new(),
         })
     }
@@ -398,7 +395,6 @@ impl<'m> StageBuilder for FakeStageBuilder<'m> {
             proposal: proposal.cloned(),
             reachable,
             model: self.machine.navigator.clone(),
-            ext_path: PathBuf::new(),
             cwd: PathBuf::new(),
         })
     }

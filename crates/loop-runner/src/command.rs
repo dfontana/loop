@@ -4,32 +4,43 @@
 //! source (`dist/core/resource-loader.js`):
 //! `--print`, `--mode json`, `--session-id`, `--no-session`, `--provider`,
 //! `--model <m>:<thinking>`, `--no-skills`, `--skill <path>`,
-//! `--no-builtin-tools`, `--no-extensions`, `-e <path>`,
+//! `--no-builtin-tools`, `--no-extensions`,
 //! `--append-system-prompt <text-or-path>`, then the positional message.
 //!
 //! One correction against docs/02-how-it-works.md: `--append-system-prompt`
 //! does **not** use an `@path` convention. pi's `resolvePromptInput` calls
 //! `existsSync` on the raw argument and reads it as a file if it exists,
 //! otherwise treats it as literal text — so we pass the rendered playbook's
-//! path bare, no `@` prefix.
+//! path bare, no `@` prefix. The Judge and Navigator exploit the other half of
+//! that: their system prompts are short enough to pass as literal text.
+//!
+//! No `-e` anywhere. loop used to inject three vendored TypeScript tools whose
+//! only job was to echo their arguments back as a marker line; the Worker now
+//! writes a handoff file instead, and the two tool-less roles answer against a
+//! first-line contract. See `loop_toolbox::render::handoff_protocol`.
 
 use std::process::Command;
 
-use loop_core::{JudgeSpec, NavigatorSpec, TransitionMode, WorkerSpec};
+use loop_core::{HANDOFF_ENV, JudgeSpec, NavigatorSpec, WorkerSpec};
+
+/// The sentinel a Navigator names when no reachable state fits. Not a state:
+/// it takes the same "unknown target" path through the engine that any
+/// unroutable choice does, and lands on the machine's escalation state.
+pub const ESCALATE: &str = "escalate";
 
 /// Build the Worker command.
 ///
 /// Required environment:
-/// - `LOOP_REACHABLE` → comma-separated neighbors; the transition tool builds
-///   its enum from this.
-/// - `LOOP_TRANSITION_MODE` → `constrained` | `open`.
+/// - [`HANDOFF_ENV`] → the absolute path this spawn writes its proposal to.
+///   The rendered system prompt names the same path, so the agent can read it
+///   either way; the variable is there so a skill's script can write the
+///   handoff on the agent's behalf.
 /// - every `spec.env` pair, so a stage's tooling can read `$TICKET_ID` /
 ///   `$CYCLE` and key its idempotency on them.
 ///
 /// Extension discovery is left on (no `--no-extensions`): the Worker is the
 /// one role that needs the installed `mcp`/`review-model-selector`
-/// pi-extensions to load alongside the harness's own injected `transition`
-/// tool. Note `PI_AGENT_DIR` is deliberately **not** set — `mcp` reads the
+/// pi-extensions to load. Note `PI_AGENT_DIR` is deliberately **not** set — `mcp` reads the
 /// user's own `~/.pi/agent/mcp.json`, and pointing it at a loop-owned
 /// directory would hide every server the user actually configured.
 ///
@@ -55,24 +66,13 @@ pub fn worker_command(pi_bin: &str, spec: &WorkerSpec) -> Command {
         cmd.arg("--skill").arg(skill);
     }
 
-    for ext in &spec.ext_paths {
-        cmd.arg("-e").arg(ext);
-    }
-
     cmd.arg("--append-system-prompt")
         .arg(&spec.system_prompt_path);
     cmd.arg(&spec.entry_message);
 
     cmd.current_dir(&spec.cwd);
 
-    cmd.env("LOOP_REACHABLE", spec.reachable.join(","));
-    cmd.env(
-        "LOOP_TRANSITION_MODE",
-        match spec.transition_mode {
-            TransitionMode::Constrained => "constrained",
-            TransitionMode::Open => "open",
-        },
-    );
+    cmd.env(HANDOFF_ENV, &spec.handoff_path);
     for (k, v) in &spec.env {
         cmd.env(k, v);
     }
@@ -88,12 +88,14 @@ pub fn worker_command(pi_bin: &str, spec: &WorkerSpec) -> Command {
     cmd
 }
 
-/// The Judge gets no code tools at all: `--no-builtin-tools` disables the
-/// built-ins, and `--no-extensions` stops any *installed* pi-extension
-/// (`mcp`, …) from being auto-discovered and handing it a side door. The only
-/// tool it has is the explicitly `-e`'d `verdict-tool.ts`.
-/// That independence is what makes its verdict trustworthy (docs/05-design-notes.md
-/// #1) — do not add `read` "for convenience".
+/// The Judge gets no tools whatsoever: `--no-builtin-tools` disables the
+/// built-ins, `--no-extensions` stops any *installed* pi-extension (`mcp`, …)
+/// from being auto-discovered and handing it a side door, and there is nothing
+/// injected to replace them. That independence is what makes its verdict
+/// trustworthy (docs/05-design-notes.md) — do not add `read` "for convenience".
+///
+/// Having no tools is also why its answer is prose against a fixed contract
+/// rather than a file: it could not write one if it wanted to.
 pub fn judge_command(pi_bin: &str, spec: &JudgeSpec) -> Command {
     let mut cmd = Command::new(pi_bin);
     cmd.arg("--print")
@@ -107,15 +109,42 @@ pub fn judge_command(pi_bin: &str, spec: &JudgeSpec) -> Command {
     cmd.arg("--no-builtin-tools")
         .arg("--no-extensions")
         .arg("--no-skills");
-    cmd.arg("-e").arg(&spec.ext_path);
 
-    cmd.arg("--append-system-prompt").arg(&spec.criteria);
+    cmd.arg("--append-system-prompt").arg(judge_prompt(spec));
     cmd.arg(judge_message(spec));
 
     cmd.current_dir(&spec.cwd);
     cmd.env("LOOP_MOCK_ROLE", "judge");
 
     cmd
+}
+
+/// The Judge's system prompt: the reply contract, then the criteria.
+///
+/// The contract leads because it is the part the harness parses. `PASS`/`FAIL`
+/// on a line of its own is deliberately the narrowest thing a model can be
+/// asked for — one token, no punctuation, no JSON to get subtly wrong — and
+/// [`crate::parse_verdict`] fails closed on anything else, so a model that
+/// ignores the format cannot accidentally pass work through.
+pub fn judge_prompt(spec: &JudgeSpec) -> String {
+    format!(
+        "You are an independent reviewer. You have no tools: you cannot read files, \
+         run commands, or gather any evidence beyond what is in the message below. \
+         Judge only what you were given, against the criteria.\n\n\
+         Reply in exactly this shape:\n\n\
+         ```\n\
+         PASS\n\
+         <one or two sentences citing the specific evidence behind the verdict>\n\
+         ```\n\n\
+         The first line must be the single word `PASS` or `FAIL` and nothing else. \
+         A reply that does not start that way is read as a failure, so do not \
+         preface it with anything.\n\n\
+         Pass only if every part of the criteria is satisfied by the evidence. \
+         Absence of evidence is not satisfaction: if the criteria says something \
+         was run and you cannot see that it was run, that is a `FAIL`.\n\n\
+         ## Criteria\n\n{}\n",
+        spec.criteria
+    )
 }
 
 fn judge_message(spec: &JudgeSpec) -> String {
@@ -140,11 +169,10 @@ fn judge_message(spec: &JudgeSpec) -> String {
     message
 }
 
-/// Same isolation as the Judge — `--no-builtin-tools --no-extensions`, only
-/// the explicit `choose-tool.ts`. `LOOP_REACHABLE` is exported because
-/// `choose-tool.ts` reads it to build its `to` enum (reachable neighbors plus
-/// the always-available `escalate`), exactly like the Worker's transition
-/// tool does.
+/// Same isolation as the Judge — `--no-builtin-tools --no-extensions
+/// --no-skills`, and nothing injected. It routes within the declared graph or
+/// escalates; it never invents structure, because the harness only accepts a
+/// reply that exactly names one of the choices it was given.
 pub fn navigator_command(pi_bin: &str, spec: &NavigatorSpec) -> Command {
     let mut cmd = Command::new(pi_bin);
     cmd.arg("--print")
@@ -158,18 +186,64 @@ pub fn navigator_command(pi_bin: &str, spec: &NavigatorSpec) -> Command {
     cmd.arg("--no-builtin-tools")
         .arg("--no-extensions")
         .arg("--no-skills");
-    cmd.arg("-e").arg(&spec.ext_path);
 
-    cmd.arg("--append-system-prompt").arg(&spec.graph_summary);
+    cmd.arg("--append-system-prompt")
+        .arg(navigator_prompt(spec));
     cmd.arg(navigator_message(spec));
 
     cmd.current_dir(&spec.cwd);
 
-    cmd.env("LOOP_REACHABLE", spec.reachable.join(","));
     cmd.env("LOOP_MOCK_ROLE", "navigator");
     cmd.env("LOOP_MOCK_STATE", &spec.from);
 
     cmd
+}
+
+/// The choices a Navigator may name: the stuck state's neighbors, plus the
+/// always-available [`ESCALATE`] sentinel.
+pub fn navigator_choices(spec: &NavigatorSpec) -> Vec<String> {
+    let mut choices: Vec<String> = spec.reachable.clone();
+    if !choices.iter().any(|c| c == ESCALATE) {
+        choices.push(ESCALATE.to_string());
+    }
+    choices
+}
+
+/// The Navigator's system prompt: the reply contract, then the graph.
+///
+/// Same shape as the Judge's — one bare token on the first line — for the same
+/// reason. Here the token set is the reachable states, so
+/// [`crate::parse_choice`] can validate by exact lookup rather than by
+/// parsing anything.
+pub fn navigator_prompt(spec: &NavigatorSpec) -> String {
+    let choices = navigator_choices(spec);
+    let mut out = String::from(
+        "A worker could not route itself out of its stage. Pick where the run goes \
+         next, from the list below, and write a short note telling that stage how to \
+         get back on track.\n\n\
+         Reply in exactly this shape:\n\n\
+         ```\n\
+         <state>\n\
+         <a few sentences: what went wrong, and what to do differently>\n\
+         ```\n\n\
+         The first line must be one of these names, alone, with nothing else on it:\n\n",
+    );
+    for choice in &choices {
+        if choice == ESCALATE {
+            out.push_str(&format!(
+                "- `{choice}` — no reachable state fits; hand this to a human\n"
+            ));
+        } else {
+            out.push_str(&format!("- `{choice}`\n"));
+        }
+    }
+    out.push_str(
+        "\nA first line naming anything else escalates the run, so pick from the list \
+         or pick `escalate` deliberately. Everything after the first line becomes the \
+         next stage's note; keep it concrete.\n\n",
+    );
+    out.push_str(&spec.graph_summary);
+    out
 }
 
 fn navigator_message(spec: &NavigatorSpec) -> String {
@@ -224,9 +298,8 @@ mod tests {
             system_prompt_path: PathBuf::from("/tmp/playbook.md"),
             entry_message: "Entering implement, cycle 1".into(),
             reachable: vec!["review".into(), "debug".into()],
-            transition_mode: TransitionMode::Constrained,
             mcp: vec!["linear".into()],
-            ext_paths: vec![PathBuf::from("/tmp/ext/transition-tool.ts")],
+            handoff_path: PathBuf::from("/tmp/render/implement-1-1-handoff.json"),
             cwd: PathBuf::from("/tmp/project"),
             session_id: Some("PROJ-1487-implement-1".into()),
             env: vec![("TICKET_ID".into(), "PROJ-1487".into())],
@@ -255,8 +328,6 @@ mod tests {
                 "/tb/skills/spark-build",
                 "--skill",
                 "/tb/skills/jj",
-                "-e",
-                "/tmp/ext/transition-tool.ts",
                 "--append-system-prompt",
                 "/tmp/playbook.md",
                 "Entering implement, cycle 1",
@@ -280,8 +351,10 @@ mod tests {
     #[test]
     fn worker_command_env_matches_spec() {
         let cmd = worker_command("pi", &worker_spec());
-        assert_eq!(env_of(&cmd, "LOOP_REACHABLE"), Some("review,debug"));
-        assert_eq!(env_of(&cmd, "LOOP_TRANSITION_MODE"), Some("constrained"));
+        assert_eq!(
+            env_of(&cmd, HANDOFF_ENV),
+            Some("/tmp/render/implement-1-1-handoff.json")
+        );
         assert_eq!(env_of(&cmd, "TICKET_ID"), Some("PROJ-1487"));
         assert_eq!(env_of(&cmd, "LOOP_MOCK_ROLE"), Some("worker"));
         assert_eq!(env_of(&cmd, "LOOP_MOCK_STATE"), Some("implement"));
@@ -289,12 +362,18 @@ mod tests {
         assert_eq!(env_of(&cmd, "LOOP_MOCK_ATTEMPT"), Some("1"));
     }
 
+    /// No `-e` on any role. The three vendored TypeScript tools are gone, and
+    /// with them loop's only dependency on pi's extension ABI — this asserts
+    /// that nothing quietly reintroduces one.
     #[test]
-    fn worker_command_open_mode_env() {
-        let mut spec = worker_spec();
-        spec.transition_mode = TransitionMode::Open;
-        let cmd = worker_command("pi", &spec);
-        assert_eq!(env_of(&cmd, "LOOP_TRANSITION_MODE"), Some("open"));
+    fn no_role_injects_an_extension() {
+        for args in [
+            args_of(&worker_command("pi", &worker_spec())),
+            args_of(&judge_command("pi", &judge_spec())),
+            args_of(&navigator_command("pi", &navigator_spec())),
+        ] {
+            assert!(!args.contains(&"-e".to_string()), "got: {args:?}");
+        }
     }
 
     #[test]
@@ -317,7 +396,6 @@ mod tests {
                 model: "claude-haiku-4-5".into(),
                 thinking: Thinking::Low,
             },
-            ext_path: PathBuf::from("/tmp/ext/verdict-tool.ts"),
             cwd: PathBuf::from("/tmp/project"),
         }
     }
@@ -346,25 +424,32 @@ mod tests {
         assert!(nav.contains(&"--no-skills".to_string()));
     }
 
+    /// The Judge has no tools whatsoever — not even one of loop's own. That
+    /// is what makes its verdict evidence rather than a second opinion, so
+    /// this asserts the absence directly.
     #[test]
-    fn judge_command_has_no_code_tools() {
+    fn judge_command_has_no_tools_at_all() {
         let cmd = judge_command("pi", &judge_spec());
         let args = args_of(&cmd);
 
         assert!(args.contains(&"--no-builtin-tools".to_string()));
         assert!(args.contains(&"--no-extensions".to_string()));
-        // Exactly one `-e`, pointing at verdict-tool.ts — no `read`, no
-        // the verdict tool, nothing else.
-        let e_positions: Vec<usize> = args
-            .iter()
-            .enumerate()
-            .filter(|(_, a)| a.as_str() == "-e")
-            .map(|(i, _)| i)
-            .collect();
-        assert_eq!(e_positions.len(), 1);
-        assert_eq!(args[e_positions[0] + 1], "/tmp/ext/verdict-tool.ts");
+        assert!(!args.contains(&"-e".to_string()));
         assert!(!args.contains(&"--tools".to_string()));
         assert!(args.contains(&"--no-session".to_string()));
+    }
+
+    /// The contract is what the harness parses, so it has to reach the model
+    /// ahead of the criteria rather than being appended as an afterthought.
+    #[test]
+    fn judge_prompt_states_the_contract_and_carries_the_criteria() {
+        let prompt = judge_prompt(&judge_spec());
+        assert!(prompt.contains("PASS"));
+        assert!(prompt.contains("FAIL"));
+        assert!(prompt.contains("All three checklist items must be present."));
+        let contract_at = prompt.find("first line").expect("states the contract");
+        let criteria_at = prompt.find("## Criteria").expect("carries the criteria");
+        assert!(contract_at < criteria_at, "contract must lead");
     }
 
     /// The check's output is the only evidence in the Judge's message the
@@ -419,23 +504,45 @@ mod tests {
                 model: "claude-haiku-4-5".into(),
                 thinking: Thinking::Low,
             },
-            ext_path: PathBuf::from("/tmp/ext/choose-tool.ts"),
             cwd: PathBuf::from("/tmp/project"),
         }
     }
 
     #[test]
-    fn navigator_command_is_isolated_and_exports_reachable() {
+    fn navigator_command_is_isolated_and_passes_the_digest() {
         let cmd = navigator_command("pi", &navigator_spec());
         let args = args_of(&cmd);
         assert!(args.contains(&"--no-builtin-tools".to_string()));
         assert!(args.contains(&"--no-extensions".to_string()));
-        assert!(args.contains(&"/tmp/ext/choose-tool.ts".to_string()));
-        assert_eq!(env_of(&cmd, "LOOP_REACHABLE"), Some("debug,escalate"));
 
         let message = args.last().unwrap();
         assert!(message.contains("worker stuck at review"));
         assert!(message.contains("no reachable state fits"));
         assert!(message.contains("blocked"));
+    }
+
+    /// The choices are what `parse_choice` validates against, so the prompt
+    /// and the parser have to be built from the same list — this is the seam
+    /// where they could drift apart.
+    #[test]
+    fn navigator_prompt_lists_every_choice_and_the_graph() {
+        let spec = navigator_spec();
+        let prompt = navigator_prompt(&spec);
+        for choice in navigator_choices(&spec) {
+            assert!(prompt.contains(&format!("`{choice}`")), "missing {choice}");
+        }
+        assert!(prompt.contains("implement -> review -> done"));
+    }
+
+    /// `escalate` is always available, even when the machine's own reachable
+    /// set never mentions it — it is the Navigator's way out.
+    #[test]
+    fn navigator_choices_always_include_escalate_exactly_once() {
+        let mut spec = navigator_spec();
+        spec.reachable = vec!["debug".into()];
+        assert_eq!(navigator_choices(&spec), vec!["debug", "escalate"]);
+
+        spec.reachable = vec!["debug".into(), "escalate".into()];
+        assert_eq!(navigator_choices(&spec), vec!["debug", "escalate"]);
     }
 }

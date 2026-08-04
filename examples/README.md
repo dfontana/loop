@@ -79,13 +79,10 @@ Actually _running_ this machine would additionally need pi, the `warehouse` MCP 
 | [`skills/debug-transient.md`](toolbox/skills/debug-transient.md) | A bare-`.md` skill: the transient-vs-real checklist the `debug` stage loads. |
 | [`machines/standard-ticket.fnl`](toolbox/machines/standard-ticket.fnl) | Machine template: the plain code-only spine. |
 | [`machines/data-pipeline-ticket.fnl`](toolbox/machines/data-pipeline-ticket.fnl) | The template PROJ-1487 is derived from. |
-| [`ext/`](toolbox/ext) | The three vendored tools — `transition`, `verdict`, `choose`. |
 
 ## What is loop's own, and what isn't
 
-`ext/*.ts` are loop's own code. They are compiled into the binary and written here automatically; you never author them, and hand edits are reverted on the next `loop init` or `loop run`.
-
-Everything else in `toolbox/` is ordinary content you write. Skills use pi's own loader — loop resolves a name to a path and passes `--skill <path>`, and never parses the format. There is no `mcp.json` here on purpose: a state's `:mcp` names servers out of _your_ `~/.pi/agent/mcp.json`, and the stage connects them itself.
+Everything in `toolbox/` is ordinary content you write. loop ships no code into it — a Worker ends its stage by writing the handoff file the harness names in its prompt, and the two cheap roles have no tools at all, so there is nothing to vendor. Skills use pi's own loader — loop resolves a name to a path and passes `--skill <path>`, and never parses the format. There is no `mcp.json` here on purpose: a state's `:mcp` names servers out of _your_ `~/.pi/agent/mcp.json`, and the stage connects them itself.
 
 ## Suggested reading order
 

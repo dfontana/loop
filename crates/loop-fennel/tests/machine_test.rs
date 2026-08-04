@@ -3,7 +3,7 @@
 
 mod common;
 
-use loop_core::{OnExhausted, OnFail, PlaybookRef, Thinking, TransitionMode};
+use loop_core::{OnExhausted, OnFail, PlaybookRef, Thinking};
 
 #[test]
 fn proj1487_machine_loads_completely() {
@@ -27,7 +27,6 @@ fn proj1487_machine_loads_completely() {
         ["blocked", "done"].into_iter().map(String::from).collect()
     );
     assert_eq!(machine.escalation_state.as_deref(), Some("blocked"));
-    assert_eq!(machine.transition_mode, TransitionMode::Constrained);
 
     // Defaults are left unresolved (no eager filling of state/playbook layers).
     assert_eq!(
@@ -172,6 +171,24 @@ fn leftover_when_guard_is_rejected_with_a_migration_message() {
     let msg = err.to_string();
     assert!(
         msg.contains(":criteria"),
+        "expected the error to name the replacement, got: {msg}"
+    );
+    assert!(matches!(err, loop_core::CoreError::Machine(_)));
+}
+
+/// `:transition-mode` chose between two schemas for a tool that no longer
+/// exists. Same rule as `:when` and `:context`: a key that has quietly stopped
+/// meaning anything must say so, and name what replaced it.
+#[test]
+fn leftover_transition_mode_is_rejected_with_a_migration_message() {
+    let vm = common::vm();
+    let config = common::default_config();
+    let path = common::fixture("transition_mode_removed.fnl");
+
+    let err = vm.load_machine(&path, &config).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("$LOOP_HANDOFF"),
         "expected the error to name the replacement, got: {msg}"
     );
     assert!(matches!(err, loop_core::CoreError::Machine(_)));

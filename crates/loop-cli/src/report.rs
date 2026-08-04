@@ -193,10 +193,6 @@ pub fn machine_preview(r: &Resolver<'_>) -> String {
     rep.field("entry", &m.entry);
     rep.field("terminals", join(m.terminals.iter().cloned()));
     rep.field("escalation", m.escalation_state.clone().unwrap_or_default());
-    rep.field(
-        "transition mode",
-        format!("{:?}", m.transition_mode).to_lowercase(),
-    );
     rep.field("budgets", fmt_budgets(&m.budgets));
     rep.field("judge", fmt_model(&m.judge));
     rep.field(
@@ -349,16 +345,8 @@ pub fn state_preview(r: &Resolver<'_>, id: &StateId) -> String {
         }
     }
     rep.field("mcp", join(resolved.mcp.iter().cloned()));
-    rep.field(
-        "transition mode",
-        format!("{:?}", m.transition_mode).to_lowercase(),
-    );
     rep.field("reachable", join(m.neighbors(id)));
     rep.field("cwd", display(&config.paths.project_dir));
-    rep.field(
-        "ext",
-        display(&config.paths.ext_dir().join("transition-tool.ts")),
-    );
     rep.field(
         "system prompt",
         format!(

@@ -34,9 +34,9 @@ $ENTRY_ADDENDUM
    - **Simplicity** — materially simpler correct design; no style nits.
 4. Retrieve all four complete results, then run one fresh synthesis reviewer that independently validates each finding and returns `CLEAN` or `CHANGES_REQUIRED`.
 5. Write the validated findings to an artifact and hand it off. State your verdict — clean, or changes required — plainly in your summary; the Judge grading this transition reads the findings artifact, not your assertion.
-6. Finish with `transition`:
-   - clean → `transition(to="qa_staging", rationale=…, artifacts=[…])`
-   - changes → `transition(to="implement", rationale="<top findings>", artifacts=[{name:"review", path:"<findings file>"}])`
+6. Finish by writing your handoff:
+   - clean → `{"to": "qa_staging", "rationale": …, "artifacts": […]}`
+   - changes → `{"to": "implement", "rationale": "<top findings>", "artifacts": [{"name": "review", "path": "<findings file>"}]}`
 
 ## Integrity
 

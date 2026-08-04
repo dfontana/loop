@@ -21,8 +21,7 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use loop_core::{
-    AgentRunner, Config, JudgeSpec, ModelSpec, NavigatorSpec, Paths, Thinking, TransitionMode,
-    WorkerSpec,
+    AgentRunner, Config, JudgeSpec, ModelSpec, NavigatorSpec, Paths, Thinking, WorkerSpec,
 };
 use loop_runner::PiRunner;
 
@@ -125,9 +124,8 @@ fn mock_pi_drives_worker_judge_navigator_and_a_crash() {
         system_prompt_path: tmp.path().join("playbook.md"),
         entry_message: "Entering implement, cycle 1".into(),
         reachable: vec!["review".into(), "debug".into()],
-        transition_mode: TransitionMode::Constrained,
         mcp: vec![],
-        ext_paths: vec![tmp.path().join("transition-tool.ts")],
+        handoff_path: tmp.path().join("implement-1-1-handoff.json"),
         cwd: tmp.path().to_path_buf(),
         session_id: Some("PROJ-1-implement-1".into()),
         env: vec![],
@@ -148,6 +146,7 @@ fn mock_pi_drives_worker_judge_navigator_and_a_crash() {
         cycle: 1,
         attempt: 1,
         session_id: Some("PROJ-1-debug-1".into()),
+        handoff_path: tmp.path().join("debug-1-1-handoff.json"),
         ..worker_spec.clone()
     };
     let crash_result = runner
@@ -163,7 +162,6 @@ fn mock_pi_drives_worker_judge_navigator_and_a_crash() {
         artifact_paths: vec![],
         check_output: None,
         model: cheap_model(),
-        ext_path: tmp.path().join("verdict-tool.ts"),
         cwd: tmp.path().to_path_buf(),
     };
     let verdict = runner.run_judge(&judge_spec).expect("judge spawn ok");
@@ -178,7 +176,6 @@ fn mock_pi_drives_worker_judge_navigator_and_a_crash() {
         proposal: None,
         reachable: vec!["qa-staging".into(), "escalate".into()],
         model: cheap_model(),
-        ext_path: tmp.path().join("choose-tool.ts"),
         cwd: tmp.path().to_path_buf(),
     };
     let choice = runner
@@ -203,7 +200,6 @@ fn mock_pi_drives_worker_judge_navigator_and_a_crash() {
         artifact_paths: vec![],
         check_output: None,
         model: cheap_model(),
-        ext_path: tmp.path().join("verdict-tool.ts"),
         cwd: tmp.path().to_path_buf(),
     };
     let verdict = runner

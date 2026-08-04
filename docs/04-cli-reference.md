@@ -43,13 +43,8 @@ Runs two scaffold phases: the global toolbox (idempotent, safe to re-run), then 
 | `playbooks/open-pr.md`         |                      |
 | `playbooks/debug-transient.md` |                      |
 | `skills/`                      | created empty        |
-| `ext/transition-tool.ts`       | see exception        |
-| `ext/verdict-tool.ts`          | see exception        |
-| `ext/choose-tool.ts`           | see exception        |
 
-Each file actually created prints `  created <path>`.
-
-**Exception to write-if-absent:** the three `ext/*.ts` are written by `materialize_ext()`, which compares the on-disk sha256 against the copy compiled into the binary and **rewrites the file on mismatch**. Hand edits to `ext/transition-tool.ts`, `ext/verdict-tool.ts`, or `ext/choose-tool.ts` are silently reverted — by `loop init` and also by every `loop run` / `loop resume`.
+Each file actually created prints `  created <path>`. There is no exception: every one of these is write-if-absent, and nothing in the toolbox is ever rewritten under you.
 
 **Phase 2 — project** (`<project>/.loop/`). Bails first if the machine already exists:
 
@@ -157,7 +152,6 @@ Preview performs **no** side effect. Specifically it does not:
 
 - spawn `pi`, or any Worker, Judge, or Navigator;
 - run a `:check` command, connect to an MCP server, or test a credential;
-- materialize `ext/*.ts` (unlike `init`, `run`, and `resume`, a missing or stale vendored ext is left alone);
 - create `.loop/ledger.jsonl` or `.loop/artifacts/`;
 - write anything under `LOOP_STATE_DIR` — the representative render is built in memory, and the rendered-prompt path it reports is where a run _would_ write.
 
@@ -170,7 +164,7 @@ Sections, in order:
 | Section | Contents |
 | --- | --- |
 | header | ticket, state / transition / loop counts |
-| — | source path, entry, terminals, escalation state, transition mode, effective budgets, Judge and Navigator models with the invocation cap |
+| — | source path, entry, terminals, escalation state, effective budgets, Judge and Navigator models with the invocation cap |
 | `context` | task and plan line/char counts with their first line, and the QA case ids |
 | `states` | every state: description, resolved playbook name and path, resolved `provider/model:thinking`, effective skills with resolved paths, effective MCP names, reachable states, then each outgoing edge with its check command, timeout, criteria, `:on-fail` action, and backoff |
 | `loops` | each loop's head, member states, `:max-cycles`, and exhaustion behavior |
@@ -186,7 +180,7 @@ Values are printed in one column; an absent optional value or an empty list read
 | --- | --- |
 | `playbook` | how the state names it (`name` / `path` / inline `:prompt`) and the file it resolved to |
 | `playbook frontmatter` | `name`, `description`, `model`, `thinking` as parsed |
-| `worker invocation` | the `--model` flag, provider, each skill's `--skill` path, MCP names, transition mode, reachable states, cwd, the injected `transition-tool.ts` path, the rendered-prompt path pattern, the four exported environment variable names, and the deterministic session id |
+| `worker invocation` | the `--model` flag, provider, each skill's `--skill` path, MCP names, reachable states, cwd, the rendered-prompt path pattern, the four exported environment variable names, and the deterministic session id |
 | `template variables` | the `$NAME`s the body writes that are loop variables, and the ones that will pass through untouched |
 | `playbook body` | the body as authored, unrendered |
 | `representative render` | the substituted system prompt and the entry message, under the limitation notice below |
@@ -245,7 +239,7 @@ loop run [--max-transitions <N>]
 | `--max-transitions <N>` | u32 | machine budget | "Stop after this many transitions, on top of the machine's budget." |
 | `-v`, `--verbose` | bool | false | Echo each pi spawn's stderr as it runs. |
 
-Loads config + machine, materializes `ext/*.ts`, opens the ledger, and steps the engine until the run reaches a terminal or trips a guardrail.
+Loads config + machine, opens the ledger, and steps the engine until the run reaches a terminal or trips a guardrail.
 
 `--max-transitions` **only tightens**: it is merged with the effective budget by per-field minimum, so a value larger than the machine's own `max-transitions` has no effect. It cannot relax `usd` or `wallclock-s` either way.
 
@@ -617,7 +611,7 @@ loop doctor
 
 No flags.
 
-Four existence checks, no parsing. Output per check:
+Three existence checks, no parsing. Output per check:
 
 ```
   ok    {label}
@@ -628,27 +622,25 @@ Four existence checks, no parsing. Output per check:
 | --- | --- | --- |
 | 1 | `` `{pi_bin}` on PATH `` | `install pi, or set LOOP_PI_BIN` |
 | 2 | `{config_dir}/config.fnl` | ``run `loop init <TICKET>` to scaffold the toolbox`` |
-| 3 | `{config_dir}/ext/transition-tool.ts` | ``run `loop init` to write the vendored ext`` |
-| 4 | `{project}/.loop/machine.fnl` | ``run `loop init <TICKET>` in this project`` |
+| 3 | `{project}/.loop/machine.fnl` | ``run `loop init <TICKET>` in this project`` |
 
 Every label is the path actually tested, so under `LOOP_CONFIG_DIR` or `-C` you can read off where loop is looking.
 
 `{pi_bin}` is `LOOP_PI_BIN` or `pi`. A `pi_bin` containing `/` is tested as a path; otherwise each `PATH` entry is probed for a file of that name.
 
-All four pass → blank line, then `all good`, exit 0. Otherwise exit 1 with `error: {n} problem(s)` on stderr.
+All three pass → blank line, then `all good`, exit 0. Otherwise exit 1 with `error: {n} problem(s)` on stderr.
 
 ### What doctor does not check
 
 - It never loads or evaluates `config.fnl` — check 2 is a bare file-existence test. A file that exists but does not parse passes doctor and fails everything else; `loop validate` is what reads it.
-- It never parses `machine.fnl` — check 4 only asks whether the file exists. Use [`loop validate`](#loop-validate) for the graph.
+- It never parses `machine.fnl` — check 3 only asks whether the file exists. Use [`loop validate`](#loop-validate) for the graph.
 - It never resolves playbooks or skills.
-- Check 3 probes **only `ext/transition-tool.ts`**. A missing or corrupt `verdict-tool.ts` or `choose-tool.ts` still reports `ok`.
 
 ## Environment variables
 
 | Variable | Used for | Default / fallback chain |
 | --- | --- | --- |
-| `LOOP_CONFIG_DIR` | toolbox root (`config.fnl`, `playbooks/`, `skills/`, `machines/`, `ext/`) | `$XDG_CONFIG_HOME/loop` → `$HOME/.config/loop` → relative `.config/loop` |
+| `LOOP_CONFIG_DIR` | toolbox root (`config.fnl`, `playbooks/`, `skills/`, `machines/`) | `$XDG_CONFIG_HOME/loop` → `$HOME/.config/loop` → relative `.config/loop` |
 | `LOOP_STATE_DIR` | generated state root (`render/`) | `$XDG_STATE_HOME/loop` → `$HOME/.local/state/loop` → relative `.local/state/loop` |
 | `LOOP_PI_BIN` | the pi executable to spawn, for stages and for [`loop session`](#loop-session) | `pi` |
 | `HOME` | fallback base for both roots | must be non-empty to count |
@@ -694,6 +686,6 @@ Per command:
 | `recap` | a report was printed, **whatever the run's outcome was** | empty ledger; ledger unreadable or has a corrupt interior line |
 | `logs` | human tail, or complete JSONL with `--raw` | ledger unreadable or has a corrupt interior line |
 | `session` | pi exited 0, **or** the picker was cancelled | no usable candidate; no terminal and no `--latest`; pi could not be spawned; pi exited non-zero |
-| `doctor` | all four checks pass | `{n} problem(s)` |
+| `doctor` | all three checks pass | `{n} problem(s)` |
 
 `loop run` and `loop resume` exit 1 on `Failed` and `Aborted` deliberately, so `loop run && gh pr merge` and CI wrappers gate correctly. To distinguish the two, read `status` from [`loop status --json`](#loop-status).

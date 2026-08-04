@@ -89,7 +89,6 @@ fn partial_config_overrides_only_what_it_names() {
         defaults.budgets.max_transitions
     );
     assert_eq!(got.digest_last_n, defaults.digest_last_n);
-    assert_eq!(got.transition_mode, defaults.transition_mode);
 }
 
 /// The top-level `:provider` is the base of all three role chains. It used to
