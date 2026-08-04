@@ -70,10 +70,10 @@ pub fn validate(
     machine: &Machine,
     resolve: &dyn Fn(&PlaybookRef) -> bool,
     resolve_skill: &dyn Fn(&str) -> bool,
-    mcp_enabled: bool,
-    default_skills: &[String],
-    default_mcp: &[String],
 ) -> Vec<Diagnostic> {
+    // Whether the `mcp` extension is declared installed. A stage naming MCP
+    // servers without it would be told to call a tool it does not have.
+    let mcp_enabled = machine.pi_extensions.iter().any(|e| e == "mcp");
     let mut out = Vec::new();
 
     let name_exists =
@@ -159,22 +159,22 @@ pub fn validate(
         if !resolve(&state.playbook) {
             out.push(Diagnostic::error(
                 id.clone(),
-                format!("playbook for state `{id}` does not resolve in the toolbox"),
+                format!("playbook for state `{id}` does not resolve in .loop/playbooks/"),
             ));
         }
-        // The effective list, config defaults included — that union is what
+        // The effective list, machine defaults included — that union is what
         // the spawn loads, so it is what has to resolve.
-        for name in machine.resolve_skills(state, default_skills) {
+        for name in machine.resolve_skills(state) {
             if !resolve_skill(&name) {
-                let source = if default_skills.contains(&name) {
-                    " (from `:default-skills` in config.fnl)"
+                let source = if machine.defaults.skills.contains(&name) {
+                    " (from `:defaults {:skills ..}`)"
                 } else {
                     ""
                 };
                 out.push(Diagnostic::error(
                     id.clone(),
                     format!(
-                        "skill `{name}` on state `{id}`{source} does not resolve in the toolbox"
+                        "skill `{name}` on state `{id}`{source} does not resolve in .loop/skills/"
                     ),
                 ));
             }
@@ -182,7 +182,7 @@ pub fn validate(
         // The names themselves are unverifiable here — they belong to the
         // user's `mcp.json`. What *is* checkable is whether the tool that
         // connects them will exist in the spawn at all.
-        if !mcp_enabled && !machine.resolve_mcp(state, default_mcp).is_empty() {
+        if !mcp_enabled && !machine.resolve_mcp(state).is_empty() {
             out.push(Diagnostic::error(
                 id.clone(),
                 format!(

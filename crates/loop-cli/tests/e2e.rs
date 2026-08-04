@@ -6,7 +6,8 @@
 //! unreadable once appended past, a crashed worker escalating instead of
 //! retrying) was a seam between two crates that each passed their own suite.
 //!
-//! Hermetic: `LOOP_CONFIG_DIR` / `LOOP_STATE_DIR` point at tempdirs, and
+//! Hermetic for free: everything loop reads or writes lives under the project
+//! directory, which is a tempdir per fixture. `LOOP_PI_BIN` points at
 //! `LOOP_PI_BIN` at the fixture binary. No network, no API key, no `~`.
 
 use std::path::PathBuf;
@@ -28,8 +29,6 @@ fn mock_pi() -> PathBuf {
 struct Fixture {
     _tmp: tempfile::TempDir,
     project: PathBuf,
-    config: PathBuf,
-    state: PathBuf,
     script: PathBuf,
     /// Stands in for pi's session store: `mock-pi` writes a file here per
     /// `--session-id` spawn and requires one per `--session` reopen.
@@ -43,7 +42,7 @@ impl Fixture {
     fn new(script: &str) -> Self {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
-        let (project, config, state) = (root.join("proj"), root.join("config"), root.join("state"));
+        let project = root.join("proj");
         std::fs::create_dir_all(&project).unwrap();
         let sessions = root.join("sessions");
         std::fs::create_dir_all(&sessions).unwrap();
@@ -53,8 +52,6 @@ impl Fixture {
         Self {
             _tmp: tmp,
             project,
-            config,
-            state,
             script: script_path,
             sessions,
             argv_log,
@@ -65,8 +62,6 @@ impl Fixture {
         Command::new(env!("CARGO_BIN_EXE_loop"))
             .args(args)
             .current_dir(&self.project)
-            .env("LOOP_CONFIG_DIR", &self.config)
-            .env("LOOP_STATE_DIR", &self.state)
             .env("LOOP_PI_BIN", mock_pi())
             .env("LOOP_MOCK_SCRIPT", &self.script)
             .env("LOOP_MOCK_SESSIONS", &self.sessions)
@@ -122,14 +117,6 @@ impl Fixture {
     /// go through it.
     fn write(&self, rel: &str, body: &str) -> PathBuf {
         let path = self.project.join(rel);
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(&path, body).unwrap();
-        path
-    }
-
-    /// Same, under the toolbox root — the loser in every local-first race.
-    fn write_toolbox(&self, rel: &str, body: &str) -> PathBuf {
-        let path = self.config.join(rel);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, body).unwrap();
         path
@@ -275,7 +262,7 @@ fn the_rendered_prompt_carries_the_handoff_protocol() {
     let run = fx.run(&["run"]);
     assert!(run.status.success(), "run failed: {}", combined(&run));
 
-    let render_dir = fx.state.join("render/TINY-1");
+    let render_dir = fx.project.join(".loop/run");
     let prompt_path = render_dir.join("implement-1-1-system.md");
     let prompt = std::fs::read_to_string(&prompt_path)
         .unwrap_or_else(|e| panic!("reading {}: {e}", prompt_path.display()));
@@ -304,8 +291,9 @@ fn the_rendered_prompt_carries_the_handoff_protocol() {
     assert_eq!(proposed["to"], "done");
     assert_eq!(proposed["rationale"], "done");
 
-    // Nothing was vendored into the toolbox: loop no longer ships extensions.
-    assert!(!fx.config.join("ext").exists());
+    // Derived, and marked as such: `run/` is gitignored by `loop init`.
+    let ignore = std::fs::read_to_string(fx.project.join(".loop/.gitignore")).unwrap();
+    assert!(ignore.contains("run/"), "got: {ignore}");
 }
 
 /// A worker that leaves no handoff is a *blocked* worker, not a crashed one.
@@ -1144,23 +1132,22 @@ fn preview_fixture() -> Fixture {
     fx.run(&["init", "PREV-1"]);
     fx.machine(PREVIEW_MACHINE);
 
-    fx.write_toolbox(
-        "playbooks/implement.md",
-        "---\nname: implement\nmodel: frontmatter-model\n---\nTOOLBOX COPY — must not be used.\n",
-    );
     fx.write(
         ".loop/playbooks/implement.md",
         "---\nname: implement\ndescription: Local override.\nmodel: frontmatter-model\n---\n\
          Work on $TICKET_ID, cycle $CYCLE.\n\n$TASK\n\nDigest: $LEDGER_DIGEST\n\nHome is $HOME.\n",
     );
-    fx.write_toolbox("playbooks/verify.md", "---\nname: verify\n---\nCheck it.\n");
-    fx.write_toolbox("skills/shared.md", "# shared\n");
+    fx.write(
+        ".loop/playbooks/verify.md",
+        "---\nname: verify\n---\nCheck it.\n",
+    );
+    fx.write(".loop/skills/shared.md", "# shared\n");
     fx.write(".loop/skills/local-only.md", "# local-only\n");
     fx
 }
 
 /// The whole-machine report: every layered override resolved the way the run
-/// would resolve it, local-first winners named by path, and each edge's real
+/// would resolve it, every reference named by path, and each edge's real
 /// gate. This is the command's entire promise — a pre-run answer computed by
 /// the run's own resolver, not a second one that can drift from it.
 #[test]
@@ -1205,24 +1192,15 @@ fn preview_reports_the_stage_a_run_would_actually_build() {
         assert!(text.contains(expected), "missing `{expected}` in:\n{text}");
     }
 
-    // Local-first, both kinds: the report names the file that would actually
-    // be loaded, and never the toolbox copy it shadows.
-    let local_playbook = fx.project.join(".loop/playbooks/implement.md");
-    let local_skill = fx.project.join(".loop/skills/local-only.md");
-    let toolbox_skill = fx.config.join("skills/shared.md");
-    assert!(
-        text.contains(&local_playbook.display().to_string()),
-        "{text}"
-    );
-    assert!(text.contains(&local_skill.display().to_string()), "{text}");
-    assert!(
-        text.contains(&toolbox_skill.display().to_string()),
-        "{text}"
-    );
-    assert!(
-        !text.contains("TOOLBOX COPY"),
-        "the shadowed toolbox playbook must not appear: {text}"
-    );
+    // Every resolved reference names the file that would actually be loaded,
+    // and all of them are inside the ticket directory.
+    for expected in [
+        fx.project.join(".loop/playbooks/implement.md"),
+        fx.project.join(".loop/skills/local-only.md"),
+        fx.project.join(".loop/skills/shared.md"),
+    ] {
+        assert!(text.contains(&expected.display().to_string()), "{text}");
+    }
 }
 
 /// The state form: the exact inputs the Worker gets, plus a render that is
@@ -1237,7 +1215,7 @@ fn preview_of_one_state_shows_the_worker_inputs_and_a_labelled_render() {
 
     for expected in [
         "PREV-1 — state `implement`",
-        "reference         `implement` (name, local-first)",
+        "reference         `implement` (name)",
         "description       Local override.",
         "model flag        --model frontmatter-model:max",
         "provider          anthropic",
@@ -1358,8 +1336,7 @@ fn preview_is_deterministic_and_creates_no_run_or_render_files() {
     for must_not_exist in [
         fx.project.join(".loop/ledger.jsonl"),
         fx.project.join(".loop/artifacts"),
-        fx.config.join("ext"),
-        fx.state.join("render"),
+        fx.project.join(".loop/run"),
     ] {
         assert!(
             !must_not_exist.exists(),

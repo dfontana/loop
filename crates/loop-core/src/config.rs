@@ -1,5 +1,5 @@
-//! Global configuration — `~/.config/loop/config.fnl` plus the resolved paths
-//! the harness works from.
+//! The paths the harness works from, and the built-in defaults a machine
+//! overlays.
 
 use std::path::{Path, PathBuf};
 
@@ -7,87 +7,72 @@ use serde::{Deserialize, Serialize};
 
 use crate::machine::{Budgets, ModelSpec};
 
-/// The XDG paths loop reads and writes. Split so nothing generated is ever
-/// written into the directory a human hand-edits.
+/// Everything loop reads or writes, all of it under `<project>/.loop/`.
+///
+/// There used to be three roots: a toolbox at `~/.config/loop`, the ticket at
+/// `<project>/.loop`, and generated renders at `~/.local/state/loop`. Playbooks
+/// and skills resolved local-first across the first two, which meant "where
+/// does this come from" had two answers, `loop preview` had to report which
+/// one won, and editing a toolbox playbook silently changed the next stage of
+/// every in-flight ticket.
+///
+/// One root instead. A ticket directory is now self-contained: committable,
+/// reviewable, and `rm -rf`-able in the same breath as the branch it belongs
+/// to. Reuse is `loop init --from <dir>`, which copies — so what you started
+/// from is recorded in the ticket rather than resolved out from under it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Paths {
-    /// `~/.config/loop` — authored: config.fnl, playbooks/, skills/, machines/.
-    pub config_dir: PathBuf,
-    /// `~/.local/state/loop` — generated and disposable.
-    pub state_dir: PathBuf,
-    /// The project root the run drives (where `.loop/` lives and pi is spawned).
+    /// The project root the run drives — where `.loop/` lives and pi is spawned.
     pub project_dir: PathBuf,
 }
 
 impl Paths {
-    /// XDG defaults, honoring `LOOP_CONFIG_DIR` / `LOOP_STATE_DIR` overrides
-    /// (which is how the integration tests get a hermetic environment).
     pub fn discover(project_dir: impl Into<PathBuf>) -> Self {
-        let config_dir = std::env::var_os("LOOP_CONFIG_DIR")
-            .map(PathBuf::from)
-            .or_else(|| dirs_config().map(|d| d.join("loop")))
-            .unwrap_or_else(|| PathBuf::from(".config/loop"));
-        let state_dir = std::env::var_os("LOOP_STATE_DIR")
-            .map(PathBuf::from)
-            .or_else(|| dirs_state().map(|d| d.join("loop")))
-            .unwrap_or_else(|| PathBuf::from(".local/state/loop"));
         Self {
-            config_dir,
-            state_dir,
             project_dir: project_dir.into(),
         }
     }
 
-    // ── authored ──────────────────────────────────────────────────────────
-    pub fn config_file(&self) -> PathBuf {
-        self.config_dir.join("config.fnl")
-    }
-    pub fn toolbox_playbooks(&self) -> PathBuf {
-        self.config_dir.join("playbooks")
-    }
-    pub fn toolbox_skills(&self) -> PathBuf {
-        self.config_dir.join("skills")
-    }
-    pub fn toolbox_machines(&self) -> PathBuf {
-        self.config_dir.join("machines")
-    }
-
-    // ── generated ─────────────────────────────────────────────────────────
-    /// Rendered playbooks and entry messages for one ticket's spawns.
-    pub fn render_dir(&self, ticket: &str) -> PathBuf {
-        self.state_dir.join("render").join(sanitize(ticket))
-    }
-
-    /// Where a Worker spawn writes its handoff JSON. One file per attempt, so
-    /// a retry can never read the previous attempt's proposal — and the
-    /// harness deletes it before spawning anyway, belt and braces.
-    pub fn handoff_file(&self, ticket: &str, state: &str, cycle: u32, attempt: u32) -> PathBuf {
-        self.render_dir(ticket).join(format!(
-            "{}-{cycle}-{attempt}-handoff.json",
-            sanitize(state)
-        ))
-    }
-
-    // ── per-ticket, in the project ────────────────────────────────────────
+    /// The ticket directory. Everything below is inside it.
     pub fn loop_dir(&self) -> PathBuf {
         self.project_dir.join(".loop")
     }
+
+    // ── authored ──────────────────────────────────────────────────────────
     pub fn machine_file(&self) -> PathBuf {
         self.loop_dir().join("machine.fnl")
     }
-    /// The one local-first directory loop creates for you. Playbooks and
-    /// skills both resolve against the *machine's* own directory rather than
-    /// this path (they may differ under `-C`), so there is deliberately no
-    /// sibling `local_skills()` helper to mislead anyone reading resolution
-    /// order out of this module — see `Toolbox::resolve_skill`.
-    pub fn local_playbooks(&self) -> PathBuf {
+    pub fn playbooks(&self) -> PathBuf {
         self.loop_dir().join("playbooks")
     }
+    pub fn skills(&self) -> PathBuf {
+        self.loop_dir().join("skills")
+    }
+
+    // ── recorded ──────────────────────────────────────────────────────────
     pub fn ledger_file(&self) -> PathBuf {
         self.loop_dir().join("ledger.jsonl")
     }
     pub fn artifacts_dir(&self) -> PathBuf {
         self.loop_dir().join("artifacts")
+    }
+
+    // ── generated ─────────────────────────────────────────────────────────
+    /// Rendered prompts and handoff files. Derived from the machine and the
+    /// ledger, so deleting it costs nothing — which is why `loop init` writes
+    /// it into `.gitignore`.
+    pub fn run_dir(&self) -> PathBuf {
+        self.loop_dir().join("run")
+    }
+
+    /// Where a Worker spawn writes its handoff JSON. One file per attempt, so
+    /// a retry can never read the previous attempt's proposal — and the
+    /// harness deletes it before spawning anyway, belt and braces.
+    pub fn handoff_file(&self, state: &str, cycle: u32, attempt: u32) -> PathBuf {
+        self.run_dir().join(format!(
+            "{}-{cycle}-{attempt}-handoff.json",
+            sanitize(state)
+        ))
     }
 }
 
@@ -102,20 +87,6 @@ fn sanitize(s: &str) -> String {
             }
         })
         .collect()
-}
-
-fn dirs_config() -> Option<PathBuf> {
-    std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .filter(|p| p.is_absolute())
-        .or_else(|| home().map(|h| h.join(".config")))
-}
-
-fn dirs_state() -> Option<PathBuf> {
-    std::env::var_os("XDG_STATE_HOME")
-        .map(PathBuf::from)
-        .filter(|p| p.is_absolute())
-        .or_else(|| home().map(|h| h.join(".local/state")))
 }
 
 fn home() -> Option<PathBuf> {
@@ -135,7 +106,13 @@ pub fn expand_tilde(p: &Path) -> PathBuf {
     }
 }
 
-/// The contents of `config.fnl`, with defaults applied.
+/// The settings a run uses, and where it works.
+///
+/// This is no longer read from a file. `config.fnl` was a second authored
+/// artifact in a second directory whose only job was to hold values a machine
+/// could already override — so the values moved into the machine, the file
+/// went, and what remains here is the built-in floor a machine overlays plus
+/// the two things a machine has no business setting (`paths`, `pi_bin`).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Config {
     /// The provider every role falls back to. Each role spec below carries its

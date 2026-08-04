@@ -75,13 +75,12 @@ impl ModelSpec {
     }
 }
 
-/// Where a stage's prompt comes from. Resolution (local-first, then toolbox)
-/// happens in `loop-toolbox`; this only records what the author wrote.
+/// Where a stage's prompt comes from. Resolution happens in `loop-toolbox`;
+/// this only records what the author wrote.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PlaybookRef {
-    /// A bare name: resolved `./.loop/playbooks/<name>.md`, then
-    /// `~/.config/loop/playbooks/<name>.md`.
+    /// A bare name, resolved to `./.loop/playbooks/<name>.md`.
     Named(String),
     /// A value containing `/`: taken as an exact path, relative to the machine file.
     Path(PathBuf),
@@ -92,8 +91,8 @@ pub enum PlaybookRef {
 /// A partially-specified model choice: whatever one layer of config declared.
 ///
 /// Four layers stack, most specific first: the **state**, the **playbook's
-/// frontmatter**, the **machine's `defaults`**, and the global **config**. Only
-/// the last is guaranteed complete, so resolution happens in
+/// frontmatter**, the **machine's `defaults`**, and loop's **built-in floor**.
+/// Only the last is guaranteed complete, so resolution happens in
 /// [`Machine::resolve_model`] — not at load time, since the playbook layer isn't
 /// readable until `loop-toolbox` has resolved the file.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -299,9 +298,18 @@ pub struct Machine {
     pub loops: Vec<LoopSpec>,
 
     pub budgets: Budgets,
+    /// The Worker floor: what a state gets when neither it, its playbook, nor
+    /// `:defaults` names a model.
+    pub worker: ModelSpec,
     pub judge: ModelSpec,
     pub navigator: ModelSpec,
     pub navigator_max_invocations: u32,
+    /// How many recent committed transitions the rolling digest lists.
+    pub digest_last_n: usize,
+    /// What the author has installed in pi, declared so `loop validate` can
+    /// catch a mismatch. This turns nothing on — pi has no flag for enabling
+    /// an installed extension by name.
+    pub pi_extensions: Vec<String>,
 
     /// sha256 of the machine source, recorded in `run_started`.
     pub source_hash: String,
@@ -317,34 +325,29 @@ impl Machine {
 
     /// Stack the four config layers: state → playbook frontmatter → machine
     /// defaults → global config.
-    pub fn resolve_model(
-        &self,
-        state: &State,
-        playbook: &ModelChoice,
-        config_default: &ModelSpec,
-    ) -> ModelSpec {
+    pub fn resolve_model(&self, state: &State, playbook: &ModelChoice) -> ModelSpec {
         state
             .model
             .clone()
             .over(playbook)
             .over(&self.defaults.model)
-            .resolve(config_default)
+            .resolve(&self.worker)
     }
 
-    /// Union of the global baseline, the machine defaults, and the state's own
-    /// skills, order-preserving and deduplicated.
+    /// Union of the machine defaults and the state's own skills,
+    /// order-preserving and deduplicated.
     ///
     /// There is no exclude list and no subtraction. A skill is a prompt plus a
     /// script the agent runs through bash — loading one grants nothing bash
     /// did not already grant, so "removing" one would only hide instructions,
     /// never a capability. What a stage may *do* is decided by the tools pi
     /// gives it, not here.
-    pub fn resolve_skills(&self, state: &State, config_default: &[String]) -> Vec<String> {
-        union(config_default, &self.defaults.skills, &state.skills)
+    pub fn resolve_skills(&self, state: &State) -> Vec<String> {
+        union(&self.defaults.skills, &state.skills)
     }
 
-    /// Union of the global baseline, the machine defaults, and the state's own
-    /// MCP servers, order-preserving and deduplicated.
+    /// Union of the machine defaults and the state's own MCP servers,
+    /// order-preserving and deduplicated.
     ///
     /// These are names out of the *user's* `mcp.json`, which loop never reads.
     /// A stage cannot reach a server it doesn't name, because the `mcp`
@@ -352,8 +355,8 @@ impl Machine {
     /// means loop cannot tell a typo from a server this machine simply has
     /// installed and loop doesn't, so a name that doesn't exist fails at
     /// connect time rather than at `loop validate`.
-    pub fn resolve_mcp(&self, state: &State, config_default: &[String]) -> Vec<String> {
-        union(config_default, &self.defaults.mcp, &state.mcp)
+    pub fn resolve_mcp(&self, state: &State) -> Vec<String> {
+        union(&self.defaults.mcp, &state.mcp)
     }
 
     pub fn is_terminal(&self, id: &str) -> bool {
@@ -400,9 +403,9 @@ impl Machine {
 
 /// Concatenate the three layers of a purely-additive setting, keeping the first
 /// occurrence of each name so the global baseline stays at the front.
-fn union(global: &[String], machine: &[String], state: &[String]) -> Vec<String> {
+fn union(machine: &[String], state: &[String]) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
-    for s in global.iter().chain(machine.iter()).chain(state.iter()) {
+    for s in machine.iter().chain(state.iter()) {
         if !out.iter().any(|x| x == s) {
             out.push(s.clone());
         }

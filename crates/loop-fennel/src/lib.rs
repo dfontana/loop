@@ -10,13 +10,13 @@ use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
-use loop_core::{Config, CoreError, Machine, Paths, Result};
+use loop_core::{Config, CoreError, Machine, Result};
 
 mod convert;
 mod eval;
 mod wire;
 
-pub use convert::{config_from_table, machine_from_table};
+pub use convert::machine_from_table;
 
 /// The embedded Fennel compiler.
 pub const FENNEL_LUA: &str = include_str!("../vendor/fennel.lua");
@@ -58,22 +58,14 @@ impl FennelVm {
         eval::eval_fennel(&self.lua, &source, &filename)
     }
 
-    /// Load `~/.config/loop/config.fnl` over [`Config::defaults`]. A missing
-    /// file is not an error — the defaults stand.
-    pub fn load_config(&self, paths: Paths) -> Result<Config> {
-        let base = Config::defaults(paths);
-        let path = base.paths.config_file();
-        if !path.is_file() {
-            return Ok(base);
-        }
-        let value = self.eval_file(&path)?;
-        let table = self.value_as_table(value, &path)?;
-        convert::config_from_table(&table, base)
-    }
-
     /// Load `.loop/machine.fnl`, resolve `:task`/`:plan` file references
     /// against the machine's directory, apply `config` where the machine is
     /// silent, and hash the source.
+    ///
+    /// `config` is [`Config::defaults`] — the built-in floor. There is no
+    /// `config.fnl` to read first; a machine that wants a different model or
+    /// budget says so itself, and a template you copied with `loop init
+    /// --from` is how that stops being retyped per ticket.
     pub fn load_machine(&self, path: &Path, config: &Config) -> Result<Machine> {
         let source = std::fs::read_to_string(path)
             .map_err(|e| CoreError::io(format!("reading machine file {}", path.display()), e))?;

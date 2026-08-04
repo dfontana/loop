@@ -11,10 +11,14 @@
 //!  :qa-cases [{:id "pipeline" :desc "…"}
 //!             {:id "contract" :desc "…"}]
 //!
+//!  :provider "anthropic"             ; the base under every role
 //!  :defaults {:model "claude-sonnet-5" :thinking "medium" :skills ["jj"] :mcp []}
 //!  :budgets  {:usd 8 :wallclock-s 5400 :max-transitions 40}
+//!  :worker    {:model "claude-sonnet-5"  :thinking "medium"}
 //!  :judge     {:model "claude-haiku-4-5" :thinking "low"}
 //!  :navigator {:model "claude-haiku-4-5" :thinking "low" :max-invocations 5}
+//!  :pi-extensions ["mcp"]
+//!  :digest-last-n 8
 //!
 //!  :entry "implement"
 //!  :terminals ["done" "blocked"]
@@ -55,8 +59,8 @@
 //! 3. **Cross-field rules.** A state needs exactly one of `:playbook`/
 //!    `:prompt`; `:entry` may be omitted only for a single-state machine;
 //!    every `:from`/`:to`/`:escalation-state` must name something declared.
-//! 4. **Layering.** Budgets tighten against the config, and role models
-//!    overlay it.
+//! 4. **Layering.** Budgets tighten against loop's built-in floor, and role
+//!    models overlay it.
 //!
 //! Notes that matter for the conversion:
 //! - `:check` is a bare command string, or `{:cmd .. :timeout-s ..}`. The
@@ -74,29 +78,22 @@
 //!   exactly one; otherwise it is an error. Silent guessing is worse than a
 //!   clear message.
 //!
-//! # `config.fnl`
+//! # Where `config.fnl` went
 //!
-//! Same idea, matching [`loop_core::Config`]:
+//! There used to be a second authored file, `~/.config/loop/config.fnl`,
+//! holding `:provider`, `:worker`, `:judge`, `:navigator`, `:default-skills`,
+//! `:default-mcp`, `:pi-extensions`, `:budgets`, and `:digest-last-n`. Every
+//! one of those was a value a machine could already override, so the file was
+//! a second place to look for an answer the machine gave anyway.
 //!
-//! ```fennel
-//! {:provider "anthropic"
-//!  :worker    {:model "claude-sonnet-5"  :thinking "medium"}
-//!  :judge     {:model "claude-haiku-4-5" :thinking "low"}
-//!  :navigator {:model "claude-haiku-4-5" :thinking "low" :max-invocations 5}
-//!  :default-skills []
-//!  :default-mcp []
-//!  :pi-extensions ["mcp" "review-model-selector"]
-//!  :budgets {:usd 15 :wallclock-s 7200 :max-transitions 60}
-//!  :digest-last-n 8
-//!  }
-//! ```
+//! Those keys are machine keys now (`:default-skills`/`:default-mcp` folded
+//! into the `:defaults` a machine already had), and what a machine does not
+//! name comes from [`loop_core::Config::defaults`] — loop's built-in floor,
+//! which is not a file. Carrying preferences between tickets is `loop init
+//! --from <dir>`, which copies a `.loop/` you keep somewhere.
 //!
-//! `:provider` is the base every role falls back to: a role table that names
-//! its own wins, one that doesn't inherits this.
-//!
-//! Every key is optional; whatever is absent keeps its [`loop_core::Config::defaults`]
-//! value. Kebab-case in Fennel maps to snake_case in Rust (`:max-invocations` →
-//! `navigator_max_invocations`).
+//! Leftover config-only keys are rejected by name rather than by
+//! `deny_unknown_fields`, so an author is told where the tier went.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -149,6 +146,34 @@ fn present(table: &mlua::Table, key: &str) -> Result<bool> {
     Ok(get_value(table, key)? != mlua::Value::Nil)
 }
 
+/// Keys that only ever made sense in `config.fnl`, which no longer exists.
+///
+/// `:context` was a two-valued knob whose second value was never wired to
+/// anything. `:default-skills` and `:default-mcp` were the config's spelling
+/// of what a machine writes as `:defaults {:skills .. :mcp ..}` — one baseline
+/// tier rather than two, now that there is only one file.
+fn reject_removed_config_key(table: &mlua::Table) -> Result<()> {
+    if present(table, "context")? {
+        return Err(CoreError::machine(
+            "`:context` was removed — the rolling digest is the only continuity channel between \
+             stages; interpolate `$LEDGER_DIGEST` in a playbook and tune `:digest-last-n`"
+                .to_string(),
+        ));
+    }
+    for (key, replacement) in [
+        ("default-skills", ":defaults {:skills [..]}"),
+        ("default-mcp", ":defaults {:mcp [..]}"),
+    ] {
+        if present(table, key)? {
+            return Err(CoreError::machine(format!(
+                "`:{key}` was a `config.fnl` key, and config.fnl was merged into the machine — \
+                 write `{replacement}` instead"
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// `:when` was a Fennel closure gating an edge on ledger vars. Both tiers are
 /// gone; ignoring the key would silently leave the edge unguarded.
 fn reject_when(table: &mlua::Table) -> Result<()> {
@@ -187,19 +212,6 @@ fn reject_transition_mode(table: &mlua::Table, ctx: &str) -> Result<()> {
              graph either way. An off-graph target routes to the Navigator, which is what \
              `open` used to mean and is now the only behaviour"
         )));
-    }
-    Ok(())
-}
-
-/// `:context` was a two-valued knob whose second value was never wired to
-/// anything.
-fn reject_context(table: &mlua::Table) -> Result<()> {
-    if present(table, "context")? {
-        return Err(CoreError::machine(
-            "config: `:context` was removed — the rolling digest is the only continuity channel \
-             between stages; interpolate `$LEDGER_DIGEST` in a playbook and tune `:digest-last-n`"
-                .to_string(),
-        ));
     }
     Ok(())
 }
@@ -292,6 +304,7 @@ pub fn machine_from_table(
     config: &Config,
 ) -> Result<Machine> {
     reject_transition_mode(table, "machine")?;
+    reject_removed_config_key(table)?;
     reject_when(table)?;
     let m: wire::Machine = from_table(table, "machine")?;
 
@@ -386,20 +399,37 @@ pub fn machine_from_table(
         })
         .unwrap_or_default();
 
-    // A machine may *tighten* the global budgets, never loosen them.
+    // A machine may *tighten* the built-in budgets, never loosen them. The
+    // ceiling is loop's own rather than a user file's now, which makes it a
+    // weaker guarantee than it reads as — but a machine that wants more can
+    // still only get it by saying so, in the file under review.
     let budgets = m
         .budgets
         .map(|b| b.to_ir())
         .unwrap_or_default()
         .tighten(config.budgets);
 
+    // The top-level `:provider` is the base of all three role chains, not a
+    // stored-and-ignored default: it is applied *under* each role, so a role
+    // naming its own still wins and switching providers is one line.
+    let with_provider = |spec: &ModelSpec| match &m.provider {
+        None => spec.clone(),
+        Some(p) => ModelSpec {
+            provider: p.clone(),
+            ..spec.clone()
+        },
+    };
+    let worker = overlay(
+        m.worker.as_ref().map(wire::ModelChoice::to_ir),
+        &with_provider(&config.worker),
+    );
     let judge = overlay(
         m.judge.as_ref().map(wire::ModelChoice::to_ir),
-        &config.judge,
+        &with_provider(&config.judge),
     );
     let navigator = overlay(
         m.navigator.as_ref().map(wire::Navigator::to_ir),
-        &config.navigator,
+        &with_provider(&config.navigator),
     );
     let navigator_max_invocations = m
         .navigator
@@ -420,9 +450,17 @@ pub fn machine_from_table(
         transitions,
         loops,
         budgets,
+        worker,
         judge,
         navigator,
         navigator_max_invocations,
+        digest_last_n: m
+            .digest_last_n
+            .map(|n| n as usize)
+            .unwrap_or(config.digest_last_n),
+        pi_extensions: m
+            .pi_extensions
+            .unwrap_or_else(|| config.pi_extensions.clone()),
         source_hash,
         source_path: source_path.to_path_buf(),
         dir: machine_dir.to_path_buf(),
@@ -435,61 +473,4 @@ fn overlay(choice: Option<ModelChoice>, base: &ModelSpec) -> ModelSpec {
         None => base.clone(),
         Some(c) => c.resolve(base),
     }
-}
-
-/// Overlay an evaluated config table onto [`Config::defaults`].
-pub fn config_from_table(table: &mlua::Table, base: Config) -> Result<Config> {
-    reject_transition_mode(table, "config")?;
-    reject_context(table)?;
-    let c: wire::Config = from_table(table, "config")?;
-
-    let provider = c.provider.unwrap_or(base.provider);
-    // The top-level `:provider` is the base of all three role chains, not a
-    // stored-and-ignored default: it is applied *under* each role table, so a
-    // role naming its own still wins and a toolbox switching providers only
-    // has to say so once.
-    let with_provider = |spec: &ModelSpec| ModelSpec {
-        provider: provider.clone(),
-        ..spec.clone()
-    };
-
-    let budgets = match c.budgets {
-        None => base.budgets,
-        Some(b) => loop_core::Budgets {
-            usd: b.usd.or(base.budgets.usd),
-            wallclock_s: b.wallclock_s.or(base.budgets.wallclock_s),
-            max_transitions: b.max_transitions.or(base.budgets.max_transitions),
-        },
-    };
-
-    Ok(Config {
-        worker: overlay(
-            c.worker.as_ref().map(wire::ModelChoice::to_ir),
-            &with_provider(&base.worker),
-        ),
-        judge: overlay(
-            c.judge.as_ref().map(wire::ModelChoice::to_ir),
-            &with_provider(&base.judge),
-        ),
-        navigator: overlay(
-            c.navigator.as_ref().map(wire::Navigator::to_ir),
-            &with_provider(&base.navigator),
-        ),
-        navigator_max_invocations: c
-            .navigator
-            .as_ref()
-            .and_then(|n| n.max_invocations)
-            .unwrap_or(base.navigator_max_invocations),
-        default_skills: c.default_skills.unwrap_or(base.default_skills),
-        default_mcp: c.default_mcp.unwrap_or(base.default_mcp),
-        pi_extensions: c.pi_extensions.unwrap_or(base.pi_extensions),
-        budgets,
-        digest_last_n: c
-            .digest_last_n
-            .map(|n| n as usize)
-            .unwrap_or(base.digest_last_n),
-        provider,
-        pi_bin: base.pi_bin,
-        paths: base.paths,
-    })
 }

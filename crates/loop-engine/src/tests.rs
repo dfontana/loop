@@ -9,8 +9,6 @@ use crate::{Engine, Outcome};
 
 fn config() -> Config {
     Config::defaults(Paths {
-        config_dir: "cfg".into(),
-        state_dir: "state".into(),
         project_dir: "proj".into(),
     })
 }
@@ -751,7 +749,7 @@ fn validate_catches_missing_entry_state() {
     let mut m = base_machine();
     m.entry = "nope".into();
     m.terminals.insert("done".into());
-    let diags = crate::validate(&m, &always_resolves, &|_| true, true, &[], &[]);
+    let diags = crate::validate(&m, &always_resolves, &|_| true);
     assert!(diags.iter().any(|d| d.message.contains("entry state")));
 }
 
@@ -761,7 +759,7 @@ fn validate_catches_dangling_transition_targets() {
     m.entry = "a".into();
     m.states.insert("a".into(), state("a"));
     m.transitions.push(edge("a", "nowhere"));
-    let diags = crate::validate(&m, &always_resolves, &|_| true, true, &[], &[]);
+    let diags = crate::validate(&m, &always_resolves, &|_| true);
     assert!(
         diags
             .iter()
@@ -777,7 +775,7 @@ fn validate_catches_unreachable_state() {
     m.states.insert("a".into(), state("a"));
     m.states.insert("island".into(), state("island"));
     m.transitions.push(edge("a", "done"));
-    let diags = crate::validate(&m, &always_resolves, &|_| true, true, &[], &[]);
+    let diags = crate::validate(&m, &always_resolves, &|_| true);
     assert!(diags.iter().any(|d| d.message.contains("unreachable")));
 }
 
@@ -789,7 +787,7 @@ fn validate_catches_no_path_to_terminal() {
     m.states.insert("a".into(), state("a"));
     m.states.insert("dead_end".into(), state("dead_end"));
     m.transitions.push(edge("a", "dead_end"));
-    let diags = crate::validate(&m, &always_resolves, &|_| true, true, &[], &[]);
+    let diags = crate::validate(&m, &always_resolves, &|_| true);
     assert!(
         diags
             .iter()
@@ -804,7 +802,7 @@ fn validate_catches_unresolved_playbook() {
     m.terminals.insert("done".into());
     m.states.insert("a".into(), state("a"));
     m.transitions.push(edge("a", "done"));
-    let diags = crate::validate(&m, &never_resolves, &|_| true, true, &[], &[]);
+    let diags = crate::validate(&m, &never_resolves, &|_| true);
     assert!(diags.iter().any(|d| d.message.contains("does not resolve")));
 }
 
@@ -817,7 +815,7 @@ fn validate_catches_loop_head_never_re_entered() {
     m.transitions.push(edge("a", "done"));
     m.loops
         .push(loop_spec("orphan", &["a"], 3, OnExhausted::Escalate));
-    let diags = crate::validate(&m, &always_resolves, &|_| true, true, &[], &[]);
+    let diags = crate::validate(&m, &always_resolves, &|_| true);
     assert!(diags.iter().any(|d| d.message.contains("never re-entered")));
 }
 
@@ -829,7 +827,7 @@ fn validate_catches_escalation_state_not_a_terminal() {
     m.escalation_state = Some("a".into());
     m.states.insert("a".into(), state("a"));
     m.transitions.push(edge("a", "done"));
-    let diags = crate::validate(&m, &always_resolves, &|_| true, true, &[], &[]);
+    let diags = crate::validate(&m, &always_resolves, &|_| true);
     assert!(
         diags
             .iter()
@@ -848,7 +846,7 @@ fn validate_rejects_duplicate_edges_between_the_same_pair() {
     m.states.insert("a".into(), state("a"));
     m.transitions.push(judged_edge("a", "done", "first"));
     m.transitions.push(judged_edge("a", "done", "second"));
-    let diags = crate::validate(&m, &always_resolves, &|_| true, true, &[], &[]);
+    let diags = crate::validate(&m, &always_resolves, &|_| true);
     assert!(
         diags
             .iter()
@@ -872,14 +870,7 @@ fn validate_reports_a_skill_that_does_not_resolve() {
     m.transitions
         .push(judged_edge("qa-staging", "done", "looks correct"));
 
-    let diags = crate::validate(
-        &m,
-        &always_resolves,
-        &|name| name != "contract-check",
-        true,
-        &[],
-        &[],
-    );
+    let diags = crate::validate(&m, &always_resolves, &|name| name != "contract-check");
     assert!(
         diags
             .iter()
@@ -888,12 +879,12 @@ fn validate_reports_a_skill_that_does_not_resolve() {
     );
 }
 
-/// A stage loads the union of the config's `:default-skills`, the machine's,
-/// and the state's — so that union is what has to lint. Checking only the
-/// machine's layer left a typo in the global toolbox config to surface as a
-/// failed spawn mid-run, which is the one place `validate` exists to prevent.
+/// A stage loads the union of the machine's `:defaults {:skills ..}` and the
+/// state's — so that union is what has to lint. Checking only the state's
+/// layer left a typo in the machine defaults to surface as a failed spawn
+/// mid-run, which is the one place `validate` exists to prevent.
 #[test]
-fn validate_checks_skills_that_come_from_the_global_config() {
+fn validate_checks_skills_that_come_from_the_machine_defaults() {
     let mut m = base_machine();
     m.entry = "implement".into();
     m.terminals.insert("done".into());
@@ -901,31 +892,24 @@ fn validate_checks_skills_that_come_from_the_global_config() {
     m.transitions
         .push(judged_edge("implement", "done", "looks correct"));
 
-    let defaults = vec!["hose-typo".to_string()];
-    let diags = crate::validate(
-        &m,
-        &always_resolves,
-        &|name| name != "hose-typo",
-        true,
-        &defaults,
-        &[],
-    );
+    m.defaults.skills = vec!["hose-typo".to_string()];
+    let diags = crate::validate(&m, &always_resolves, &|name| name != "hose-typo");
     let d = diags
         .iter()
         .find(|d| d.message.contains("hose-typo"))
         .unwrap_or_else(|| panic!("expected a diagnostic for the default skill: {diags:?}"));
     assert_eq!(d.severity, crate::Severity::Error);
     assert!(
-        d.message.contains("config.fnl"),
+        d.message.contains(":defaults"),
         "the diagnostic must say where the name came from: {}",
         d.message
     );
 }
 
-/// Same reasoning for MCP: a `:default-mcp` server with no `mcp` extension in
-/// the spawn is the identical misconfiguration, just declared one layer up.
+/// Same reasoning for MCP, one layer up: a server named in the machine's
+/// `:defaults` is the identical misconfiguration as one named on the state.
 #[test]
-fn validate_checks_mcp_servers_that_come_from_the_global_config() {
+fn validate_checks_mcp_servers_that_come_from_the_machine_defaults() {
     let mut m = base_machine();
     m.entry = "implement".into();
     m.terminals.insert("done".into());
@@ -933,8 +917,9 @@ fn validate_checks_mcp_servers_that_come_from_the_global_config() {
     m.transitions
         .push(judged_edge("implement", "done", "looks correct"));
 
-    let default_mcp = vec!["warehouse".to_string()];
-    let diags = crate::validate(&m, &always_resolves, &|_| true, false, &[], &default_mcp);
+    m.defaults.mcp = vec!["warehouse".to_string()];
+    m.pi_extensions.clear();
+    let diags = crate::validate(&m, &always_resolves, &|_| true);
     assert!(
         diags.iter().any(|d| d.message.contains("MCP servers")),
         "got: {diags:?}"
@@ -955,8 +940,9 @@ fn validate_reports_named_mcp_servers_without_the_mcp_extension() {
     );
     m.transitions
         .push(judged_edge("qa-staging", "done", "looks correct"));
+    m.pi_extensions.clear();
 
-    let diags = crate::validate(&m, &always_resolves, &|_| true, false, &[], &[]);
+    let diags = crate::validate(&m, &always_resolves, &|_| true);
     assert!(
         diags
             .iter()
@@ -964,9 +950,11 @@ fn validate_reports_named_mcp_servers_without_the_mcp_extension() {
         "got: {diags:?}"
     );
 
-    // With the extension present, an unverifiable server name is not an error:
-    // loop never reads the user's mcp.json and has nothing to check it against.
-    let ok = crate::validate(&m, &always_resolves, &|_| true, true, &[], &[]);
+    // With the extension declared, an unverifiable server name is not an
+    // error: loop never reads the user's mcp.json and has nothing to check it
+    // against.
+    m.pi_extensions.push("mcp".into());
+    let ok = crate::validate(&m, &always_resolves, &|_| true);
     assert!(!ok.iter().any(|d| d.message.contains("MCP")), "got: {ok:?}");
 }
 
@@ -982,7 +970,7 @@ fn validate_warns_on_an_edge_with_no_check_and_no_criteria() {
     m.states.insert("a".into(), state("a"));
     m.transitions.push(edge("a", "done"));
 
-    let diags = crate::validate(&m, &always_resolves, &|_| true, true, &[], &[]);
+    let diags = crate::validate(&m, &always_resolves, &|_| true);
     assert!(
         diags.iter().any(|d| d.severity == crate::Severity::Warning
             && d.message.contains("committed unexamined")),
@@ -1000,7 +988,7 @@ fn validate_does_not_warn_on_a_guarded_edge() {
     m.transitions
         .push(judged_edge("a", "done", "the work is done"));
 
-    let diags = crate::validate(&m, &always_resolves, &|_| true, true, &[], &[]);
+    let diags = crate::validate(&m, &always_resolves, &|_| true);
     assert!(
         !diags
             .iter()
@@ -1033,7 +1021,7 @@ fn validate_counts_an_on_fail_route_as_loop_head_re_entry() {
         on_exhausted: OnExhausted::Escalate,
     });
 
-    let diags = crate::validate(&m, &always_resolves, &|_| true, true, &[], &[]);
+    let diags = crate::validate(&m, &always_resolves, &|_| true);
     assert!(
         !diags.iter().any(|d| d.message.contains("never re-entered")),
         "got: {diags:?}"

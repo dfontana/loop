@@ -58,14 +58,12 @@ impl<'a> Resolver<'a> {
         let playbook = self
             .toolbox
             .resolve_playbook(&state.playbook, &self.machine.dir)?;
-        let model =
-            self.machine
-                .resolve_model(state, &frontmatter_model(&playbook), &self.config.worker);
-        let skills = self
+        let model = self
             .machine
-            .resolve_skills(state, &self.config.default_skills);
+            .resolve_model(state, &frontmatter_model(&playbook));
+        let skills = self.machine.resolve_skills(state);
         let skill_paths = self.toolbox.resolve_skills(&skills, &self.machine.dir)?;
-        let mcp = self.machine.resolve_mcp(state, &self.config.default_mcp);
+        let mcp = self.machine.resolve_mcp(state);
 
         Ok(Resolved {
             state,
@@ -152,7 +150,7 @@ impl CliStage<'_> {
             cycle,
             attempt,
             crashed,
-            ledger_digest: digest::render(&events, self.config.digest_last_n),
+            ledger_digest: digest::render(&events, self.machine.digest_last_n),
             entry_addendum: entry_addendum.map(str::to_string),
             qa_cases: self.machine.qa_cases.clone(),
             artifacts: folded.artifacts.clone(),
@@ -212,10 +210,7 @@ impl StageBuilder for CliStage<'_> {
         let context = self.context(state_id, cycle, attempt, entry_addendum, crashed)?;
         let vars = context.to_map();
         let reachable = self.machine.neighbors(state_id);
-        let handoff_path =
-            self.config
-                .paths
-                .handoff_file(&self.machine.ticket, state_id, cycle, attempt);
+        let handoff_path = self.config.paths.handoff_file(state_id, cycle, attempt);
 
         // The protocol block is appended *after* substitution, and is not
         // itself a template — a playbook must not be able to interpolate its
@@ -263,7 +258,7 @@ impl StageBuilder for CliStage<'_> {
                 .map(|a| self.config.paths.project_dir.join(&a.path))
                 .collect(),
             check_output: check_output.map(str::to_string),
-            model: self.config.judge.clone(),
+            model: self.machine.judge.clone(),
             cwd: self.config.paths.project_dir.clone(),
         })
     }
@@ -276,11 +271,11 @@ impl StageBuilder for CliStage<'_> {
         let events = self.events()?;
         Ok(NavigatorSpec {
             graph_summary: self.graph_summary(from),
-            ledger_digest: digest::render(&events, self.config.digest_last_n),
+            ledger_digest: digest::render(&events, self.machine.digest_last_n),
             from: from.clone(),
             proposal: proposal.cloned(),
             reachable: self.machine.neighbors(from),
-            model: self.config.navigator.clone(),
+            model: self.machine.navigator.clone(),
             cwd: self.config.paths.project_dir.clone(),
         })
     }

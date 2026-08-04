@@ -32,13 +32,15 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Scaffold ./.loop/ from a machine template, and ~/.config/loop/ on first use.
+    /// Scaffold ./.loop/ — the machine, its prose, and its playbooks.
     Init {
         /// Ticket id, e.g. PROJ-1487.
         ticket: String,
-        /// Machine template from ~/.config/loop/machines/.
-        #[arg(long, default_value = "standard-ticket")]
-        template: String,
+        /// Copy an existing `.loop/`-shaped directory instead of the built-in
+        /// template. This is how a toolbox works now: keep one somewhere, and
+        /// start each ticket from it.
+        #[arg(long, value_name = "DIR")]
+        from: Option<std::path::PathBuf>,
     },
     /// Lint the machine: reachability, dangling references, guard sanity.
     Validate,
@@ -110,7 +112,7 @@ fn try_main() -> anyhow::Result<()> {
     let paths = Paths::discover(project_dir);
 
     match cli.command {
-        Command::Init { ticket, template } => commands::init(paths, &ticket, &template),
+        Command::Init { ticket, from } => commands::init(paths, &ticket, from.as_deref()),
         Command::Validate => commands::validate(paths),
         Command::Preview { state } => commands::preview(paths, state),
         Command::Diagram => commands::diagram(paths),

@@ -286,3 +286,91 @@ fn a_bad_value_reports_its_path_and_the_valid_ones() {
     );
     assert!(msg.contains("high"), "must list the valid values: {msg}");
 }
+
+/// The top-level `:provider` is the base of all three role chains, not a
+/// stored-and-ignored default. It moved here from `config.fnl` when that file
+/// was merged into the machine.
+#[test]
+fn top_level_provider_is_the_base_for_every_role() {
+    let vm = common::vm();
+    let config = common::default_config();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("machine.fnl");
+    std::fs::write(
+        &path,
+        r#"{:ticket "T" :task "t" :plan "p" :entry "a" :terminals ["done"]
+            :provider "openai"
+            :worker {:model "gpt-5"}
+            :judge {:provider "anthropic" :model "claude-haiku-4-5"}
+            :states {:a {:playbook "p"}}
+            :transitions [{:from "a" :to "done"}]}"#,
+    )
+    .unwrap();
+
+    let m = vm.load_machine(&path, &config).expect("load_machine");
+
+    // A role that names no provider inherits the top-level one...
+    assert_eq!(m.worker.provider, "openai");
+    assert_eq!(m.worker.model, "gpt-5");
+    assert_eq!(m.navigator.provider, "openai");
+    // ...and a role that names its own still wins.
+    assert_eq!(m.judge.provider, "anthropic");
+}
+
+/// A machine that names nothing gets loop's built-in floor. With `config.fnl`
+/// gone this is the only source of defaults, so it has to actually work.
+#[test]
+fn an_unopinionated_machine_gets_the_built_in_defaults() {
+    let vm = common::vm();
+    let config = common::default_config();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("machine.fnl");
+    std::fs::write(
+        &path,
+        r#"{:ticket "T" :task "t" :plan "p" :entry "a" :terminals ["done"]
+            :states {:a {:playbook "p"}}
+            :transitions [{:from "a" :to "done"}]}"#,
+    )
+    .unwrap();
+
+    let m = vm.load_machine(&path, &config).expect("load_machine");
+    assert_eq!(m.worker, config.worker);
+    assert_eq!(m.judge, config.judge);
+    assert_eq!(m.navigator, config.navigator);
+    assert_eq!(
+        m.navigator_max_invocations,
+        config.navigator_max_invocations
+    );
+    assert_eq!(m.digest_last_n, config.digest_last_n);
+    assert_eq!(m.pi_extensions, config.pi_extensions);
+}
+
+/// Keys that only ever lived in `config.fnl` must say where they went, rather
+/// than tripping the generic `deny_unknown_fields` message — the author needs
+/// to know the tier still exists under a different name.
+#[test]
+fn config_only_keys_are_rejected_with_a_migration_message() {
+    let vm = common::vm();
+    let config = common::default_config();
+    let dir = tempfile::tempdir().unwrap();
+
+    for (key, expect) in [
+        (r#":context "full""#, "$LEDGER_DIGEST"),
+        (r#":default-skills ["jj"]"#, ":defaults {:skills"),
+        (r#":default-mcp ["warehouse"]"#, ":defaults {:mcp"),
+    ] {
+        let path = dir.path().join("machine.fnl");
+        std::fs::write(
+            &path,
+            format!(
+                r#"{{:ticket "T" :task "t" :plan "p" :entry "a" :terminals ["done"] {key}
+                    :states {{:a {{:playbook "p"}}}}
+                    :transitions [{{:from "a" :to "done"}}]}}"#
+            ),
+        )
+        .unwrap();
+
+        let err = vm.load_machine(&path, &config).expect_err("must not load");
+        assert!(err.to_string().contains(expect), "for {key}: got {err}");
+    }
+}

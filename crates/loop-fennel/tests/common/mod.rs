@@ -16,12 +16,9 @@ pub fn vm() -> FennelVm {
 }
 
 /// `Paths` pointing nowhere real — fine for tests that only care about
-/// `Config::defaults`' non-path fields, or that override `config_dir`
-/// themselves.
+/// `Config::defaults`' non-path fields.
 pub fn test_paths() -> Paths {
     Paths {
-        config_dir: PathBuf::from("/nonexistent/config"),
-        state_dir: PathBuf::from("/nonexistent/state"),
         project_dir: PathBuf::from("/nonexistent/project"),
     }
 }

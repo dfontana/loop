@@ -44,7 +44,10 @@ pub fn base_machine() -> Machine {
         budgets: Budgets::default(),
         judge: model_spec(),
         navigator: model_spec(),
+        worker: model_spec(),
         navigator_max_invocations: 5,
+        digest_last_n: 8,
+        pi_extensions: vec!["mcp".into()],
         source_hash: "sha256:test".into(),
         source_path: PathBuf::from("machine.fnl"),
         dir: PathBuf::from("."),
@@ -320,11 +323,9 @@ impl<'m> StageBuilder for FakeStageBuilder<'m> {
             .machine
             .state(state)
             .ok_or_else(|| CoreError::machine(format!("no such state `{state}`")))?;
-        let model = self
-            .machine
-            .resolve_model(st, &ModelChoice::default(), &model_spec());
-        let skills = self.machine.resolve_skills(st, &[]);
-        let mcp = self.machine.resolve_mcp(st, &[]);
+        let model = self.machine.resolve_model(st, &ModelChoice::default());
+        let skills = self.machine.resolve_skills(st);
+        let mcp = self.machine.resolve_mcp(st);
         let spec = WorkerSpec {
             ticket: self.machine.ticket.clone(),
             state: state.clone(),

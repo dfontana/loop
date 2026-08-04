@@ -19,7 +19,6 @@ use crate::session_ui;
 use crate::stage::{CliStage, Resolver};
 
 // Templates shipped in the binary, so a fresh install needs no fetch.
-const CONFIG_FNL: &str = include_str!("../templates/config.fnl");
 const STANDARD_TICKET: &str = include_str!("../templates/machines/standard-ticket.fnl");
 const TASK_MD: &str = include_str!("../templates/task.md");
 const PLAN_MD: &str = include_str!("../templates/plan.md");
@@ -56,34 +55,44 @@ fn write_if_absent(path: &Path, content: &str) -> Result<bool> {
     Ok(true)
 }
 
-/// Materialize the global toolbox if it isn't there yet. Idempotent, and never
-/// overwrites anything the user has edited.
-fn ensure_toolbox(config: &Config) -> Result<Vec<String>> {
-    let paths = &config.paths;
-    let mut created = Vec::new();
-    if write_if_absent(&paths.config_file(), CONFIG_FNL)? {
-        created.push(paths.config_file().display().to_string());
-    }
-    let machines = paths.toolbox_machines().join("standard-ticket.fnl");
-    if write_if_absent(&machines, STANDARD_TICKET)? {
-        created.push(machines.display().to_string());
-    }
-    for (name, body) in PLAYBOOKS {
-        let p = paths.toolbox_playbooks().join(name);
-        if write_if_absent(&p, body)? {
-            created.push(p.display().to_string());
+/// Copy one directory tree into another, never overwriting. Returns what it
+/// wrote, for `init` to print.
+fn copy_tree(from: &Path, to: &Path, created: &mut Vec<String>) -> Result<()> {
+    for entry in std::fs::read_dir(from)
+        .with_context(|| format!("reading template directory {}", from.display()))?
+    {
+        let entry = entry?;
+        let src = entry.path();
+        let dst = to.join(entry.file_name());
+        if src.is_dir() {
+            std::fs::create_dir_all(&dst)?;
+            copy_tree(&src, &dst, created)?;
+        } else if !dst.exists() {
+            if let Some(parent) = dst.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::copy(&src, &dst)
+                .with_context(|| format!("copying {} to {}", src.display(), dst.display()))?;
+            created.push(dst.display().to_string());
         }
     }
-    std::fs::create_dir_all(paths.toolbox_skills())?;
-    Ok(created)
+    Ok(())
 }
 
-pub fn init(paths: Paths, ticket: &str, template: &str) -> Result<()> {
-    let config = Config::defaults(paths.clone());
-    for created in ensure_toolbox(&config)? {
-        println!("  created {created}");
+/// Keep the derived `run/` directory out of version control.
+///
+/// `.loop/` is meant to be committed — it is the record of what drove the
+/// ticket — but the rendered prompts and handoff files under `run/` are
+/// regenerated every stage and would be pure churn in a diff.
+fn ignore_run_dir(paths: &Paths, created: &mut Vec<String>) -> Result<()> {
+    let gitignore = paths.loop_dir().join(".gitignore");
+    if write_if_absent(&gitignore, "run/\n")? {
+        created.push(gitignore.display().to_string());
     }
+    Ok(())
+}
 
+pub fn init(paths: Paths, ticket: &str, from: Option<&Path>) -> Result<()> {
     let machine_file = paths.machine_file();
     if machine_file.exists() {
         bail!(
@@ -92,23 +101,57 @@ pub fn init(paths: Paths, ticket: &str, template: &str) -> Result<()> {
         );
     }
 
-    let template_path = paths.toolbox_machines().join(format!("{template}.fnl"));
-    let body = std::fs::read_to_string(&template_path)
-        .with_context(|| format!("no machine template at {}", template_path.display()))?;
-    let body = body.replace("$TICKET", ticket);
+    let loop_dir = paths.loop_dir();
+    std::fs::create_dir_all(&loop_dir)?;
+    let mut created = Vec::new();
 
-    write_if_absent(&machine_file, &body)?;
-    write_if_absent(
-        &paths.loop_dir().join("task.md"),
-        &TASK_MD.replace("$TICKET", ticket),
-    )?;
-    write_if_absent(
-        &paths.loop_dir().join("plan.md"),
-        &PLAN_MD.replace("$TICKET", ticket),
-    )?;
-    std::fs::create_dir_all(paths.local_playbooks())?;
+    match from {
+        // Reuse is a copy, not a resolution path. What you started from is
+        // recorded in the ticket rather than looked up at run time, so editing
+        // the source later cannot change a run already in flight.
+        Some(src) => {
+            let src = loop_core::config::expand_tilde(src);
+            if !src.is_dir() {
+                bail!("--from {} is not a directory", src.display());
+            }
+            copy_tree(&src, &loop_dir, &mut created)?;
+            if !machine_file.exists() {
+                bail!(
+                    "{} has no machine.fnl — --from wants a directory shaped like .loop/",
+                    src.display()
+                );
+            }
+            // The template's own ticket id is whoever's it was; this one is ours.
+            let body = std::fs::read_to_string(&machine_file)?;
+            std::fs::write(&machine_file, body.replace("$TICKET", ticket))?;
+        }
+        None => {
+            if write_if_absent(&machine_file, &STANDARD_TICKET.replace("$TICKET", ticket))? {
+                created.push(machine_file.display().to_string());
+            }
+            for (name, body) in PLAYBOOKS {
+                let p = paths.playbooks().join(name);
+                if write_if_absent(&p, body)? {
+                    created.push(p.display().to_string());
+                }
+            }
+        }
+    }
 
-    println!("\ninitialized {} for {ticket}", paths.loop_dir().display());
+    for (name, body) in [("task.md", TASK_MD), ("plan.md", PLAN_MD)] {
+        let p = loop_dir.join(name);
+        if write_if_absent(&p, &body.replace("$TICKET", ticket))? {
+            created.push(p.display().to_string());
+        }
+    }
+    std::fs::create_dir_all(paths.playbooks())?;
+    std::fs::create_dir_all(paths.skills())?;
+    ignore_run_dir(&paths, &mut created)?;
+
+    for c in &created {
+        println!("  created {c}");
+    }
+    println!("\ninitialized {} for {ticket}", loop_dir.display());
     println!("  1. write .loop/task.md and .loop/plan.md");
     println!("  2. hack .loop/machine.fnl into the shape this ticket needs");
     println!("  3. loop validate");
@@ -119,7 +162,7 @@ pub fn init(paths: Paths, ticket: &str, template: &str) -> Result<()> {
 /// Load config + machine. Shared by every command that needs the graph.
 fn load(paths: Paths) -> Result<(FennelVm, Config, Machine)> {
     let vm = FennelVm::new()?;
-    let config = vm.load_config(paths.clone())?;
+    let config = Config::defaults(paths.clone());
     let machine_file = paths.machine_file();
     if !machine_file.exists() {
         bail!(
@@ -131,18 +174,15 @@ fn load(paths: Paths) -> Result<(FennelVm, Config, Machine)> {
     Ok((vm, config, machine))
 }
 
-/// Lint a loaded machine against the toolbox on disk. `validate` and `preview`
-/// share it, so preview reports exactly the problems `validate` would — there
-/// is no weaker preview-only linter.
+/// Lint a loaded machine against the ticket directory. `validate` and
+/// `preview` share it, so preview reports exactly the problems `validate`
+/// would — there is no weaker preview-only linter.
 fn diagnose(config: &Config, machine: &Machine) -> Vec<Diagnostic> {
     let toolbox = Toolbox::new(config);
     loop_engine::validate(
         machine,
         &|r| toolbox.resolve_playbook(r, &machine.dir).is_ok(),
         &|name| toolbox.resolve_skill(name, &machine.dir).is_ok(),
-        config.pi_extensions.iter().any(|e| e == "mcp"),
-        &config.default_skills,
-        &config.default_mcp,
     )
 }
 
@@ -644,14 +684,9 @@ pub fn doctor(paths: Paths) -> Result<()> {
         &format!("`{}` on PATH", config.pi_bin),
         "install pi, or set LOOP_PI_BIN",
     );
-    // Every label names the path actually tested. Printing `~/.config/loop/…`
-    // while checking somewhere else is worst precisely when you are running
-    // doctor to find out where loop is looking.
-    check(
-        paths.config_file().exists(),
-        &paths.config_file().display().to_string(),
-        "run `loop init <TICKET>` to scaffold the toolbox",
-    );
+    // Every label names the path actually tested. Printing one path while
+    // checking another is worst precisely when you are running doctor to find
+    // out where loop is looking.
     check(
         paths.machine_file().exists(),
         &paths.machine_file().display().to_string(),

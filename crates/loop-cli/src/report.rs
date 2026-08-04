@@ -353,7 +353,7 @@ pub fn state_preview(r: &Resolver<'_>, id: &StateId) -> String {
             "{}",
             config
                 .paths
-                .render_dir(&m.ticket)
+                .run_dir()
                 .join(format!("{id}-<cycle>-<attempt>-system.md"))
                 .display()
         ),
@@ -1046,7 +1046,7 @@ fn fmt_budgets(b: &Budgets) -> String {
 
 fn fmt_playbook_ref(r: &PlaybookRef) -> String {
     match r {
-        PlaybookRef::Named(n) => format!("`{n}` (name, local-first)"),
+        PlaybookRef::Named(n) => format!("`{n}` (name)"),
         PlaybookRef::Path(p) => format!("`{}` (path)", p.display()),
         PlaybookRef::Inline(_) => "inline `:prompt`".into(),
     }

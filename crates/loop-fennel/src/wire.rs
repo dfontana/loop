@@ -64,31 +64,17 @@ pub struct Machine {
     pub transitions: Vec<Transition>,
     #[serde(default)]
     pub loops: Vec<Loop>,
-}
-
-/// `config.fnl`. Every field optional — whatever is absent keeps its
-/// [`loop_core::Config::defaults`] value.
-#[derive(Debug, Default, Deserialize)]
-#[serde(rename_all = "kebab-case", deny_unknown_fields)]
-pub struct Config {
+    /// The provider every role falls back to. A role naming its own wins.
     #[serde(default)]
     pub provider: Option<String>,
+    /// The Worker floor, under every state and playbook. Distinct from
+    /// `:defaults`, which also carries skills and MCP.
     #[serde(default)]
     pub worker: Option<ModelChoice>,
     #[serde(default)]
-    pub judge: Option<ModelChoice>,
-    #[serde(default)]
-    pub navigator: Option<Navigator>,
-    #[serde(default)]
-    pub default_skills: Option<Vec<String>>,
-    #[serde(default)]
-    pub default_mcp: Option<Vec<String>>,
+    pub digest_last_n: Option<u32>,
     #[serde(default)]
     pub pi_extensions: Option<Vec<String>>,
-    #[serde(default)]
-    pub budgets: Option<Budgets>,
-    #[serde(default)]
-    pub digest_last_n: Option<u32>,
 }
 
 /// A partial model selection. Every level of the four-layer chain writes the

@@ -69,8 +69,6 @@ fn cheap_model() -> ModelSpec {
 
 fn test_config(pi_bin: &Path) -> Config {
     let paths = Paths {
-        config_dir: PathBuf::from("/tmp/loop-e2e-config"),
-        state_dir: PathBuf::from("/tmp/loop-e2e-state"),
         project_dir: PathBuf::from("/tmp/loop-e2e-project"),
     };
     let mut cfg = Config::defaults(paths);
