@@ -14,6 +14,7 @@ use loop_core::{Config, CoreError, Machine, Paths, Result};
 
 mod convert;
 mod eval;
+mod wire;
 
 pub use convert::{config_from_table, machine_from_table};
 

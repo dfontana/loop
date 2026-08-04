@@ -41,6 +41,23 @@
 //!  [{:name "qa" :states ["qa-staging" "debug"] :max-cycles 4 :on-exhausted "escalate"}]}
 //! ```
 //!
+//! The shape itself lives in [`crate::wire`] as serde structs; this module is
+//! only what serde cannot do on its own. That split is the point: a field that
+//! is merely *named* in Fennel and *stored* in the IR needs no code here at
+//! all, so what remains is exactly the set of rules that are genuinely rules.
+//!
+//! Four kinds of thing survive:
+//!
+//! 1. **Removed keys.** `:when`, `:context`, and `:transition-mode` must fail
+//!    with a message naming their replacement, which is more than
+//!    `deny_unknown_fields` would say.
+//! 2. **File resolution.** `:task`/`:plan` may name a file to read.
+//! 3. **Cross-field rules.** A state needs exactly one of `:playbook`/
+//!    `:prompt`; `:entry` may be omitted only for a single-state machine;
+//!    every `:from`/`:to`/`:escalation-state` must name something declared.
+//! 4. **Layering.** Budgets tighten against the config, and role models
+//!    overlay it.
+//!
 //! Notes that matter for the conversion:
 //! - `:check` is a bare command string, or `{:cmd .. :timeout-s ..}`. The
 //!   harness runs it itself; exit 0 passes the edge.
@@ -85,12 +102,42 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use loop_core::{
-    Budgets, Check, Config, CoreError, DEFAULT_CHECK_TIMEOUT_S, Defaults, LoopSpec, Machine,
-    ModelChoice, ModelSpec, OnExhausted, OnFail, PlaybookRef, QaCase, Result, State, StateId,
-    Thinking, Transition,
+    Check, Config, CoreError, DEFAULT_CHECK_TIMEOUT_S, Defaults, LoopSpec, Machine, ModelChoice,
+    ModelSpec, OnExhausted, PlaybookRef, Result, State, StateId, Transition,
 };
 
-// ── small Lua table readers ────────────────────────────────────────────────
+use crate::wire;
+
+// ── deserialization ────────────────────────────────────────────────────────
+
+/// Deserialize an evaluated Lua table into a wire struct, with the field path
+/// in the error message.
+///
+/// `serde_path_to_error` is what makes this readable: mlua's own error is
+/// `unknown variant \`wat\`` with no indication of *where*, which in a file
+/// with fifteen states is not a diagnosis. Wrapped, the same failure reads
+/// `states.qa-staging.thinking: unknown variant …, expected one of …` — which
+/// is strictly more than the hand-written walker's `ctx` strings managed, and
+/// it is generated rather than maintained.
+fn from_table<T: serde::de::DeserializeOwned>(table: &mlua::Table, what: &str) -> Result<T> {
+    let de = mlua::serde::Deserializer::new(mlua::Value::Table(table.clone()));
+    serde_path_to_error::deserialize(de).map_err(|e| {
+        let path = e.path().to_string();
+        // A failure at the document root has the path ".", which reads as
+        // noise next to the message; anywhere else the path is the useful half.
+        if path == "." {
+            CoreError::machine(format!("{what}: {}", e.inner()))
+        } else {
+            CoreError::machine(format!("{what}: at `{path}`: {}", e.inner()))
+        }
+    })
+}
+
+// ── removed keys ───────────────────────────────────────────────────────────
+//
+// `deny_unknown_fields` would already reject each of these, but only with
+// "unknown field". A key that used to do something deserves to be told what
+// replaced it, so these three run first and win.
 
 fn get_value(table: &mlua::Table, key: &str) -> Result<mlua::Value> {
     table
@@ -98,129 +145,42 @@ fn get_value(table: &mlua::Table, key: &str) -> Result<mlua::Value> {
         .map_err(|e| CoreError::machine(format!("reading `:{key}`: {e}")))
 }
 
-fn get_table(table: &mlua::Table, key: &str) -> Result<Option<mlua::Table>> {
-    match get_value(table, key)? {
-        mlua::Value::Nil => Ok(None),
-        mlua::Value::Table(t) => Ok(Some(t)),
-        other => Err(CoreError::machine(format!(
-            "`:{key}` must be a table, got {}",
-            other.type_name()
-        ))),
-    }
+fn present(table: &mlua::Table, key: &str) -> Result<bool> {
+    Ok(get_value(table, key)? != mlua::Value::Nil)
 }
 
-fn get_str(table: &mlua::Table, key: &str) -> Result<Option<String>> {
-    match get_value(table, key)? {
-        mlua::Value::Nil => Ok(None),
-        mlua::Value::String(s) => Ok(Some(s.to_string_lossy())),
-        other => Err(CoreError::machine(format!(
-            "`:{key}` must be a string, got {}",
-            other.type_name()
-        ))),
-    }
-}
-
-fn require_str(table: &mlua::Table, key: &str, ctx: &str) -> Result<String> {
-    get_str(table, key)?.ok_or_else(|| CoreError::machine(format!("{ctx}: missing `:{key}`")))
-}
-
-fn get_f64(table: &mlua::Table, key: &str) -> Result<Option<f64>> {
-    match get_value(table, key)? {
-        mlua::Value::Nil => Ok(None),
-        mlua::Value::Integer(i) => Ok(Some(i as f64)),
-        mlua::Value::Number(n) => Ok(Some(n)),
-        other => Err(CoreError::machine(format!(
-            "`:{key}` must be a number, got {}",
-            other.type_name()
-        ))),
-    }
-}
-
-fn get_u64(table: &mlua::Table, key: &str) -> Result<Option<u64>> {
-    match get_f64(table, key)? {
-        None => Ok(None),
-        Some(n) if n >= 0.0 => Ok(Some(n.round() as u64)),
-        Some(_) => Err(CoreError::machine(format!("`:{key}` must not be negative"))),
-    }
-}
-
-fn get_u32(table: &mlua::Table, key: &str) -> Result<Option<u32>> {
-    match get_f64(table, key)? {
-        None => Ok(None),
-        Some(n) if n >= 0.0 => Ok(Some(n.round() as u32)),
-        Some(_) => Err(CoreError::machine(format!("`:{key}` must not be negative"))),
-    }
-}
-
-/// A list-of-strings field. `None` when the key is absent; an error if
-/// present but not a sequence of strings.
-fn get_str_vec(table: &mlua::Table, key: &str) -> Result<Option<Vec<String>>> {
-    match get_value(table, key)? {
-        mlua::Value::Nil => Ok(None),
-        mlua::Value::Table(t) => {
-            let mut out = Vec::new();
-            for (i, item) in t.sequence_values::<mlua::Value>().enumerate() {
-                let item = item.map_err(|e| CoreError::machine(format!("`:{key}`[{i}]: {e}")))?;
-                match item {
-                    mlua::Value::String(s) => out.push(s.to_string_lossy()),
-                    other => {
-                        return Err(CoreError::machine(format!(
-                            "`:{key}`[{i}] must be a string, got {}",
-                            other.type_name()
-                        )));
-                    }
-                }
-            }
-            Ok(Some(out))
-        }
-        other => Err(CoreError::machine(format!(
-            "`:{key}` must be a list of strings, got {}",
-            other.type_name()
-        ))),
-    }
-}
-
-fn parse_thinking(s: &str, ctx: &str) -> Result<Thinking> {
-    Thinking::parse(s)
-        .ok_or_else(|| CoreError::machine(format!("{ctx}: unknown `:thinking` value `{s}`")))
-}
-
-fn parse_model_choice(table: &mlua::Table, ctx: &str) -> Result<ModelChoice> {
-    let provider = get_str(table, "provider")?;
-    let model = get_str(table, "model")?;
-    let thinking = match get_str(table, "thinking")? {
-        Some(s) => Some(parse_thinking(&s, ctx)?),
-        None => None,
+/// `:when` was a Fennel closure gating an edge on ledger vars. Both tiers are
+/// gone; ignoring the key would silently leave the edge unguarded.
+fn reject_when(table: &mlua::Table) -> Result<()> {
+    let Some(transitions) = table
+        .get::<mlua::Value>("transitions")
+        .ok()
+        .and_then(|v| match v {
+            mlua::Value::Table(t) => Some(t),
+            _ => None,
+        })
+    else {
+        return Ok(());
     };
-    Ok(ModelChoice {
-        provider,
-        model,
-        thinking,
-    })
-}
-
-/// Overlay an optional `{key: {...}}` sub-table (a partial `ModelChoice`) onto
-/// a fully-specified `base` `ModelSpec`. Used for the machine's `:judge`
-/// /`:navigator` over `config`'s, and for `config.fnl`'s `:worker`/`:judge`
-/// /`:navigator` over [`Config::defaults`]'s.
-fn model_spec_overlay(table: &mlua::Table, key: &str, base: &ModelSpec) -> Result<ModelSpec> {
-    match get_table(table, key)? {
-        None => Ok(base.clone()),
-        Some(t) => {
-            let choice = parse_model_choice(&t, &format!("`:{key}`"))?;
-            Ok(choice.resolve(base))
+    for (i, item) in transitions.sequence_values::<mlua::Value>().enumerate() {
+        let Ok(mlua::Value::Table(t)) = item else {
+            continue;
+        };
+        if present(&t, "when")? {
+            return Err(CoreError::machine(format!(
+                "transitions[{i}]: `:when` guards were removed — express the condition as a \
+                 `:check` command the harness runs, or as `:criteria` for the Judge to evaluate"
+            )));
         }
     }
+    Ok(())
 }
 
 /// `:transition-mode` chose between two schemas for the injected `transition`
 /// tool's `to` parameter. There is no injected tool any more — a Worker writes
 /// a handoff file — so the key selects between nothing and nothing.
-///
-/// Erroring rather than ignoring it follows `:when` and `:context`: a key that
-/// silently stops meaning anything is worse than one that says so.
 fn reject_transition_mode(table: &mlua::Table, ctx: &str) -> Result<()> {
-    if get_value(table, "transition-mode")? != mlua::Value::Nil {
+    if present(table, "transition-mode")? {
         return Err(CoreError::machine(format!(
             "{ctx}: `:transition-mode` was removed — a worker now ends its stage by writing \
              its proposal to `$LOOP_HANDOFF`, and the harness checks the target against the \
@@ -231,57 +191,26 @@ fn reject_transition_mode(table: &mlua::Table, ctx: &str) -> Result<()> {
     Ok(())
 }
 
-fn parse_on_exhausted(s: &str, ctx: &str) -> Result<OnExhausted> {
-    match s {
-        "escalate" => Ok(OnExhausted::Escalate),
-        "abort" => Ok(OnExhausted::Abort),
-        other => Err(CoreError::machine(format!(
-            "{ctx}: unknown `:on-exhausted` value `{other}`"
-        ))),
+/// `:context` was a two-valued knob whose second value was never wired to
+/// anything.
+fn reject_context(table: &mlua::Table) -> Result<()> {
+    if present(table, "context")? {
+        return Err(CoreError::machine(
+            "config: `:context` was removed — the rolling digest is the only continuity channel \
+             between stages; interpolate `$LEDGER_DIGEST` in a playbook and tune `:digest-last-n`"
+                .to_string(),
+        ));
     }
+    Ok(())
 }
 
-fn parse_on_fail(value: mlua::Value, ctx: &str) -> Result<OnFail> {
-    match value {
-        mlua::Value::Nil => Ok(OnFail::default()),
-        mlua::Value::String(s) => match s.to_string_lossy().as_str() {
-            "retry" => Ok(OnFail::Retry),
-            "abort" => Ok(OnFail::Abort),
-            other => Err(CoreError::machine(format!(
-                "{ctx}: unknown `:on-fail` value `{other}`"
-            ))),
-        },
-        mlua::Value::Table(t) => {
-            let route = require_str(&t, "route", ctx)?;
-            Ok(OnFail::Route(route))
-        }
-        other => Err(CoreError::machine(format!(
-            "{ctx}: `:on-fail` must be a string or a `{{:route ..}}` table, got {}",
-            other.type_name()
-        ))),
-    }
-}
-
-/// `:playbook` (bare name or `/`-containing path) or a state-local `:prompt`.
-fn parse_playbook(state_table: &mlua::Table, state_id: &str) -> Result<PlaybookRef> {
-    let playbook = get_str(state_table, "playbook")?;
-    let prompt = get_str(state_table, "prompt")?;
-    match (playbook, prompt) {
-        (Some(p), _) if p.contains('/') => Ok(PlaybookRef::Path(PathBuf::from(p))),
-        (Some(p), _) => Ok(PlaybookRef::Named(p)),
-        (None, Some(prompt)) => Ok(PlaybookRef::Inline(prompt)),
-        (None, None) => Err(CoreError::machine(format!(
-            "state `{state_id}`: needs either `:playbook` or `:prompt`"
-        ))),
-    }
-}
+// ── the rules serde cannot express ─────────────────────────────────────────
 
 /// `:task`/`:plan`: a path relative to `machine_dir` if it resolves to a real
 /// file, else inline prose — unless it looks like it was meant to be a file
 /// (`.md` suffix), in which case a non-resolving path is an authoring error,
 /// not a silent fallback to prose.
-fn resolve_prose(table: &mlua::Table, field: &'static str, machine_dir: &Path) -> Result<String> {
-    let raw = require_str(table, field, "machine")?;
+fn resolve_prose(raw: String, field: &'static str, machine_dir: &Path) -> Result<String> {
     let candidate = machine_dir.join(&raw);
     if candidate.is_file() {
         std::fs::read_to_string(&candidate).map_err(|e| {
@@ -301,85 +230,40 @@ fn resolve_prose(table: &mlua::Table, field: &'static str, machine_dir: &Path) -
     }
 }
 
-fn parse_qa_cases(table: &mlua::Table) -> Result<Vec<QaCase>> {
-    let mut out = Vec::new();
-    let Some(arr) = get_table(table, "qa-cases")? else {
-        return Ok(out);
+/// `:playbook` (bare name or `/`-containing path) or a state-local `:prompt`.
+/// Exactly one is required — a cross-field rule serde has no way to state.
+fn playbook_ref(state: &wire::State, state_id: &str) -> Result<PlaybookRef> {
+    match (&state.playbook, &state.prompt) {
+        (Some(p), _) if p.contains('/') => Ok(PlaybookRef::Path(PathBuf::from(p))),
+        (Some(p), _) => Ok(PlaybookRef::Named(p.clone())),
+        (None, Some(prompt)) => Ok(PlaybookRef::Inline(prompt.clone())),
+        (None, None) => Err(CoreError::machine(format!(
+            "state `{state_id}`: needs either `:playbook` or `:prompt`"
+        ))),
+    }
+}
+
+/// An empty command is an authoring mistake rather than "no check": the key is
+/// present, so the author believed they had gated the edge.
+fn check_ir(check: &wire::Check, ctx: &str) -> Result<Check> {
+    let (cmd, timeout_s) = match check {
+        wire::Check::Cmd(cmd) => (cmd.clone(), None),
+        wire::Check::Table { cmd, timeout_s } => (cmd.clone(), *timeout_s),
     };
-    for (i, item) in arr.sequence_values::<mlua::Value>().enumerate() {
-        let item = item.map_err(|e| CoreError::machine(format!("qa-cases[{i}]: {e}")))?;
-        let t = match item {
-            mlua::Value::Table(t) => t,
-            other => {
-                return Err(CoreError::machine(format!(
-                    "qa-cases[{i}]: expected a table, got {}",
-                    other.type_name()
-                )));
-            }
-        };
-        let ctx = format!("qa-cases[{i}]");
-        let id = require_str(&t, "id", &ctx)?;
-        let desc = require_str(&t, "desc", &ctx)?;
-        out.push(QaCase { id, desc });
+    if cmd.trim().is_empty() {
+        return Err(CoreError::machine(format!(
+            "{ctx}: `:check` command is empty — omit the key instead"
+        )));
     }
-    Ok(out)
+    Ok(Check {
+        cmd,
+        timeout_s: timeout_s.unwrap_or(DEFAULT_CHECK_TIMEOUT_S),
+    })
 }
 
-fn parse_defaults(table: &mlua::Table) -> Result<Defaults> {
-    match get_table(table, "defaults")? {
-        None => Ok(Defaults::default()),
-        Some(t) => {
-            let model = parse_model_choice(&t, "`:defaults`")?;
-            let skills = get_str_vec(&t, "skills")?.unwrap_or_default();
-            let mcp = get_str_vec(&t, "mcp")?.unwrap_or_default();
-            Ok(Defaults { model, skills, mcp })
-        }
-    }
-}
-
-fn parse_states(table: &mlua::Table) -> Result<BTreeMap<StateId, State>> {
-    let states_table =
-        get_table(table, "states")?.ok_or_else(|| CoreError::machine("missing `:states`"))?;
-    let mut out = BTreeMap::new();
-    for pair in states_table.pairs::<String, mlua::Value>() {
-        let (id, value) = pair.map_err(|e| CoreError::machine(format!("`:states`: {e}")))?;
-        let st = match value {
-            mlua::Value::Table(t) => t,
-            other => {
-                return Err(CoreError::machine(format!(
-                    "state `{id}`: expected a table, got {}",
-                    other.type_name()
-                )));
-            }
-        };
-        let ctx = format!("state `{id}`");
-        let playbook = parse_playbook(&st, &id)?;
-        let model = parse_model_choice(&st, &ctx)?;
-        let skills = get_str_vec(&st, "skills")?.unwrap_or_default();
-        let mcp = get_str_vec(&st, "mcp")?.unwrap_or_default();
-        let description = get_str(&st, "description")?;
-        out.insert(
-            id.clone(),
-            State {
-                id,
-                playbook,
-                model,
-                skills,
-                mcp,
-                description,
-            },
-        );
-    }
-    if out.is_empty() {
-        return Err(CoreError::machine(
-            "`:states` must declare at least one state",
-        ));
-    }
-    Ok(out)
-}
-
-fn resolve_entry(table: &mlua::Table, states: &BTreeMap<StateId, State>) -> Result<StateId> {
-    match get_str(table, "entry")? {
+/// Missing `:entry` is only unambiguous for a one-state machine.
+fn resolve_entry(entry: Option<String>, states: &BTreeMap<StateId, State>) -> Result<StateId> {
+    match entry {
         Some(e) => {
             if !states.contains_key(&e) {
                 return Err(CoreError::machine(format!(
@@ -396,162 +280,7 @@ fn resolve_entry(table: &mlua::Table, states: &BTreeMap<StateId, State>) -> Resu
     }
 }
 
-fn parse_terminals(table: &mlua::Table) -> Result<BTreeSet<StateId>> {
-    let arr =
-        get_table(table, "terminals")?.ok_or_else(|| CoreError::machine("missing `:terminals`"))?;
-    let mut out = BTreeSet::new();
-    for (i, item) in arr.sequence_values::<mlua::Value>().enumerate() {
-        let item = item.map_err(|e| CoreError::machine(format!("terminals[{i}]: {e}")))?;
-        match item {
-            mlua::Value::String(s) => {
-                out.insert(s.to_string_lossy());
-            }
-            other => {
-                return Err(CoreError::machine(format!(
-                    "terminals[{i}]: expected a string, got {}",
-                    other.type_name()
-                )));
-            }
-        }
-    }
-    Ok(out)
-}
-
-fn parse_budgets(table: &mlua::Table) -> Result<Budgets> {
-    match get_table(table, "budgets")? {
-        None => Ok(Budgets::default()),
-        Some(t) => Ok(Budgets {
-            usd: get_f64(&t, "usd")?,
-            wallclock_s: get_u64(&t, "wallclock-s")?,
-            max_transitions: get_u32(&t, "max-transitions")?,
-        }),
-    }
-}
-
-/// `:check` is either a bare command string or a `{:cmd .. :timeout-s ..}`
-/// table. The bare form is the common case, so it stays a one-liner.
-fn parse_check(t: &mlua::Table, ctx: &str) -> Result<Option<Check>> {
-    match get_value(t, "check")? {
-        mlua::Value::Nil => Ok(None),
-        mlua::Value::String(s) => {
-            let cmd = s.to_str().map(|s| s.to_string()).map_err(|e| {
-                CoreError::machine(format!("{ctx}: `:check` is not valid UTF-8: {e}"))
-            })?;
-            check_from_parts(cmd, None, ctx)
-        }
-        mlua::Value::Table(inner) => {
-            let cmd = require_str(&inner, "cmd", ctx)?;
-            let timeout_s = get_u64(&inner, "timeout-s")?;
-            check_from_parts(cmd, timeout_s, ctx)
-        }
-        other => Err(CoreError::machine(format!(
-            "{ctx}: `:check` must be a command string or a `{{:cmd ..}}` table, got {}",
-            other.type_name()
-        ))),
-    }
-}
-
-fn check_from_parts(cmd: String, timeout_s: Option<u64>, ctx: &str) -> Result<Option<Check>> {
-    if cmd.trim().is_empty() {
-        return Err(CoreError::machine(format!(
-            "{ctx}: `:check` command is empty — omit the key instead"
-        )));
-    }
-    Ok(Some(Check {
-        cmd,
-        timeout_s: timeout_s.unwrap_or(DEFAULT_CHECK_TIMEOUT_S),
-    }))
-}
-
-fn parse_transitions(table: &mlua::Table) -> Result<Vec<Transition>> {
-    let mut out = Vec::new();
-    let Some(arr) = get_table(table, "transitions")? else {
-        return Ok(out);
-    };
-    for (i, item) in arr.sequence_values::<mlua::Value>().enumerate() {
-        let item = item.map_err(|e| CoreError::machine(format!("transitions[{i}]: {e}")))?;
-        let t = match item {
-            mlua::Value::Table(t) => t,
-            other => {
-                return Err(CoreError::machine(format!(
-                    "transitions[{i}]: expected a table, got {}",
-                    other.type_name()
-                )));
-            }
-        };
-        let ctx = format!("transitions[{i}]");
-        let from = require_str(&t, "from", &ctx)?;
-        let to = require_str(&t, "to", &ctx)?;
-        // `:when` was a Fennel closure gating on ledger vars. Both are gone;
-        // say so rather than ignoring the key and silently unguarding an edge.
-        if !matches!(get_value(&t, "when")?, mlua::Value::Nil) {
-            return Err(CoreError::machine(format!(
-                "{ctx}: `:when` guards were removed — express the condition as a `:check` \
-                 command the harness runs, or as `:criteria` for the Judge to evaluate"
-            )));
-        }
-        let check = parse_check(&t, &ctx)?;
-        let criteria = get_str(&t, "criteria")?;
-        let on_fail = parse_on_fail(get_value(&t, "on-fail")?, &ctx)?;
-        let backoff_s = get_u64(&t, "backoff-s")?;
-        out.push(Transition {
-            from,
-            to,
-            check,
-            criteria,
-            on_fail,
-            backoff_s,
-        });
-    }
-    Ok(out)
-}
-
-fn parse_loops(table: &mlua::Table) -> Result<Vec<LoopSpec>> {
-    let mut out = Vec::new();
-    let Some(arr) = get_table(table, "loops")? else {
-        return Ok(out);
-    };
-    for (i, item) in arr.sequence_values::<mlua::Value>().enumerate() {
-        let item = item.map_err(|e| CoreError::machine(format!("loops[{i}]: {e}")))?;
-        let t = match item {
-            mlua::Value::Table(t) => t,
-            other => {
-                return Err(CoreError::machine(format!(
-                    "loops[{i}]: expected a table, got {}",
-                    other.type_name()
-                )));
-            }
-        };
-        let ctx = format!("loops[{i}]");
-        let name = require_str(&t, "name", &ctx)?;
-        let states = get_str_vec(&t, "states")?.unwrap_or_default();
-        if states.is_empty() {
-            return Err(CoreError::machine(format!(
-                "{ctx}: `:states` must not be empty"
-            )));
-        }
-        let max_cycles = get_u32(&t, "max-cycles")?
-            .ok_or_else(|| CoreError::machine(format!("{ctx}: missing `:max-cycles`")))?;
-        let on_exhausted = match get_str(&t, "on-exhausted")? {
-            Some(s) => parse_on_exhausted(&s, &ctx)?,
-            None => OnExhausted::default(),
-        };
-        out.push(LoopSpec {
-            name,
-            states,
-            max_cycles,
-            on_exhausted,
-        });
-    }
-    Ok(out)
-}
-
-fn parse_navigator_max_invocations(table: &mlua::Table, default: u32) -> Result<u32> {
-    match get_table(table, "navigator")? {
-        None => Ok(default),
-        Some(t) => Ok(get_u32(&t, "max-invocations")?.unwrap_or(default)),
-    }
-}
+// ── entry points ───────────────────────────────────────────────────────────
 
 /// Convert an evaluated machine table into the IR, resolving `:task`/`:plan`
 /// paths against `machine_dir`.
@@ -562,18 +291,41 @@ pub fn machine_from_table(
     source_path: &Path,
     config: &Config,
 ) -> Result<Machine> {
-    let ticket = require_str(table, "ticket", "machine")?;
-    let task = resolve_prose(table, "task", machine_dir)?;
-    let plan = resolve_prose(table, "plan", machine_dir)?;
-    let qa_cases = parse_qa_cases(table)?;
-    let defaults = parse_defaults(table)?;
+    reject_transition_mode(table, "machine")?;
+    reject_when(table)?;
+    let m: wire::Machine = from_table(table, "machine")?;
 
-    let states = parse_states(table)?;
-    let entry = resolve_entry(table, &states)?;
-    let terminals = parse_terminals(table)?;
+    let task = resolve_prose(m.task, "task", machine_dir)?;
+    let plan = resolve_prose(m.plan, "plan", machine_dir)?;
 
-    let escalation_state = get_str(table, "escalation-state")?;
-    if let Some(esc) = &escalation_state {
+    let mut states = BTreeMap::new();
+    for (id, st) in &m.states {
+        states.insert(
+            id.clone(),
+            State {
+                id: id.clone(),
+                playbook: playbook_ref(st, id)?,
+                model: ModelChoice {
+                    provider: st.provider.clone(),
+                    model: st.model.clone(),
+                    thinking: st.thinking,
+                },
+                skills: st.skills.clone(),
+                mcp: st.mcp.clone(),
+                description: st.description.clone(),
+            },
+        );
+    }
+    if states.is_empty() {
+        return Err(CoreError::machine(
+            "`:states` must declare at least one state",
+        ));
+    }
+
+    let entry = resolve_entry(m.entry, &states)?;
+    let terminals: BTreeSet<StateId> = m.terminals.into_iter().collect();
+
+    if let Some(esc) = &m.escalation_state {
         if !states.contains_key(esc) && !terminals.contains(esc) {
             return Err(CoreError::machine(format!(
                 "`:escalation-state` `{esc}` is not a declared state or terminal"
@@ -581,8 +333,9 @@ pub fn machine_from_table(
         }
     }
 
-    let transitions = parse_transitions(table)?;
-    for t in &transitions {
+    let mut transitions = Vec::with_capacity(m.transitions.len());
+    for (i, t) in m.transitions.iter().enumerate() {
+        let ctx = format!("transitions[{i}]");
         if !states.contains_key(&t.from) {
             return Err(CoreError::machine(format!(
                 "transition from `{}`: not a declared state",
@@ -595,24 +348,73 @@ pub fn machine_from_table(
                 t.to
             )));
         }
+        transitions.push(Transition {
+            from: t.from.clone(),
+            to: t.to.clone(),
+            check: t.check.as_ref().map(|c| check_ir(c, &ctx)).transpose()?,
+            criteria: t.criteria.clone(),
+            on_fail: t.on_fail.clone().unwrap_or_default(),
+            backoff_s: t.backoff_s,
+        });
     }
 
-    let loops = parse_loops(table)?;
-    let budgets = parse_budgets(table)?.tighten(config.budgets);
-    let judge = model_spec_overlay(table, "judge", &config.judge)?;
-    let navigator = model_spec_overlay(table, "navigator", &config.navigator)?;
-    let navigator_max_invocations =
-        parse_navigator_max_invocations(table, config.navigator_max_invocations)?;
-    reject_transition_mode(table, "machine")?;
+    let mut loops = Vec::with_capacity(m.loops.len());
+    for (i, l) in m.loops.into_iter().enumerate() {
+        if l.states.is_empty() {
+            return Err(CoreError::machine(format!(
+                "loops[{i}]: `:states` must not be empty"
+            )));
+        }
+        loops.push(LoopSpec {
+            name: l.name,
+            states: l.states,
+            max_cycles: l.max_cycles,
+            on_exhausted: l.on_exhausted.unwrap_or(OnExhausted::Escalate),
+        });
+    }
+
+    let defaults = m
+        .defaults
+        .map(|d| Defaults {
+            model: ModelChoice {
+                provider: d.provider,
+                model: d.model,
+                thinking: d.thinking,
+            },
+            skills: d.skills,
+            mcp: d.mcp,
+        })
+        .unwrap_or_default();
+
+    // A machine may *tighten* the global budgets, never loosen them.
+    let budgets = m
+        .budgets
+        .map(|b| b.to_ir())
+        .unwrap_or_default()
+        .tighten(config.budgets);
+
+    let judge = overlay(
+        m.judge.as_ref().map(wire::ModelChoice::to_ir),
+        &config.judge,
+    );
+    let navigator = overlay(
+        m.navigator.as_ref().map(wire::Navigator::to_ir),
+        &config.navigator,
+    );
+    let navigator_max_invocations = m
+        .navigator
+        .as_ref()
+        .and_then(|n| n.max_invocations)
+        .unwrap_or(config.navigator_max_invocations);
 
     Ok(Machine {
-        ticket,
+        ticket: m.ticket,
         task,
         plan,
-        qa_cases,
+        qa_cases: m.qa_cases,
         entry,
         terminals,
-        escalation_state,
+        escalation_state: m.escalation_state,
         defaults,
         states,
         transitions,
@@ -627,9 +429,21 @@ pub fn machine_from_table(
     })
 }
 
+/// Overlay an authored partial model choice onto a fully-specified base.
+fn overlay(choice: Option<ModelChoice>, base: &ModelSpec) -> ModelSpec {
+    match choice {
+        None => base.clone(),
+        Some(c) => c.resolve(base),
+    }
+}
+
 /// Overlay an evaluated config table onto [`Config::defaults`].
 pub fn config_from_table(table: &mlua::Table, base: Config) -> Result<Config> {
-    let provider = get_str(table, "provider")?.unwrap_or(base.provider);
+    reject_transition_mode(table, "config")?;
+    reject_context(table)?;
+    let c: wire::Config = from_table(table, "config")?;
+
+    let provider = c.provider.unwrap_or(base.provider);
     // The top-level `:provider` is the base of all three role chains, not a
     // stored-and-ignored default: it is applied *under* each role table, so a
     // role naming its own still wins and a toolbox switching providers only
@@ -638,51 +452,43 @@ pub fn config_from_table(table: &mlua::Table, base: Config) -> Result<Config> {
         provider: provider.clone(),
         ..spec.clone()
     };
-    let worker = model_spec_overlay(table, "worker", &with_provider(&base.worker))?;
-    let judge = model_spec_overlay(table, "judge", &with_provider(&base.judge))?;
-    let navigator = model_spec_overlay(table, "navigator", &with_provider(&base.navigator))?;
-    let navigator_max_invocations =
-        parse_navigator_max_invocations(table, base.navigator_max_invocations)?;
-    let default_skills = get_str_vec(table, "default-skills")?.unwrap_or(base.default_skills);
-    let default_mcp = get_str_vec(table, "default-mcp")?.unwrap_or(base.default_mcp);
-    let pi_extensions = get_str_vec(table, "pi-extensions")?.unwrap_or(base.pi_extensions);
 
-    let budgets = match get_table(table, "budgets")? {
+    let budgets = match c.budgets {
         None => base.budgets,
-        Some(t) => Budgets {
-            usd: get_f64(&t, "usd")?.or(base.budgets.usd),
-            wallclock_s: get_u64(&t, "wallclock-s")?.or(base.budgets.wallclock_s),
-            max_transitions: get_u32(&t, "max-transitions")?.or(base.budgets.max_transitions),
+        Some(b) => loop_core::Budgets {
+            usd: b.usd.or(base.budgets.usd),
+            wallclock_s: b.wallclock_s.or(base.budgets.wallclock_s),
+            max_transitions: b.max_transitions.or(base.budgets.max_transitions),
         },
     };
 
-    // `:context` was a two-valued knob whose second value was never wired to
-    // anything. Rather than leave it accepted-and-ignored, say so where the
-    // author will see it.
-    if get_value(table, "context")? != mlua::Value::Nil {
-        return Err(CoreError::machine(
-            "`:context` was removed — the rolling digest is the only continuity channel between \
-             stages; interpolate `$LEDGER_DIGEST` in a playbook and tune `:digest-last-n`"
-                .to_string(),
-        ));
-    }
-
-    let digest_last_n = get_u32(table, "digest-last-n")?
-        .map(|n| n as usize)
-        .unwrap_or(base.digest_last_n);
-    reject_transition_mode(table, "config")?;
-
     Ok(Config {
-        provider,
-        worker,
-        judge,
-        navigator,
-        navigator_max_invocations,
-        default_skills,
-        default_mcp,
-        pi_extensions,
+        worker: overlay(
+            c.worker.as_ref().map(wire::ModelChoice::to_ir),
+            &with_provider(&base.worker),
+        ),
+        judge: overlay(
+            c.judge.as_ref().map(wire::ModelChoice::to_ir),
+            &with_provider(&base.judge),
+        ),
+        navigator: overlay(
+            c.navigator.as_ref().map(wire::Navigator::to_ir),
+            &with_provider(&base.navigator),
+        ),
+        navigator_max_invocations: c
+            .navigator
+            .as_ref()
+            .and_then(|n| n.max_invocations)
+            .unwrap_or(base.navigator_max_invocations),
+        default_skills: c.default_skills.unwrap_or(base.default_skills),
+        default_mcp: c.default_mcp.unwrap_or(base.default_mcp),
+        pi_extensions: c.pi_extensions.unwrap_or(base.pi_extensions),
         budgets,
-        digest_last_n,
+        digest_last_n: c
+            .digest_last_n
+            .map(|n| n as usize)
+            .unwrap_or(base.digest_last_n),
+        provider,
         pi_bin: base.pi_bin,
         paths: base.paths,
     })

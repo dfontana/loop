@@ -233,3 +233,56 @@ fn syntax_error_points_at_fennel_source() {
         "expected `filename:line:...` in the error, got: {msg}"
     );
 }
+
+/// A misspelled key is an error that names it, not a key silently ignored.
+///
+/// This is the capability the serde loader added over the hand-written walker
+/// it replaced: that one read the keys it recognized and dropped the rest, so
+/// `:playbok` produced a baffling complaint that `:playbook` was missing —
+/// about a line where something spelled almost exactly that is right there.
+#[test]
+fn a_misspelled_key_is_rejected_by_name() {
+    let vm = common::vm();
+    let config = common::default_config();
+    let path = common::fixture("typo_key.fnl");
+
+    let err = vm.load_machine(&path, &config).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("playbok"),
+        "must name the offending key: {msg}"
+    );
+    assert!(
+        msg.contains("playbook"),
+        "must list the fields that do exist: {msg}"
+    );
+}
+
+/// A bad value deep in the file reports *where* it is.
+///
+/// A machine with fifteen states and one bad `:thinking` is undebuggable if
+/// the error says only "unknown variant". The path comes from
+/// `serde_path_to_error` wrapping the deserializer, so it stays correct as
+/// fields are added without anyone maintaining a context string.
+#[test]
+fn a_bad_value_reports_its_path_and_the_valid_ones() {
+    let vm = common::vm();
+    let config = common::default_config();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("machine.fnl");
+    std::fs::write(
+        &path,
+        r#"{:ticket "T" :task "t" :plan "p" :entry "a" :terminals ["done"]
+            :states {:a {:playbook "p"} :qa-staging {:playbook "q" :thinking "hihg"}}
+            :transitions [{:from "a" :to "done"}]}"#,
+    )
+    .unwrap();
+
+    let err = vm.load_machine(&path, &config).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("qa-staging") && msg.contains("thinking"),
+        "must locate the bad value: {msg}"
+    );
+    assert!(msg.contains("high"), "must list the valid values: {msg}");
+}
