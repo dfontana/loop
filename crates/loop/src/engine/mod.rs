@@ -1,6 +1,6 @@
 //! The control loop — the deterministic half of the system.
 //!
-//! docs/02-how-it-works.md is the spec; this module is its transcription. The
+//! skills/loop-authoring/references/runtime.md is the spec; this module is its transcription. The
 //! loop body contains no LLM call: every decision an agent makes (the worker's
 //! proposal, the judge's verdict, the navigator's choice) arrives through a
 //! fixed contract, is recorded, and is bounded.
@@ -69,7 +69,7 @@ pub struct Engine<'a> {
 /// How many times a stage may die mid-flight before the run escalates rather
 /// than retrying. A crash is worth retrying — a flaky spawn, an OOM, a dropped
 /// connection — but a stage that dies every time is a real fault, and spinning
-/// on it burns budget silently, which is the failure docs/05-design-notes.md exists to stop.
+/// on it burns budget silently, which is the failure docs/design-notes.md exists to stop.
 const MAX_CRASH_ATTEMPTS: u32 = 3;
 
 /// How a finished run came out — the `run_finished` payload, owned.
@@ -110,7 +110,7 @@ impl Outcome {
 impl Engine<'_> {
     /// Drive the machine to a terminal, appending every decision to the ledger.
     ///
-    /// The loop, per docs/02-how-it-works.md:
+    /// The loop, per skills/loop-authoring/references/runtime.md:
     ///
     /// 1. Fold the ledger. A fresh run appends `run_started`; a resume picks up at the folded
     ///    [`crate::core::ResumePoint`].
@@ -635,7 +635,7 @@ impl Engine<'_> {
         // and the Navigator should answer, while a crash is infrastructure
         // failing under a worker that never got to decide anything. Escalating
         // on a crash abandons a run that a re-entry would have finished
-        // (docs/02-how-it-works.md "Resuming an interrupted run", docs/05-design-notes.md).
+        // (skills/loop-authoring/references/runtime.md "Resuming an interrupted run", docs/design-notes.md).
         //
         // No `worker_output` is written, so the ledger tail stays
         // "state_entered with nothing after it" — exactly the shape the fold
@@ -674,7 +674,7 @@ impl Engine<'_> {
 
         // Capture artifacts *before* `worker_output` — if a crash lands between
         // them, re-entry redoes the stage and nothing already-durable is lost
-        // (docs/02-how-it-works.md).
+        // (skills/loop-authoring/references/runtime.md).
         //
         // A claim is worker-authored, so an unusable one — a path that was
         // never written, a typo, a file outside the project root — is an
@@ -750,7 +750,7 @@ enum NavOutcome {
 }
 
 /// The most recent `worker_output` for `state` — what the Judge is allowed to
-/// see (never the worker's own claim of success, docs/05-design-notes.md).
+/// see (never the worker's own claim of success, docs/design-notes.md).
 fn last_worker_output_for(events: &[Event], state: &str) -> (String, Vec<Artifact>) {
     crate::core::last(events, |e| match &e.payload {
         EventPayload::WorkerOutput {

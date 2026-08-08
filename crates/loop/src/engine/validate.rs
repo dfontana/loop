@@ -1,4 +1,4 @@
-//! `loop validate` — the static linter (docs/05-design-notes.md).
+//! `loop validate` — the static linter (docs/design-notes.md).
 //!
 //! Machine authoring errors are the cheapest class of failure to catch and the
 //! most annoying to debug at run time: an unreachable state, a dangling
@@ -282,8 +282,8 @@ pub fn validate(
     // terminal here: the engine commits to it directly and then runs it like
     // any other stage, which is how a machine gets a "go do recovery work"
     // destination rather than only a "give up here" one. This used to demand a
-    // terminal, disagreeing with the loader, docs/03-customizing.md, and the
-    // linter, loader, docs/03-customizing.md and engine must agree on this.
+    // terminal, disagreeing with the loader, skills/loop-authoring/references/machine.md, and the
+    // linter, loader, skills/loop-authoring/references/machine.md and engine must agree on this.
     if let Some(esc) = &machine.escalation_state
         && !machine.declares(esc)
     {

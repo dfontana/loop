@@ -28,7 +28,7 @@ impl GuardReport {
 ///   the other side.
 /// - The Judge sees the worker's output digest, artifact paths, and the
 ///   check's output — never the worker's own claim that it succeeded
-///   (docs/05-design-notes.md).
+///   (docs/design-notes.md).
 ///
 /// The edge is already known to exist: it was resolved out of the machine's
 /// declared transitions by `Machine::edge`, or the Navigator picked it from the

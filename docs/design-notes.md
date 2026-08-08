@@ -1,6 +1,6 @@
 # Design notes
 
-Every other doc in this set describes what `loop` does and how to drive it. This one is the argument: why the system is shaped this way, what each choice costs, what was tried and taken back out, and which limits come with it. If you are trying to change `loop` rather than use it, start here.
+The [`loop-authoring` skill](../skills/loop-authoring/SKILL.md) describes what `loop` does and how to drive it. This one is the argument: why the system is shaped this way, what each choice costs, what was tried and taken back out, and which limits come with it. If you are trying to change `loop` rather than use it, start here.
 
 ## The problem
 
@@ -20,7 +20,7 @@ States are stages; edges are claims. "Implementation is done enough to review" i
 
 The graph is also the unit of reuse, and now the unit you keep. A ticket's machine is meant to be hacked into shape in five minutes and thrown away with the branch; what makes that affordable is that it starts as a copy of a directory that already worked — the bundled machine, or one you kept from a previous ticket and pointed `loop init --from` at. Almost none of it is original.
 
-Making the graph a declared value buys a few things for free that a prompt never gives you. `loop validate` walks it statically — reachability, dangling stage prompts, a state with no path to any terminal, an unguarded edge — and `loop diagram` renders it as mermaid without touching the filesystem, because the graph is a value and not a behaviour. Both are in [the CLI reference](04-cli-reference.md).
+Making the graph a declared value buys a few things for free that a prompt never gives you. `loop validate` walks it statically — reachability, dangling stage prompts, a state with no path to any terminal, an unguarded edge — and `loop diagram` renders it as mermaid without touching the filesystem, because the graph is a value and not a behaviour. Both are in [the CLI reference](../skills/loop-authoring/references/cli.md).
 
 The cost is real: you now maintain a second artifact per ticket, and a badly drawn graph fails in ways a prompt cannot — a state nothing reaches, a loop head no edge re-enters. That failure mode is why `validate` exists, and why it errors rather than warns on most of it.
 
@@ -30,7 +30,7 @@ This is the thesis. An agent grading its own work is _the_ failure mode, so the 
 
 Three mechanisms carry that, in order of how hard they are to argue with.
 
-**The proposal is validated against the graph, not trusted.** A Worker names its next state in a handoff file; the harness looks that name up in the current state's outgoing edges before anything moves. A target that is not a declared neighbour does not become one — it routes to the Navigator. (See [the handoff protocol](02-how-it-works.md#the-handoff-protocol).)
+**The proposal is validated against the graph, not trusted.** A Worker names its next state in a handoff file; the harness looks that name up in the current state's outgoing edges before anything moves. A target that is not a declared neighbour does not become one — it routes to the Navigator. (See [the handoff protocol](../skills/loop-authoring/references/runtime.md#the-handoff-protocol).)
 
 This used to be enforced one step earlier, by an injected `transition` tool whose `to` parameter was typed as an enum of reachable states, so an invalid edge was unrepresentable rather than merely rejected. That was a genuinely stronger constraint and it is worth being honest that it is gone. What makes the loss small is that it was never the thing doing the work: the harness re-checked the target against the graph regardless, because the tool ran inside the agent's process and nothing inside that process is evidence. The enum saved a Navigator spawn on a bad proposal. It did not prevent a bad commit, because the check that prevents a bad commit is downstream of it and still runs.
 
@@ -88,7 +88,7 @@ The event schema is a compatibility surface with no version marker — no `seq`,
 
 The envelope carries one field beyond `ts` and the payload: `elapsed_s`, the run's accumulated wallclock. It is there because time is the one budget the ledger cannot reconstruct — timestamps include the hours a run sat interrupted, so a resumed run computing elapsed from `ts` would be instantly over budget, and a resumed run computing it from its own process start would have no budget at all. Carrying the accumulator forward on every append is what makes `:wallclock-s` bound the run rather than the session.
 
-And resume granularity is per-event, which means an interrupted stage re-runs from the top at the next attempt number rather than picking up mid-work. That is a straightforward consequence of not checkpointing inside a stage, and it makes **stage idempotency a real authoring requirement**: an `open-pr` stage has to check for an existing PR, a deploy has to be keyed on something stable. The mechanics are in [how it works](02-how-it-works.md).
+And resume granularity is per-event, which means an interrupted stage re-runs from the top at the next attempt number rather than picking up mid-work. That is a straightforward consequence of not checkpointing inside a stage, and it makes **stage idempotency a real authoring requirement**: an `open-pr` stage has to check for an existing PR, a deploy has to be keyed on something stable. The mechanics are in [the runtime reference](../skills/loop-authoring/references/runtime.md).
 
 ## Why Fennel
 
@@ -112,7 +112,7 @@ Reuse is a copy rather than a lookup. `loop init --from <DIR>` copies a `.loop/`
 
 **What that gave up is real.** There is no shared library any more. Improving a `review` stage prompt once and having every ticket pick it up is gone — you fix the ticket in front of you, and you re-copy into the next one. A kit of directories you `--from` accumulates the same drift a vendored dependency does, and nothing in loop reconciles it. If you run many tickets against one workflow, you will feel this.
 
-It was traded for the paragraph above it. A shared library that propagates propagates _mid-run_: editing a toolbox stage prompt silently changed the next stage of every ticket then in flight, which is the same property seen from the side where it hurts. The old design admitted that in its own text — unpinned resolution "does mean a toolbox edit lands on the next stage that resolves it", written as an acceptable cost — and that sentence is what eventually killed it. The current design pays a different, quieter price and does not pretend otherwise. Paths are enumerated in [customizing](03-customizing.md#where-configuration-lives).
+It was traded for the paragraph above it. A shared library that propagates propagates _mid-run_: editing a toolbox stage prompt silently changed the next stage of every ticket then in flight, which is the same property seen from the side where it hurts. The old design admitted that in its own text — unpinned resolution "does mean a toolbox edit lands on the next stage that resolves it", written as an acceptable cost — and that sentence is what eventually killed it. The current design pays a different, quieter price and does not pretend otherwise. Paths are enumerated in [the machine reference](../skills/loop-authoring/references/machine.md#where-everything-lives).
 
 ## Skills bound instructions, not capability
 

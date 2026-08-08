@@ -1,7 +1,7 @@
 //! The append-only JSONL run record: getting events on and off disk, capturing
 //! artifacts, and rendering the digest.
 //!
-//! See docs/02-how-it-works.md. The contract, in one line: **state is never stored,
+//! See skills/loop-authoring/references/runtime.md. The contract, in one line: **state is never stored,
 //! only folded** — so there is no mutable state file to desync from the log.
 //! The fold itself lives in [`crate::core::fold`]; this module is its I/O half.
 
@@ -162,8 +162,8 @@ fn read_content(path: &Path) -> Result<String> {
 /// non-empty line": that is the crash-mid-write case, and it costs at most the
 /// one event still in flight. An unparseable line with any non-empty line after
 /// it is real corruption and an error, because that is history being lost
-/// rather than a write being interrupted (docs/02-how-it-works.md,
-/// docs/05-design-notes.md).
+/// rather than a write being interrupted (skills/loop-authoring/references/runtime.md,
+/// docs/design-notes.md).
 struct Scan {
     events: Vec<Event>,
     /// Byte offset at which a torn trailing line starts.
@@ -210,7 +210,7 @@ fn scan(content: &str, path: &Path) -> Result<Scan> {
 /// line becomes interior, and every subsequent read fails as corruption. A run
 /// interrupted mid-write would resume once and then be permanently unreadable.
 ///
-/// Repairing on open (docs/05-design-notes.md says the reader "tolerates and
+/// Repairing on open (docs/design-notes.md says the reader "tolerates and
 /// truncates") makes the crash cost exactly what it should: the one event that
 /// was still in flight, and nothing else. Idempotent, so opening a healthy
 /// ledger does no I/O beyond the read.

@@ -143,7 +143,7 @@ impl Scaffold {
 /// it made the new ticket start life owning a completed run: `loop run` refused
 /// with "already has a run", and `loop status` reported the *source* ticket's
 /// outcome. `init` documents that it "does not create `artifacts/`,
-/// `ledger.jsonl`, or `run/`" (docs/04-cli-reference.md); copying them was that
+/// `ledger.jsonl`, or `run/`" (skills/loop-authoring/references/cli.md); copying them was that
 /// promise being broken by the other branch.
 const RUN_ARTIFACTS: &[&str] = &["ledger.jsonl", "run", "artifacts"];
 

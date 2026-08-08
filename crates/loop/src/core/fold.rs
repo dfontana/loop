@@ -34,7 +34,7 @@ pub enum FoldStatus {
     Finished(RunStatus),
 }
 
-/// Where `loop resume` picks up, per docs/02-how-it-works.md.
+/// Where `loop resume` picks up, per skills/loop-authoring/references/runtime.md.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub enum ResumePoint {
     /// Nothing to do — the ledger ends in `run_finished`.
@@ -44,7 +44,7 @@ pub enum ResumePoint {
     Fresh,
     /// Enter (or re-enter) this state. `crashed` marks a `state_entered` with no
     /// following `worker_output` — the stage died mid-flight and re-runs from
-    /// scratch, which is why stages must be idempotent (docs/02-how-it-works.md).
+    /// scratch, which is why stages must be idempotent (skills/loop-authoring/references/runtime.md).
     EnterState { state: StateId, crashed: bool },
     /// A `worker_output` exists but no `transition_committed`: resume at the
     /// guard check for this proposal.
@@ -129,7 +129,7 @@ impl RunState {
 
 /// Fold the event log into the current run state.
 ///
-/// Rules (docs/02-how-it-works.md):
+/// Rules (skills/loop-authoring/references/runtime.md):
 /// - `state_entered` bumps `attempts[(state, cycle)]` and sets `current`.
 /// - `transition_committed` sets `current = to`; the caller tells cycles apart
 ///   via [`fold_with_loop_heads`] — plain `fold` counts a re-entry of any state

@@ -14,7 +14,7 @@ description: Tell an infrastructure flake apart from a real bug before deciding 
   prompt, which is bound to a state and so has a model to influence; loop
   never opens a skill at all, so they would be silently inert.
 
-  See docs/03-customizing.md.
+  See the loop-authoring skill: references/stage-prompts.md.
 -->
 
 # Situational guidance: is this transient, or real?

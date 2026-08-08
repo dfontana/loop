@@ -47,20 +47,24 @@ loop session --latest implement   # newest one, no id needed (scripts, CI)
 
 The listing is columns, not a menu — field 6 is the session id in every row — so choosing is the shell's job: `loop sessions | fzf | awk '{print $6}' | xargs loop session`.
 
-Full walkthrough: [Getting started](docs/01-getting-started.md).
+Full walkthrough, and every key you can put in a machine: the [`loop-authoring` skill](skills/loop-authoring/SKILL.md).
 
 ## Documentation
 
-| Doc | What's in it |
+Everything about **using** loop — authoring a machine, writing stage prompts and skills, the runtime semantics, and the CLI — lives in the [`loop-authoring` skill](skills/loop-authoring/). It ships alongside the binary and is written to be read by a coding agent as much as by you: point one at it and describe your ticket in prose, and it can scaffold, validate, and explain the `.loop/` it built.
+
+| Where | What's in it |
 | --- | --- |
-| [01 — Getting started](docs/01-getting-started.md) | Install, scaffold a ticket, run your first loop, read the result |
-| [02 — How a run works](docs/02-how-it-works.md) | The run loop, the three roles and how each one answers, guards, budgets, the ledger, and how to inspect a run in flight |
-| [03 — Customizing a loop](docs/03-customizing.md) | Every key in `machine.fnl`, plus stage prompts, skills, MCP, template variables, and check commands |
-| [04 — CLI reference](docs/04-cli-reference.md) | Every command, flag, environment variable, and exit code |
-| [05 — Design notes](docs/05-design-notes.md) | Why it works this way, the tradeoffs, and the known gaps |
+| [skills/loop-authoring/SKILL.md](skills/loop-authoring/SKILL.md) | The workflow, end to end, and the rules that prevent most failures |
+| [· references/machine.md](skills/loop-authoring/references/machine.md) | Every `machine.fnl` key — states, transitions, guards, loops, budgets — with a complete annotated machine |
+| [· references/stage-prompts.md](skills/loop-authoring/references/stage-prompts.md) | Stage prompts vs. skills, name resolution, frontmatter, template variables, model resolution, MCP |
+| [· references/runtime.md](skills/loop-authoring/references/runtime.md) | The run loop, the three roles, the handoff protocol, the ledger schema, artifacts, resume |
+| [· references/cli.md](skills/loop-authoring/references/cli.md) | Every command, flag, environment variable, and exit code |
+| [· references/recipes.md](skills/loop-authoring/references/recipes.md) | Interview checklist, machine shapes worth copying, and a triage table for a run that went wrong |
+| [docs/design-notes.md](docs/design-notes.md) | Why it works this way, the tradeoffs, the reversed decisions, and the known gaps |
 | [examples/](examples/) | A complete worked ticket — a real `.loop/`, and the ledger the run produced |
 
-If you are evaluating the design rather than using it, read **05** first, then **02**.
+If you are evaluating the design rather than using it, read the **design notes** first, then `references/runtime.md`.
 
 ## How it fits with pi
 
@@ -90,4 +94,4 @@ Which means the only pi-specific code left is a handful of argv builders, all of
 
 Working, and under active development. The `loop` crate in `crates/` drives `pi` (`crates/mock-pi` is its offline stand-in, for the tests); machines are authored in Fennel and evaluated in an embedded Lua VM. Everything a run reads or writes is under `<project>/.loop/`, including the rendered prompts, which go in `.loop/run/` and are gitignored.
 
-The limits that come with the design — stage-level recovery, budgets sampled between stages, skills that scope instructions rather than capability — are written down in [design notes](docs/05-design-notes.md#limits-we-accept) rather than left for you to discover.
+The limits that come with the design — stage-level recovery, budgets sampled between stages, skills that scope instructions rather than capability — are written down in [design notes](docs/design-notes.md#limits-we-accept) rather than left for you to discover.

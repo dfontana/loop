@@ -8,6 +8,16 @@ Use the project-local mise tasks for all test, formatting, and linting work:
 
 Do not invoke the underlying lifecycle commands directly when a mise task exists.
 
+# Docs
+
+Two audiences, two places, and they do not overlap.
+
+`skills/loop-authoring/` is the **user-facing** documentation, packaged as an agent skill so it can ship alongside the binary: `SKILL.md` plus five reference files covering machine keys, stage prompts and skills, runtime semantics, the CLI, and recipes. It is strictly about _using_ loop and must stay self-sufficient — nothing in it may link out to `docs/`, `crates/`, or the repo at large, because it is read in projects that have none of those. `.claude/skills/loop-authoring` is a symlink to it.
+
+`docs/design-notes.md` is the **contributor-facing** argument: why the system is shaped this way, what was reversed, and the limits that come with it.
+
+A behavior change lands in the skill in the same commit. Source comments cite the skill reference that specifies them.
+
 # Layout
 
 Two crates. `crates/loop` is the whole harness — library and `loop` binary — and `crates/mock-pi` is the scripted stand-in for `pi` that keeps the tests offline and free. `mock-pi` stays separate because the tests need it as a real executable on disk.

@@ -413,7 +413,7 @@ pub fn state_preview(r: &Resolver<'_>, id: &StateId) -> String {
     rep.field("session id", r.session_id(id, 1, 1));
 
     // The variables the body actually writes. A variable only reaches the
-    // agent where the stage prompt interpolates it (docs/03-customizing.md), so
+    // agent where the stage prompt interpolates it (skills/loop-authoring/references/stage-prompts.md), so
     // this list is the stage's real context, not the namespace's size.
     let context = Context::representative(m, id);
     let vars = context.to_map();

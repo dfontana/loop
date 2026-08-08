@@ -85,7 +85,7 @@ impl<'a> Resolver<'a> {
 
 /// The context variables that also travel as environment, where a stage's
 /// tooling reads them to key its idempotency on the cycle
-/// (docs/03-customizing.md).
+/// (skills/loop-authoring/references/stage-prompts.md).
 ///
 /// Named once, here. This list used to exist three times — built by hand in
 /// `Resolver::env`, again (as a superset) by [`Context::to_map`], and a third

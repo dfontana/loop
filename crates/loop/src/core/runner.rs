@@ -71,7 +71,7 @@ pub fn with_stderr_tail(mut detail: String, stderr_tail: &str) -> String {
 /// value that fills [`JudgeSpec::worker_digest`].
 ///
 /// It must exclude the worker's own pass/fail claim: the Judge grades
-/// artifacts, not self-assessment (docs/05-design-notes.md). The exclusion is
+/// artifacts, not self-assessment (docs/design-notes.md). The exclusion is
 /// structural, not a filter — this takes `summary` (what `worker_output`
 /// records the worker *did*) and the artifact list, never the
 /// `transition_proposed.rationale`, which is exactly where a self-graded "QA

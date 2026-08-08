@@ -7,7 +7,7 @@
 //! `--no-builtin-tools`, `--no-extensions`,
 //! `--append-system-prompt <text-or-path>`, then the positional message.
 //!
-//! One correction against docs/02-how-it-works.md: `--append-system-prompt`
+//! One correction against skills/loop-authoring/references/runtime.md: `--append-system-prompt`
 //! does **not** use an `@path` convention. pi's `resolvePromptInput` calls
 //! `existsSync` on the raw argument and reads it as a file if it exists,
 //! otherwise treats it as literal text — so we pass the rendered stage prompt's
@@ -114,7 +114,7 @@ pub fn worker_command(pi_bin: &str, spec: &WorkerSpec) -> Command {
 /// pi-extension (`mcp`, …) from being auto-discovered and handing them a side
 /// door, `--no-skills` stops ambient skill discovery, and there is nothing
 /// injected to replace any of it. That independence is what makes the Judge's
-/// verdict trustworthy (docs/05-design-notes.md) — do not add `read` "for
+/// verdict trustworthy (docs/design-notes.md) — do not add `read` "for
 /// convenience".
 ///
 /// It is one builder rather than two because that isolation is a property of

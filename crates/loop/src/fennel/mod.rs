@@ -45,7 +45,7 @@ impl FennelVm {
         // SAFETY: no untrusted code is ever loaded into this VM — machine and
         // config files are authored by the person invoking the harness, and
         // full stdlib access (including `debug`) is required by fennel.lua
-        // itself and is an explicit, documented design choice (docs/05-design-notes.md).
+        // itself and is an explicit, documented design choice (docs/design-notes.md).
         let lua = unsafe { mlua::Lua::unsafe_new() };
         let fennel = eval::install_fennel(&lua)?;
         eval::install_loop_module(&lua)?;

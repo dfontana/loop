@@ -45,7 +45,7 @@ loop init PROJ-1500 --from examples/proj-1487
 
 `--from` copies the directory and substitutes the ticket id. Nothing resolves at run time out of a location you have to remember, which means editing this example later cannot change a ticket already in flight — and it means keeping a `.loop/` of your own somewhere is the whole of what a shared toolbox used to be.
 
-The cost is real: a fix to a generic stage prompt does not propagate. You re-copy, or you edit the ticket that needs it. That trade is argued in [design notes](../docs/05-design-notes.md).
+The cost is real: a fix to a generic stage prompt does not propagate. You re-copy, or you edit the ticket that needs it. That trade is argued in [design notes](../docs/design-notes.md).
 
 ## What is loop's own, and what isn't
 

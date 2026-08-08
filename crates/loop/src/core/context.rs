@@ -1,4 +1,4 @@
-//! The context namespace (docs/03-customizing.md) — the `$UPPER_SNAKE` variables a
+//! The context namespace (skills/loop-authoring/references/stage-prompts.md) — the `$UPPER_SNAKE` variables a
 //! stage prompt template can see.
 
 use std::collections::BTreeMap;

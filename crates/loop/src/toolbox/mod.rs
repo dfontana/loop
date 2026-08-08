@@ -1,7 +1,7 @@
 //! Name resolution, template rendering, and everything that has to be on disk
 //! before a `pi` spawn can work.
 //!
-//! See docs/03-customizing.md. Two kinds of authored thing, and the difference
+//! See skills/loop-authoring/references/stage-prompts.md. Two kinds of authored thing, and the difference
 //! is what reaches the model, not what the file looks like — both are markdown
 //! with YAML frontmatter:
 //!

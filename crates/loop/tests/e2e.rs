@@ -476,7 +476,7 @@ fn a_crashed_stage_is_retried_and_the_run_still_completes() {
     assert_eq!(events.last().unwrap()["status"], "done");
 }
 
-/// The crash-resume contract of docs/02-how-it-works.md: a ledger whose last write was torn
+/// The crash-resume contract of skills/loop-authoring/references/runtime.md: a ledger whose last write was torn
 /// off mid-JSON is repaired, the interrupted stage is re-entered, and the run
 /// finishes. Before the ledger repaired its own tail, `resume` would append
 /// one event past the torn line and then be permanently unreadable.

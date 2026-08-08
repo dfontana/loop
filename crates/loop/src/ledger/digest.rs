@@ -1,5 +1,5 @@
 //! The rolling ledger digest — the deterministic continuity channel between
-//! stages (docs/02-how-it-works.md, "Data flow between stages").
+//! stages (skills/loop-authoring/references/runtime.md, "Data flow between stages").
 //!
 //! Never transcripts: the last N committed transitions with their rationales
 //! and pinned artifact references. Cost and drift are the reasons this is a

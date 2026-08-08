@@ -1,7 +1,7 @@
 ;; examples/proj-1487/machine.fnl  →  ./.loop/machine.fnl
 ;;
 ;; The per-ticket machine for PROJ-1487, in the v1 plain-table Fennel schema
-;; (docs/05-design-notes.md; the schema reference is crates/loop/src/fennel/convert.rs).
+;; (the key-by-key reference is the loop-authoring skill: references/machine.md).
 ;;
 ;; Everything this machine references lives beside it: the prose it reads
 ;; (task.md, plan.md), the stage prompts its states name, the skills those stages
@@ -62,7 +62,7 @@
   ;; What keeps this stage from grading its own homework is not what it can
   ;; reach — it is that the edges out of it are gated on `:check` commands the
   ;; harness runs itself, and on a Judge that never sees this stage's own
-  ;; claims (docs/05-design-notes.md).
+  ;; claims (loop-authoring skill: references/runtime.md).
   ;; :mcp names servers in YOUR ~/.pi/agent/mcp.json — loop neither reads nor
   ;; ships that file. Every server starts a session disconnected, so the entry
   ;; message asks this stage to `mcp({connect: "warehouse"})` before it works.
@@ -118,7 +118,7 @@
 
   ;; The three-way fail routing: a transient flake retries in place with
   ;; backoff and touches no code, a real failure spawns the debugger, a pass
-  ;; moves on (docs/05-design-notes.md). Each edge asserts its own branch of one script's
+  ;; moves on. Each edge asserts its own branch of one script's
   ;; taxonomy, so "transient" is decided by a versioned regex set and an exit
   ;; code rather than by a tired agent that would rather retry than debug.
   {:from "qa-staging" :to "qa-staging"
