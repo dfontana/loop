@@ -345,6 +345,39 @@ fn an_unopinionated_machine_gets_the_built_in_defaults() {
     assert_eq!(m.navigator_max_invocations, floor.navigator_max_invocations);
     assert_eq!(m.digest_last_n, floor.digest_last_n);
     assert_eq!(m.pi_extensions, floor.pi_extensions);
+    // An edge that says nothing about retries still gets a bound, because the
+    // unbounded reading of `:on-fail "retry"` spends the whole dollar budget.
+    assert_eq!(m.transitions[0].max_attempts, floor.transition_max_attempts);
+}
+
+#[test]
+fn max_attempts_is_read_per_edge_and_must_be_at_least_one() {
+    let m = load_source(
+        r#"{:ticket "T" :task "t" :plan "p" :entry "a" :terminals ["done"]
+            :states {:a {:stage-prompt "p"} :b {:stage-prompt "p"}}
+            :transitions [{:from "a" :to "b" :max-attempts 7}
+                          {:from "b" :to "done"}]}"#,
+    )
+    .expect("load_machine");
+    assert_eq!(m.transitions[0].max_attempts, 7);
+    assert_eq!(
+        m.transitions[1].max_attempts,
+        Floor::default().transition_max_attempts,
+        "an edge that omits it is unaffected by one that sets it"
+    );
+
+    // Zero would be a stage that can never run its own edge — a typo that would
+    // otherwise read as an instantly-exhausted retry.
+    let err = load_source(
+        r#"{:ticket "T" :task "t" :plan "p" :entry "a" :terminals ["done"]
+            :states {:a {:stage-prompt "p"}}
+            :transitions [{:from "a" :to "done" :max-attempts 0}]}"#,
+    )
+    .expect_err("`:max-attempts 0` must not load");
+    assert!(
+        err.contains("max-attempts") && err.contains("at least 1"),
+        "the error must name the key and the bound: {err}"
+    );
 }
 
 /// Keys that only ever lived in `config.fnl` must say where they went, rather

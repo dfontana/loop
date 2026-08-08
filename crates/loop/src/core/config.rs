@@ -210,6 +210,11 @@ pub struct Floor {
     pub judge: ModelSpec,
     pub navigator: ModelSpec,
     pub navigator_max_invocations: u32,
+    /// Default `:max-attempts` on an edge that doesn't set one — the bound on
+    /// `:on-fail "retry"`. Low on purpose: an edge that has failed its guard
+    /// three times over is failing for a reason a fourth spawn won't change,
+    /// and each one costs a full stage.
+    pub transition_max_attempts: u32,
 
     // No `default_skills` / `default_mcp`: there is one baseline, the
     // machine's `:defaults`, which `Machine::resolve_skills` unions with the
@@ -236,6 +241,7 @@ impl Default for Floor {
             judge: anthropic("claude-haiku-4-5", Thinking::Low),
             navigator: anthropic("claude-haiku-4-5", Thinking::Low),
             navigator_max_invocations: 5,
+            transition_max_attempts: 3,
             pi_extensions: vec!["mcp".into(), "review-model-selector".into()],
             budgets: Budgets {
                 usd: Some(15.0),

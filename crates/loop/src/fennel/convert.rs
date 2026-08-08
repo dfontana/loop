@@ -67,6 +67,9 @@
 //! - `:check` is a bare command string, or `{:cmd .. :timeout-s ..}`. The
 //!   harness runs it itself; exit 0 passes the edge.
 //! - `:on-fail` is `"retry"` | `"abort"` | `{:route "state-id"}`.
+//! - `:max-attempts` bounds `"retry"` — how many times the source state may run
+//!   against this edge in one cycle before the run escalates. Defaults to
+//!   [`crate::core::Floor::transition_max_attempts`]; `0` is rejected.
 //! - `:mcp` names servers in the **user's own** `mcp.json`, which loop never
 //!   reads. The names ride into the entry message as `mcp({connect: …})`
 //!   instructions, so a name that exists nowhere fails at connect time rather
@@ -399,6 +402,15 @@ pub fn machine_from_table(
                 t.to
             )));
         }
+        // `:max-attempts 0` would mean a stage that can never run its own edge,
+        // which is never what an author meant to write — and it would read as an
+        // instantly-exhausted retry rather than as the typo it is.
+        if t.max_attempts == Some(0) {
+            return Err(CoreError::machine(format!(
+                "transition `{}` -> `{}`: `:max-attempts` must be at least 1",
+                t.from, t.to
+            )));
+        }
         transitions.push(Transition {
             from: t.from.clone(),
             to: t.to.clone(),
@@ -406,6 +418,7 @@ pub fn machine_from_table(
             criteria: t.criteria.clone(),
             on_fail: t.on_fail.clone().unwrap_or_default(),
             backoff_s: t.backoff_s,
+            max_attempts: t.max_attempts.unwrap_or(floor.transition_max_attempts),
         });
     }
 

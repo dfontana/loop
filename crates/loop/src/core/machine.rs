@@ -213,6 +213,14 @@ pub struct Transition {
     pub on_fail: OnFail,
     /// Sleep this long before re-entering the target (transient retry self-loops).
     pub backoff_s: Option<u64>,
+    /// How many times the source state may run against this edge in one cycle
+    /// before the run escalates. Always at least 1 — the first attempt is an
+    /// attempt, not a retry.
+    ///
+    /// This is the only bound on [`OnFail::Retry`]. `max_cycles` cannot serve:
+    /// a retry commits no transition, so a loop head's cycle counter never
+    /// advances past 1 no matter how many times the stage re-runs.
+    pub max_attempts: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]

@@ -481,6 +481,104 @@ fn max_cycles_exhaustion_aborts_when_configured() {
     assert_eq!(drive(&m, &runner, &mut ledger).status, RunStatus::Aborted);
 }
 
+/// The bound that `max_cycles` cannot supply. A retry writes no
+/// `transition_committed`, so the loop head's cycle counter never advances —
+/// which left `:on-fail "retry"` spinning on the dollar budget when a guard
+/// failed for a reason no re-run would fix (a `:check` pointed at a command
+/// that cannot pass, say).
+#[test]
+fn retry_is_bounded_by_the_edges_max_attempts() {
+    let m = machine()
+        .entry("implement")
+        .terminal("done")
+        .escalate_to("blocked")
+        .edge(crate::core::Transition {
+            max_attempts: 2,
+            // The default, spelled out: this is the path under test.
+            on_fail: OnFail::Retry,
+            ..checked_edge("implement", "done", "cargo test")
+        })
+        // The loop that cannot save us: `implement` is its head, and no retry
+        // ever increments the cycle it bounds.
+        .loop_over(loop_spec("fix", &["implement"], 4, OnExhausted::Escalate))
+        .build();
+
+    let runner = FakeRunner::default();
+    let checks = FakeChecks::default();
+    for _ in 0..5 {
+        runner.script_worker(
+            "implement",
+            worker_result(proposal_to("done", "green this time, honest")),
+        );
+        checks.script_fail("2 tests failed");
+    }
+
+    let mut ledger = FakeLedger::default();
+    let outcome = drive_checked(&m, &runner, &checks, &mut ledger);
+
+    assert_eq!(outcome.status, RunStatus::Failed);
+    assert_eq!(outcome.terminal_state.as_deref(), Some("blocked"));
+
+    // Two attempts, then escalation — not a third spawn, and not the five the
+    // runner was willing to give.
+    assert_eq!(ledger.count_of("state_entered"), 2);
+    assert_eq!(runner.worker_calls.borrow().len(), 2);
+    assert_eq!(ledger.attempts(), vec![1, 2]);
+    // The cycle counter stayed at 1 throughout, which is precisely why
+    // `max_cycles: 4` never had anything to bite on.
+    assert_eq!(ledger.state_cycles(), vec![("implement".to_string(), 1); 2]);
+
+    let errors = ledger.errors();
+    assert_eq!(errors.len(), 1, "one fatal, naming the exhausted edge");
+    assert!(
+        errors[0].contains("max_attempts=2"),
+        "the error has to say what bound was hit: {:?}",
+        errors[0]
+    );
+}
+
+/// `max_attempts` bounds retries only. A route is not a second attempt at the
+/// same edge, so it keeps running against the loop's `max_cycles` as before.
+#[test]
+fn max_attempts_does_not_bound_an_on_fail_route() {
+    let m = machine()
+        .entry("implement")
+        .terminal("done")
+        .escalate_to("blocked")
+        .edge(crate::core::Transition {
+            max_attempts: 1,
+            on_fail: OnFail::Route("review".into()),
+            ..judged_edge("implement", "done", "the plan is done")
+        })
+        .edge(edge("review", "implement"))
+        .loop_over(loop_spec("fix", &["implement"], 2, OnExhausted::Escalate))
+        .build();
+
+    let runner = FakeRunner::default();
+    for _ in 0..4 {
+        runner.script_worker("implement", worker_result(proposal_to("done", "done-ish")));
+        runner.script_worker(
+            "review",
+            worker_result(proposal_to("implement", "findings")),
+        );
+        runner.script_judge(verdict(false, "not addressed"));
+    }
+
+    let mut ledger = FakeLedger::default();
+    let outcome = drive(&m, &runner, &mut ledger);
+
+    // `max_cycles: 2` is what stops this, at the second re-entry of the head —
+    // `max_attempts: 1` never fires, because a route never retries.
+    assert_eq!(outcome.status, RunStatus::Failed);
+    assert_eq!(outcome.terminal_state.as_deref(), Some("blocked"));
+    let implement_entries = ledger
+        .entered()
+        .iter()
+        .filter(|(s, _, _)| s == "implement")
+        .count();
+    assert_eq!(implement_entries, 2);
+}
+
 #[test]
 fn navigator_cap_exceeded_escalates_without_spawning() {
     // An unconditional self-loop, so a navigator choice of `debug` is a valid

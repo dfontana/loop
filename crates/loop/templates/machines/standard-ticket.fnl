@@ -80,10 +80,18 @@
  ;; UPGRADE THIS. `:criteria "the suite passed"` is a stopgap — swap in the
  ;; command that actually runs your suite as a `:check` and let the criteria
  ;; cover only what the exit code can't.
+ ;;
+ ;; `:max-attempts` is what stops a bad gate costing real money. `:on-fail
+ ;; "retry"` re-runs the whole stage, and a retry commits no transition — so the
+ ;; `:max-cycles` below never counts it, and a check that CANNOT pass (wrong
+ ;; directory, missing tool) would re-spawn until the dollar budget gave out.
+ ;; Three attempts is the default; say so explicitly on an edge you want to be
+ ;; stricter or more forgiving about.
  :transitions
  [{:from "implement" :to "review"
    :criteria "Every item in the plan is addressed in the diff, the build is green, and no TODO/FIXME markers remain in the changed files."
-   :on-fail "retry"}
+   :on-fail "retry"
+   :max-attempts 3}
 
   ;; A failed review isn't a dead end — it routes back to implement with the
   ;; findings in the ledger digest.

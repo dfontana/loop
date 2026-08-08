@@ -87,6 +87,7 @@ pub fn edge(from: &str, to: &str) -> Transition {
         criteria: None,
         on_fail: OnFail::default(),
         backoff_s: None,
+        max_attempts: crate::core::Floor::default().transition_max_attempts,
     }
 }
 

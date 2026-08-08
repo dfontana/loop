@@ -197,6 +197,9 @@ pub struct Transition {
     pub on_fail: Option<OnFail>,
     #[serde(default)]
     pub backoff_s: Option<u64>,
+    /// Absent means [`crate::core::Floor::transition_max_attempts`].
+    #[serde(default)]
+    pub max_attempts: Option<u32>,
 }
 
 /// `:check` is a bare command string in the common case, or a table when it

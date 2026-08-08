@@ -338,6 +338,11 @@ fn edge_fields(rep: &mut Columns, t: &Transition) {
     }
     rep.field_opt_at(6, "criteria", t.criteria.as_deref());
     rep.field_at(6, "on fail", fmt_on_fail(&t.on_fail));
+    // Only under `retry`: a route or an abort never takes a second attempt, so
+    // the cap would be a number that does nothing on those edges.
+    if matches!(t.on_fail, OnFail::Retry) {
+        rep.field_at(6, "max attempts", t.max_attempts.to_string());
+    }
     rep.field_opt_at(6, "backoff", t.backoff_s.map(|s| format!("{s}s")));
 }
 

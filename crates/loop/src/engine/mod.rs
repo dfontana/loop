@@ -338,6 +338,39 @@ impl Engine<'_> {
         }
     }
 
+    /// An edge's `max_attempts` is spent: the source state has run and failed
+    /// this same edge that many times in one cycle.
+    ///
+    /// Nothing else bounds this. A retry writes no `transition_committed`, so a
+    /// loop head's cycle counter never advances and `max_cycles` never bites;
+    /// before this existed, an edge whose `check` could not pass re-spawned the
+    /// stage until the dollar budget aborted the run — measured at 200 spawns of
+    /// one stage against the bundled machine's $8. Crashes were already capped
+    /// this way ([`MAX_CRASH_ATTEMPTS`]); a guard that keeps failing is the same
+    /// shape of problem and gets the same treatment.
+    fn handle_attempts_exhausted(
+        &mut self,
+        rs: &RunState,
+        from: &str,
+        edge: &Transition,
+        attempts: u32,
+        events: &mut Vec<Event>,
+    ) -> Result<Option<Outcome>> {
+        self.record(
+            events,
+            EventPayload::Error {
+                state: Some(from.to_string()),
+                kind: ErrorKind::Fatal,
+                detail: format!(
+                    "edge `{}` -> `{}` exhausted max_attempts={} ({attempts} attempt(s) at \
+                     `{from}` failed its guard)",
+                    edge.from, edge.to, edge.max_attempts
+                ),
+            },
+        )?;
+        self.escalate(rs, from, events)
+    }
+
     /// Commit a transition. Prospectively enforces `max_cycles` when `to` is a
     /// loop head — the head's cycle counter only ever advances via a
     /// committed transition, so this is the one place the bound can bite.
@@ -390,6 +423,12 @@ impl Engine<'_> {
                 // The guard's own events are already in `events`, so the fold
                 // the retry needs costs no read.
                 let fresh = self.machine.fold(events);
+                // `position_of` counts the attempt that just failed, since its
+                // `state_entered` is in `events` above.
+                let (_, attempts) = self.position_of(&fresh, from);
+                if attempts >= edge.max_attempts {
+                    return self.handle_attempts_exhausted(rs, from, edge, attempts, events);
+                }
                 self.enter_state(&fresh, from.to_string(), false, events)
             }
             OnFail::Abort => self.finish_now(rs, RunStatus::Failed, Some(from.to_string()), events),

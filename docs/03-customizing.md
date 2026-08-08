@@ -171,6 +171,7 @@ A state needs `:stage-prompt` **or** `:prompt`; with neither you get ``state `{i
 | `:check` | no | string, or `{:cmd :timeout-s}` | A command the harness runs itself. Exit 0 passes. |
 | `:criteria` | no | string | What an independent Judge model is asked to decide. |
 | `:on-fail` | no | `"retry"` \| `"abort"` \| `{:route "id"}` | Default `"retry"`. What happens when any tier fails. |
+| `:max-attempts` | no | int ≥ 1 | Default `3`. How many times the source state may run against this edge in one cycle before the run escalates. Bounds `:on-fail "retry"`. |
 | `:backoff-s` | no | int | Seconds to sleep **after** this edge commits. |
 
 What these mean at run time — the tier order, the short-circuit, what the Judge can and cannot see — is [guards](02-how-it-works.md#guards). As keys:
@@ -178,6 +179,7 @@ What these mean at run time — the tier order, the short-circuit, what the Judg
 - **`:check`** is the one signal a Worker cannot author, because it runs in the harness's own subprocess after the stage exits. Writing it is covered under [Check commands](#check-commands). An empty string is rejected: ``transitions[N]: `:check` command is empty — omit the key instead``.
 - **`:criteria`** is prose, handed to the Judge as its system prompt. Use it for what no exit code decides: "every item in the plan is addressed", "this is a real fix, not a widened assertion".
 - **`:on-fail`** applies to the edge, regardless of which tier failed. `"retry"` re-enters the source state at `attempt + 1` and does not consume a transition from the budget. `"abort"` ends the run `Failed`. `{:route "x"}` commits straight to `x` with no guard tiers and no backoff — the usual way to send a failed review back to `implement` with the findings on the ledger.
+- **`:max-attempts`** is the only bound on `"retry"`, and the reason it exists is that the obvious candidate does not work: a retry commits no transition, so a loop head's cycle counter never advances and `:max-cycles` never fires on a stage retrying itself. Reaching the cap escalates and writes a fatal naming the edge and the bound. Raise it for a stage whose guard is genuinely flaky; lower it to `1` to make an edge one-shot without reaching for `"abort"` (which ends the run rather than escalating). It has no effect under `"abort"` or `{:route ...}`, neither of which takes a second attempt, and `loop preview` shows it only on the edges where it can bite. `0` is rejected: ``transition `a` -> `b`: `:max-attempts` must be at least 1``.
 - **`:backoff-s`** sleeps after the commit event is written, so it survives a crash in the sense that the commit is already durable. It is a blocking sleep in the `loop run` process.
 - **`:when` is removed.** The key used to hold a Fennel closure. Using it now is a hard error: ``transitions[N]: `:when` guards were removed — express the condition as a `:check` command the harness runs, or as `:criteria` for the Judge to evaluate``. See [keys that were removed or renamed](#keys-that-were-removed-or-renamed).
 

@@ -246,13 +246,13 @@ Whichever tier failed, the edge's `:on-fail` decides what happens. It is a prope
 
 | `:on-fail` | Behavior |
 | --- | --- |
-| `"retry"` (default) | Re-enter the **source** state at `attempt + 1`, same cycle. |
+| `"retry"` (default) | Re-enter the **source** state at `attempt + 1`, same cycle — up to the edge's `:max-attempts`, then escalate. |
 | `"abort"` | Finish the run immediately as `Failed`. |
 | `{:route "x"}` | Commit straight to `x`. |
 
 Two consequences worth internalizing:
 
-- **A retry does not consume `max_transitions`.** No `transition_committed` is written, so the transition budget is untouched. Retries are free against that budget — and only against that budget: they still cost dollars and wallclock. A tight `:max-cycles` is what actually bounds a thrashing stage, not `max-transitions`.
+- **A retry does not consume `max_transitions`, and `:max-cycles` cannot bound it either.** No `transition_committed` is written, so the transition budget is untouched — and because a loop head's cycle counter only advances on a committed transition, a stage retrying itself stays in cycle 1 forever no matter how tight `:max-cycles` is. What bounds a thrashing stage is the edge's own **`:max-attempts`** (default 3): once the source state has failed that edge that many times in one cycle, the run escalates and records a fatal naming the bound. Without it a `:check` that cannot pass — pointed at a missing tool, say — re-spawned the stage until the dollar budget aborted the run, which measured at 200 spawns of one stage against the bundled machine's `$8`.
 - **A route skips every guard tier and the backoff.** It is an unconditional jump. The edge you route _to_ is not consulted, is not required to exist in `:transitions`, and nothing evaluates whether the destination is a sensible place to be. Routes are also **not counted** by `loop validate`'s terminal-reachability analysis, so a machine that only reaches its terminal via routes will still be flagged as having no path to a terminal.
 
 On a retry, the whole stage runs again: fresh prompt render, fresh spawn, fresh session. Nothing from the failed attempt is carried into the next one except what is visible in the ledger digest.

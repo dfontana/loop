@@ -768,6 +768,85 @@ fn logs_empty_ledger_has_human_message_but_raw_is_empty() {
     );
 }
 
+/// A reader that walks away mid-write must kill the writer quietly. Rust sets
+/// `SIGPIPE` to `SIG_IGN` before `main`, so a closed stdout came back as `EPIPE`
+/// and surfaced two different ways: the `println!` commands panicked outright
+/// (`loop status | head -1` printed `failed printing to stdout: Broken pipe` and
+/// exited 101), while the ones writing through an `io::Result` reported
+/// `error: Broken pipe (os error 32)` and exited 1. Every listing here is
+/// documented as a pipeline's input (`loop sessions | fzf | awk`), so `main.rs`
+/// puts the default disposition back — and both shapes are checked, since one
+/// fix covers a `println!` and a bare write alike.
+///
+/// The output has to outlast the pipe buffer, or the writer finishes before the
+/// reader closes and no signal is ever raised — hence a ledger far bigger than
+/// the 64 KiB a pipe holds, and `-n` large enough to print all of it.
+#[cfg(unix)]
+#[test]
+fn a_closed_pipe_kills_the_writer_without_a_panic() {
+    use std::io::Read as _;
+    use std::os::unix::process::ExitStatusExt as _;
+    use std::process::Stdio;
+
+    let fx = unscripted();
+    fx.run(&["init", "TINY-1"]);
+    fx.write_ledger(&note_lines(8_000));
+    assert!(
+        std::fs::metadata(fx.project.join(".loop/ledger.jsonl"))
+            .unwrap()
+            .len()
+            > 64 * 1024,
+        "the writer has to still be writing when the reader goes away"
+    );
+
+    // `--raw` writes the ledger through an `io::Result`; the human tail is a
+    // `println!` per event, which is the path that used to panic.
+    for args in [&["logs", "--raw"][..], &["logs", "-n", "8000"][..]] {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_loop"))
+            .args(args)
+            .current_dir(&fx.project)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("failed to spawn loop");
+
+        // `| head -1`: take a little, then close the read end. `read_exact`
+        // rather than `read`, so this cannot pass on a short first chunk —
+        // the ledger is ~900 KiB, so 128 bytes are certainly there.
+        let mut first = [0u8; 128];
+        child
+            .stdout
+            .as_mut()
+            .unwrap()
+            .read_exact(&mut first)
+            .expect("the first bytes arrive before the pipe closes");
+        drop(child.stdout.take());
+
+        // Drained to EOF before `wait`, so a full stderr pipe cannot deadlock.
+        let mut stderr = String::new();
+        child
+            .stderr
+            .as_mut()
+            .unwrap()
+            .read_to_string(&mut stderr)
+            .unwrap();
+        let status = child.wait().unwrap();
+
+        assert_eq!(
+            stderr, "",
+            "a closed pipe is not an error to report ({args:?})"
+        );
+        // 13 is `SIGPIPE`. Killed by the signal, not exited: the status a shell
+        // reports as 141, and one that cannot be confused with the 0 that
+        // `loop run` reserves for a finished ticket.
+        assert_eq!(
+            status.signal(),
+            Some(13),
+            "expected death by SIGPIPE for {args:?}, got {status:?}"
+        );
+    }
+}
+
 #[test]
 fn logs_does_not_load_a_missing_or_invalid_machine() {
     let fx = unscripted();

@@ -109,26 +109,89 @@ impl Scaffold {
     /// The same, with `$TICKET` substituted — a plain text replacement, not the
     /// `$VAR` render engine a run uses.
     fn place_for(&mut self, path: &Path, content: &str, ticket: &str) -> Result<()> {
-        self.place(path, content.replace("$TICKET", ticket))
+        self.place(path, place_ticket(content, ticket))
     }
 
-    /// Copy one directory tree into another, never overwriting.
-    fn copy_tree(&mut self, from: &Path, to: &Path) -> Result<()> {
+    /// Copy one directory tree into another, never overwriting. Names in `skip`
+    /// are passed over at the **top level only** — they name what a run leaves
+    /// in `.loop/`, which is meaningful only at its root.
+    fn copy_tree(&mut self, from: &Path, to: &Path, skip: &[&str]) -> Result<()> {
         for entry in std::fs::read_dir(from)
             .with_context(|| format!("reading template directory {}", from.display()))?
         {
             let entry = entry?;
+            if skip.contains(&entry.file_name().to_string_lossy().as_ref()) {
+                continue;
+            }
             let src = entry.path();
             let dst = to.join(entry.file_name());
             if src.is_dir() {
                 std::fs::create_dir_all(&dst)?;
-                self.copy_tree(&src, &dst)?;
+                self.copy_tree(&src, &dst, &[])?;
             } else {
                 self.place_copy(&src, &dst)?;
             }
         }
         Ok(())
     }
+}
+
+/// What a *run* leaves in `.loop/`, as opposed to what defines the ticket.
+///
+/// `--from` is advertised as "a `.loop/` you already like" (README), and the
+/// one you like is a ticket you finished — so its ledger is there, and copying
+/// it made the new ticket start life owning a completed run: `loop run` refused
+/// with "already has a run", and `loop status` reported the *source* ticket's
+/// outcome. `init` documents that it "does not create `artifacts/`,
+/// `ledger.jsonl`, or `run/`" (docs/04-cli-reference.md); copying them was that
+/// promise being broken by the other branch.
+const RUN_ARTIFACTS: &[&str] = &["ledger.jsonl", "run", "artifacts"];
+
+/// Stamp this ticket's id onto a machine, whichever shape the source is in.
+///
+/// A bundled template still holds the literal `$TICKET`, so a text replacement
+/// is enough. A `--from` source produced by an earlier `loop init` does **not**:
+/// its own id was substituted in when it was created, and the replacement
+/// silently did nothing — leaving `:ticket "PROJ-1"` on ticket PROJ-99, which
+/// then named every session id, status line and recap header for the new run.
+/// So the value itself is rewritten when the placeholder is already gone.
+fn place_ticket(body: &str, ticket: &str) -> String {
+    if body.contains("$TICKET") {
+        return body.replace("$TICKET", ticket);
+    }
+    // Line-oriented, so that `:ticket` inside a comment cannot be mistaken for
+    // the key: the real one opens the machine table, as `{:ticket "..."` or
+    // `:ticket "..."`, and a Fennel comment starts with `;`.
+    let mut out = Vec::with_capacity(body.lines().count());
+    let mut done = false;
+    for line in body.lines() {
+        let code = line.trim_start().trim_start_matches('{');
+        match (done, code.starts_with(":ticket")) {
+            (false, true) => {
+                done = true;
+                out.push(replace_first_string(line, ticket));
+            }
+            _ => out.push(line.to_string()),
+        }
+    }
+    let mut joined = out.join("\n");
+    if body.ends_with('\n') {
+        joined.push('\n');
+    }
+    joined
+}
+
+/// Swap the contents of the first double-quoted string on `line`, leaving the
+/// indentation, the key and any trailing comment exactly where they were.
+fn replace_first_string(line: &str, value: &str) -> String {
+    let Some(open) = line.find('"') else {
+        return line.to_string();
+    };
+    let rest = &line[open + 1..];
+    let Some(close) = rest.find('"') else {
+        return line.to_string();
+    };
+    format!("{}{}{}", &line[..=open], value, &rest[close..])
 }
 
 pub fn init(paths: Paths, ticket: &str, from: Option<&Path>) -> Result<()> {
@@ -153,7 +216,7 @@ pub fn init(paths: Paths, ticket: &str, from: Option<&Path>) -> Result<()> {
             if !src.is_dir() {
                 bail!("--from {} is not a directory", src.display());
             }
-            sc.copy_tree(&src, &loop_dir)?;
+            sc.copy_tree(&src, &loop_dir, RUN_ARTIFACTS)?;
             if !machine_file.exists() {
                 bail!(
                     "{} has no machine.fnl — --from wants a directory shaped like .loop/",
@@ -162,7 +225,7 @@ pub fn init(paths: Paths, ticket: &str, from: Option<&Path>) -> Result<()> {
             }
             // The template's own ticket id is whoever's it was; this one is ours.
             let body = std::fs::read_to_string(&machine_file)?;
-            std::fs::write(&machine_file, body.replace("$TICKET", ticket))?;
+            std::fs::write(&machine_file, place_ticket(&body, ticket))?;
         }
         None => {
             sc.place_for(&machine_file, STANDARD_TICKET, ticket)?;
@@ -809,7 +872,7 @@ mod tests {
         std::fs::write(src.join("machine.fnl"), "{}").unwrap();
 
         let mut sc = Scaffold::default();
-        sc.copy_tree(&src, &dst).unwrap();
+        sc.copy_tree(&src, &dst, &[]).unwrap();
 
         let copied = dst.join("skills/build/build.sh");
         assert_eq!(
@@ -835,7 +898,7 @@ mod tests {
         std::fs::write(dst.join("task.md"), "mine, already here").unwrap();
 
         let mut sc = Scaffold::default();
-        sc.copy_tree(&src, &dst).unwrap();
+        sc.copy_tree(&src, &dst, &[]).unwrap();
 
         assert_eq!(
             std::fs::read_to_string(dst.join("task.md")).unwrap(),
@@ -845,5 +908,87 @@ mod tests {
             sc.created.is_empty(),
             "nothing landed, so nothing is claimed"
         );
+    }
+
+    /// The workflow the README advertises — `--from` a `.loop/` you already
+    /// like — hands over a directory belonging to a ticket you *finished*. Its
+    /// ledger must not come along: `loop run` refuses to start on a ledger that
+    /// already holds a run, so copying it made the new ticket dead on arrival,
+    /// and `loop status` answered for the source ticket instead.
+    #[test]
+    fn from_a_finished_ticket_leaves_the_run_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        let (src, dst) = (dir.path().join("src"), dir.path().join("proj"));
+        std::fs::create_dir_all(src.join("stage-prompts")).unwrap();
+        std::fs::create_dir_all(src.join("run")).unwrap();
+        std::fs::create_dir_all(src.join("artifacts")).unwrap();
+        std::fs::write(src.join("machine.fnl"), "{:ticket \"PROJ-1\"}\n").unwrap();
+        std::fs::write(src.join("stage-prompts/implement.md"), "do it").unwrap();
+        std::fs::write(src.join("ledger.jsonl"), "{\"type\":\"run_started\"}\n").unwrap();
+        std::fs::write(src.join("run/implement.md"), "rendered").unwrap();
+        std::fs::write(src.join("artifacts/diff.patch"), "a diff").unwrap();
+
+        init(Paths::new(&dst), "PROJ-99", Some(&src)).unwrap();
+
+        let loop_dir = dst.join(".loop");
+        assert!(!loop_dir.join("ledger.jsonl").exists(), "no stale ledger");
+        assert!(!loop_dir.join("run").exists(), "no rendered prompts");
+        assert!(!loop_dir.join("artifacts").exists(), "no stale artifacts");
+        // What does define the ticket still crosses over.
+        assert_eq!(
+            std::fs::read_to_string(loop_dir.join("stage-prompts/implement.md")).unwrap(),
+            "do it"
+        );
+    }
+
+    /// A `--from` source produced by an earlier `init` has no `$TICKET` left in
+    /// it, so the substitution silently did nothing and the new ticket inherited
+    /// the old id — in `:ticket`, and from there in every session id, status
+    /// line and recap header the run went on to write.
+    #[test]
+    fn from_an_initialized_source_takes_the_new_ticket_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let (src, dst) = (dir.path().join("src"), dir.path().join("proj"));
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(
+            src.join("machine.fnl"),
+            ";; a machine for :ticket handling\n{:ticket \"PROJ-1\" ; the old one\n :entry \"a\"}\n",
+        )
+        .unwrap();
+
+        init(Paths::new(&dst), "PROJ-99", Some(&src)).unwrap();
+
+        let body = std::fs::read_to_string(dst.join(".loop/machine.fnl")).unwrap();
+        assert!(body.contains("{:ticket \"PROJ-99\""), "rewritten: {body}");
+        assert!(!body.contains("PROJ-1\""), "no trace of the source: {body}");
+        // The rest of the line, and the rest of the file, are untouched.
+        assert!(body.contains("; the old one"), "comment kept: {body}");
+        assert!(
+            body.starts_with(";; a machine for :ticket handling\n"),
+            "a comment mentioning the key is not the key: {body}"
+        );
+    }
+
+    /// The other source shape: a hand-written template that still says
+    /// `$TICKET`. That path worked before and has to keep working.
+    #[test]
+    fn a_template_placeholder_is_still_substituted() {
+        assert_eq!(
+            place_ticket("{:ticket \"$TICKET\" :task \"$TICKET.md\"}", "PROJ-7"),
+            "{:ticket \"PROJ-7\" :task \"PROJ-7.md\"}"
+        );
+    }
+
+    /// Only the first `:ticket` is the machine's, and a file with none is left
+    /// alone rather than guessed at — the schema rejects it downstream, which is
+    /// a better error than a silent edit.
+    #[test]
+    fn place_ticket_touches_only_the_key_and_nothing_else() {
+        assert_eq!(
+            place_ticket("{:ticket \"a\"\n :states {:x {:ticket-ish \"b\"}}}", "N"),
+            "{:ticket \"N\"\n :states {:x {:ticket-ish \"b\"}}}"
+        );
+        assert_eq!(place_ticket("{:entry \"a\"}\n", "N"), "{:entry \"a\"}\n");
+        assert_eq!(place_ticket("", "N"), "");
     }
 }

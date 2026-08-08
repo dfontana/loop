@@ -46,7 +46,7 @@ One scaffold phase, into `<project>/.loop/`. Every file is written with a _write
 | `stage-prompts/open-pr.md`         | bundled                       |
 | `stage-prompts/debug-transient.md` | bundled                       |
 
-**With `--from <DIR>`**, the whole tree under `<DIR>` is copied in instead, recursively, never overwriting. A leading `~/` is expanded. Two failures are specific to this path:
+**With `--from <DIR>`**, the tree under `<DIR>` is copied in instead, recursively, never overwriting. A leading `~/` is expanded. Three names at the top level of `<DIR>` are **skipped**, because they are what a _run_ leaves behind rather than part of the ticket: `ledger.jsonl`, `run/`, and `artifacts/`. The directory you reuse is normally one whose ticket you finished, so it has all three; carrying the ledger over would hand the new ticket a completed run, and `loop run` would refuse to start on it. Two failures are specific to this path:
 
 ```
 --from <DIR> is not a directory
@@ -65,9 +65,11 @@ Either way, `init` then writes:
 
 Each file actually created prints `  created <path>`.
 
-`machine.fnl`, `task.md`, and `plan.md` get a plain `str::replace("$TICKET", <ticket>)` — a literal text substitution, **not** the `$VAR` render engine used at runtime. No other placeholder is expanded at init time. Under `--from`, only `machine.fnl` is rewritten this way, since a `task.md` copied from the source is left exactly as it was.
+`machine.fnl`, `task.md`, and `plan.md` get this ticket's id stamped on them — a literal text substitution, **not** the `$VAR` render engine used at runtime. No other placeholder is expanded at init time. Under `--from`, only `machine.fnl` is rewritten, since a `task.md` copied from the source is left exactly as it was.
 
-`init` does **not** create `artifacts/`, `ledger.jsonl`, or `run/` — those appear when something needs them.
+The stamp handles both shapes a source comes in. A bundled template still contains the literal `$TICKET`, which is replaced. A `--from` source produced by an earlier `loop init` does not — its own id was substituted in when it was created — so the **value** of the first `:ticket` key is rewritten in place instead. Without that, `loop init PROJ-99 --from` a finished PROJ-1 ticket would leave `:ticket "PROJ-1"` in the machine, and PROJ-1 would then name every session id, status line, and recap header the new run wrote. The match is line-oriented and takes the first line whose code opens with `:ticket`, so the key cannot be confused with a comment that mentions it; a machine with no `:ticket` at all is left untouched and fails to load downstream, which is the better error.
+
+`init` does **not** create `artifacts/`, `ledger.jsonl`, or `run/` — those appear when something needs them. That holds under `--from` too, which is why those three are skipped by the copy.
 
 Closing output:
 
@@ -170,7 +172,7 @@ Sections, in order:
 | header | ticket, state / transition / loop counts |
 | — | source path, entry, terminals, escalation state, effective budgets, Judge and Navigator models with the invocation cap |
 | `context` | task and plan line/char counts with their first line, and the QA case ids |
-| `states` | every state: description, resolved stage prompt name and path, resolved `provider/model:thinking`, effective skills with resolved paths, effective MCP names, reachable states, then each outgoing edge with its check command, timeout, criteria, `:on-fail` action, and backoff |
+| `states` | every state: description, resolved stage prompt name and path, resolved `provider/model:thinking`, effective skills with resolved paths, effective MCP names, reachable states, then each outgoing edge with its check command, timeout, criteria, `:on-fail` action, `:max-attempts` (on retry edges only, where it can bite), and backoff |
 | `loops` | each loop's head, member states, `:max-cycles`, and exhaustion behavior |
 | `validation` | the diagnostics, or `no problems found` |
 
@@ -674,13 +676,16 @@ That is the whole list. There is no `LOOP_CONFIG_DIR`, no `LOOP_STATE_DIR`, and 
 
 ## Exit codes
 
-| Code | Meaning                                    |
-| ---- | ------------------------------------------ |
-| 0    | Success.                                   |
-| 1    | Runtime or application error.              |
-| 2    | Command-line usage error reported by clap. |
+| Code | Meaning                                                       |
+| ---- | ------------------------------------------------------------- |
+| 0    | Success.                                                      |
+| 1    | Runtime or application error.                                 |
+| 2    | Command-line usage error reported by clap.                    |
+| 141  | Killed by `SIGPIPE` — the thing reading its stdout went away. |
 
 Runtime errors are caught by `main`, which prints `error: {e:#}` to stderr and exits 1. Clap handles invalid commands, flags, and arguments before `main` and exits 2. The `{e:#}` form prints the full context chain, so a runtime failure surfaces as `error: outer: inner: root cause`.
+
+**A closed pipe is not an error.** `main` restores `SIGPIPE` to its default disposition, which Rust's runtime otherwise ignores, so `loop sessions | head -3` ends the way `cat` or `grep` would: the writer is killed by the signal, silently, and a shell reports `128 + 13 = 141`. Nothing is printed to stderr, and the code is deliberately not 0 — `loop run` reserves that for a `Done` outcome, and a run whose stdout disappeared has not finished a ticket. Such a run stays resumable from its ledger, the same as any other death mid-stage.
 
 Per command:
 

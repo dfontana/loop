@@ -101,11 +101,40 @@ enum Command {
 }
 
 fn main() {
+    restore_sigpipe();
     if let Err(e) = try_main() {
         eprintln!("error: {e:#}");
         std::process::exit(1);
     }
 }
+
+/// Die on a closed pipe, the way every other Unix filter does.
+///
+/// Rust's runtime sets `SIGPIPE` to `SIG_IGN` before `main` runs, so a write to
+/// a closed stdout comes back as `EPIPE` — and `println!`, which has nowhere to
+/// report an error, panics. `loop status | head -1` printed a panic and exited
+/// 101. Every listing here is documented as a pipeline's input (`loop sessions |
+/// fzf | awk '{print $6}'`), so the default disposition is the one this wants.
+///
+/// `SIG_DFL` rather than catching `EPIPE` and returning quietly, because the
+/// exit status is load-bearing: 0 means the outcome was `Done`, and a `loop run`
+/// whose stdout went away has not finished a ticket. Dying by the signal reports
+/// 141 through the shell and cannot be mistaken for success. The abandoned run
+/// stays resumable from its ledger, like any other death mid-stage.
+#[cfg(unix)]
+fn restore_sigpipe() {
+    // SAFETY: setting a signal to `SIG_DFL` is async-signal-safe, and this is
+    // the first thing `main` does — no thread has been spawned, and nothing has
+    // been written yet.
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
+}
+
+/// Nothing to undo: `SIGPIPE` is a POSIX signal, and a closed pipe surfaces as
+/// an ordinary write error on Windows.
+#[cfg(not(unix))]
+fn restore_sigpipe() {}
 
 fn try_main() -> anyhow::Result<()> {
     let cli = Cli::parse();

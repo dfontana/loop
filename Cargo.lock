@@ -413,6 +413,7 @@ dependencies = [
  "chrono",
  "clap",
  "hex",
+ "libc",
  "loop",
  "mlua",
  "serde",
